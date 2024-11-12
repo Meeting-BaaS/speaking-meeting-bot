@@ -11,6 +11,7 @@ packages = [{include = "meetingbaas-pipecat"}]
 bot = "meetingbaas-pipecat.bot.bot:start"
 proxy = "meetingbaas-pipecat.proxy.proxy:start"
 meetingbaas = "scripts.meetingbaas:main"
+parallel = "scripts.parallel:main"
 
 [tool.poetry.dependencies]
 python = "^3.11"

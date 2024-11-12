@@ -1,15 +1,20 @@
 import asyncio
 import sys
+
 import websockets
-import protobufs.frames_pb2 as frames_pb2
 from google.protobuf.message import EncodeError
-from websockets.exceptions import ConnectionClosedError
 from loguru import logger
+from websockets.exceptions import ConnectionClosedError
+
+import protobufs.frames_pb2 as frames_pb2
+
 from .runner import configure
 
 # Setup Loguru logger
 logger.remove()
-logger.add(sys.stderr, level="INFO")
+logger.add(sys.stdout, level="INFO")
+logger.add(sys.stdout, level="DEBUG")
+logger.add(sys.stderr, level="WARNING")
 
 
 async def handle_pipecat_messages(pipecat_ws, client_ws):
@@ -102,6 +107,7 @@ def start():
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Server shutdown complete.")
+
 
 if __name__ == "__main__":
     start()

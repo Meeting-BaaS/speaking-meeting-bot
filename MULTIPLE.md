@@ -4,14 +4,15 @@ This document provides step-by-step instructions on how to set up and run a Spea
 
 ## Prerequisites
 
-- Python 3.x installed
-- `grpc_tools` for handling gRPC protobuf files
-- Ngrok for exposing your local server to the internet
-- Poetry for managing dependencies
+-   Python 3.x installed
+-   `grpc_tools` for handling gRPC protobuf files
+-   Ngrok for exposing your local server to the internet
+-   Poetry for managing dependencies
 
 ## Getting Started
 
 ### Step 1: Set Up the Virtual Environment
+
 To begin, you need to set up the Python environment using Poetry and install the required dependencies.
 
 ```bash
@@ -30,6 +31,7 @@ poetry shell
 ```
 
 ### Step 2: Compile Protocol Buffers
+
 To enable communication with MeetingBaas's API, you need to compile the `frames.proto` file with `grpc_tools`.
 
 ```bash
@@ -38,6 +40,7 @@ poetry run python -m grpc_tools.protoc --proto_path=./protobufs --python_out=./p
 ```
 
 ### Step 3: Set Up Environment Variables
+
 You need to provide the necessary credentials for MeetingBaas's API.
 
 ```bash
@@ -52,52 +55,68 @@ Open the `.env` file and update it with your MeetingBaas credentials.
 Once your setup is complete, follow these steps to run multiple instances of the bot and connect each to an online meeting.
 
 ### Step 1: Run the Bot with Parallel Instances
-To create two simultaneous bot instances, use the following command to run the parallel script:
+
+The bot runs with 2 instances by default and shows important activity:
 
 ```bash
-poetry run python scripts/parallel.py -c 2
+poetry run python scripts/parallel.py
 ```
 
-This will initiate two instances of the bot. In this setup, each bot instance will require a unique public URL from ngrok, which we will set up in the next steps.
+By default, you will see:
 
-### Step 2: Set Up Ngrok for Each Bot Instance
-To allow MeetingBaas to communicate with both bots, you need to expose two local servers on different ngrok URLs. Open terminal to run this command:
+-   Active speaker changes ("X is speaking")
+-   Speech transcripts
+-   Any warnings or errors
 
+For complete debug output including all process information:
+
+```bash
+poetry run python scripts/parallel.py --verbose
 ```
-ngrok start --all --config ~/.config/ngrok/ngrok.yml,./config/ngrok/config.yml
+
+To run with a different number of instances:
+
+```bash
+poetry run python scripts/parallel.py -c <number_of_instances>
 ```
 
-Each of these URLs can now be used to communicate with the respective bot instance via MeetingBaas.
+Additional options:
 
-### Step 3: Start the MeetingBaas Bot in Multiple Terminals
-Now, you need to start `meetingbaas` for each bot instance, pointing each one to its unique ngrok URL and meeting session URL. Open two additional terminals and run the following commands:
+```bash
+poetry run python scripts/parallel.py --help
+```
 
-1. **In Terminal 3**:
-   ```bash
-   poetry run meetingbaas --url <ngrok-url-instance-1> --meeting-url <meeting-url-1>
-   ```
-   Replace `<ngrok-url-instance-1>` with the public URL from ngrok for the first bot and `<meeting-url-1>` with the meeting URL for the first session.
+The logging system will:
 
-2. **In Terminal 4**:
-   ```bash
-   poetry run meetingbaas --url <ngrok-url-instance-2> --meeting-url <meeting-url-2>
-   ```
-   Replace `<ngrok-url-instance-2>` with the public URL for the second bot and `<meeting-url-2>` with the meeting URL for the second session.
+1. Always show:
+    - Active speaker changes
+    - Speech transcripts
+    - Warnings and errors
+2. Show additional process information with --verbose flag
 
-With these commands, each bot instance should now be connected to its respective meeting.
+Each instance will automatically:
+
+-   Run its own bot process
+-   Create a dedicated proxy
+-   Set up a unique ngrok tunnel
+-   Connect to its assigned meeting URL
+
+When prompted, enter the meeting URL and the bots will automatically join with their assigned roles.
 
 ## Troubleshooting Tips
-- Ensure that you have activated the Poetry environment before running any Python commands.
-- If Ngrok is not running properly, check for any firewall issues that may be blocking its communication.
-- Double-check the `.env` file to make sure all necessary credentials are correctly filled in.
-- Ensure each instance has a unique ngrok URL and meeting session to avoid conflicts.
+
+-   Ensure that you have activated the Poetry environment before running any Python commands.
+-   If Ngrok is not running properly, check for any firewall issues that may be blocking its communication.
+-   Double-check the `.env` file to make sure all necessary credentials are correctly filled in.
+-   Ensure each instance has a unique ngrok URL and meeting session to avoid conflicts.
 
 ## Additional Information
-- MeetingBaas allows integration with external bots using APIs that leverage `WebsocketServerTransport` for real-time communication.
-- For more details on the MeetingBaas APIs and functionalities, please refer to the official MeetingBaas documentation.
+
+-   MeetingBaas allows integration with external bots using APIs that leverage `WebsocketServerTransport` for real-time communication.
+-   For more details on the MeetingBaas APIs and functionalities, please refer to the official MeetingBaas documentation.
 
 ## Example Usage
+
 After setting up everything, the bot will actively join the meeting and communicate using the MeetingBaas WebSocket API. You can test different bot behaviors by modifying the `meetingbaas.py` script to suit your meeting requirements.
 
 Happy meeting automation!
-

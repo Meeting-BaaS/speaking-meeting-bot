@@ -22,12 +22,20 @@ async def configure(
         required=False,
         help="Cartesia voice ID for text-to-speech conversion",
     )
+    parser.add_argument(
+        "--theme",
+        type=str,
+        default="general conversation, while being quirky, to the point and hating small talk and bureaucracy. Straight to the point.",
+        required=False,
+        help="The theme or topic the bot specializes in",
+    )
 
     args, unknown = parser.parse_known_args()
+    theme = args.theme or os.getenv("MEETINGBAAS_THEME", "general conversation")
     system_prompt = (
         args.system_prompt
-        or """\
-You are a helpful assistant who converses with a user and answers questions. Respond concisely to general questions.
+        or f"""\
+You are a helpful assistant who specializes in {theme}. Respond concisely to questions.
 
 You are currently in a meeting as a meeting bot, and your response will be turned into speech so use only simple words and punctuation.
 

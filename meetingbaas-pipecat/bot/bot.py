@@ -1,8 +1,13 @@
 import asyncio
 import os
 import sys
-from loguru import logger
+from datetime import datetime
+
+import aiohttp
+import pytz
 from dotenv import load_dotenv
+from loguru import logger
+from openai.types.chat import ChatCompletionToolParam
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import LLMMessagesFrame
 from pipecat.pipeline.pipeline import Pipeline
@@ -17,18 +22,14 @@ from pipecat.transports.network.websocket_server import (
     WebsocketServerTransport,
 )
 
-from openai.types.chat import ChatCompletionToolParam
-
 from .runner import configure
-
-import aiohttp
-from datetime import datetime
-import pytz
 
 load_dotenv(override=True)
 
 logger.remove(0)
-logger.add(sys.stderr, level="DEBUG")
+logger.add(sys.stdout, level="INFO")
+logger.add(sys.stdout, level="DEBUG")
+logger.add(sys.stderr, level="WARNING")
 
 
 async def get_weather(
@@ -36,7 +37,9 @@ async def get_weather(
 ):
     location = arguments["location"]
     format = arguments["format"]  # Default to Celsius if not specified
-    unit = "m" if format == "celsius" else "u"  # "m" for metric, "u" for imperial in wttr.in
+    unit = (
+        "m" if format == "celsius" else "u"
+    )  # "m" for metric, "u" for imperial in wttr.in
 
     url = f"https://wttr.in/{location}?format=%t+%C&{unit}"
 
@@ -82,8 +85,8 @@ async def main():
             add_wav_header=False,
             vad_enabled=True,
             vad_analyzer=SileroVADAnalyzer(),
-            vad_audio_passthrough=True
-        )
+            vad_audio_passthrough=True,
+        ),
     )
 
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4o-mini")

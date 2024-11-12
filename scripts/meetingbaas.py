@@ -1,20 +1,23 @@
-import requests
-import os
-import uuid
-import time
-import signal
 import argparse
+import os
+import signal
+import time
+import uuid
+
+import requests
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 API_KEY = os.getenv("MEETING_BAAS_API_KEY")
 
+
 def validate_url(url):
     """Validates the URL format, ensuring it starts with https://"""
     if not url.startswith("https://"):
         raise ValueError("URL must start with https://")
     return url
+
 
 def get_user_input(prompt, validator=None):
     while True:
@@ -27,21 +30,24 @@ def get_user_input(prompt, validator=None):
         else:
             return user_input
 
-def create_bot(meeting_url, ngrok_wss, bot_name, bot_image):
+
+def create_bot(meeting_url, ngrok_wss, bot_name, bot_image, theme):
     url = "https://api.meetingbaas.com/bots"
     headers = {
         "Content-Type": "application/json",
         "x-meeting-baas-api-key": API_KEY,
     }
 
-    deduplication_key = str(uuid.uuid4())
+    # Use bot name as part of deduplication key to prevent duplicates
+    deduplication_key = f"{bot_name}-{meeting_url}"
+
     config = {
         "meeting_url": meeting_url,
         "bot_name": bot_name,
         "recording_mode": "speaker_view",
         "bot_image": bot_image,
-        "entry_message": "I'm ready, you can talk to start chatting!",
-        "reserved": False,
+        "entry_message": f"Hi, I'm {bot_name}! Created with https://meetingbaas.com - I'm ready to chat about {theme}!",
+        "reserved": True,
         "speech_to_text": {"provider": "Default"},
         "automatic_leave": {"waiting_room_timeout": 600},
         "deduplication_key": deduplication_key,
@@ -54,6 +60,7 @@ def create_bot(meeting_url, ngrok_wss, bot_name, bot_image):
     else:
         raise Exception(f"Failed to create bot: {response.json()}")
 
+
 def delete_bot(bot_id):
     delete_url = f"https://api.meetingbaas.com/bots/{bot_id}"
     headers = {
@@ -64,6 +71,7 @@ def delete_bot(bot_id):
 
     if response.status_code != 200:
         raise Exception(f"Failed to delete bot: {response.json()}")
+
 
 class BotManager:
     def __init__(self, args):
@@ -85,9 +93,13 @@ class BotManager:
 
     def get_or_update_urls(self):
         if not self.args.meeting_url:
-            self.args.meeting_url = get_user_input("Enter the meeting URL (must start with https://): ", validate_url)
+            self.args.meeting_url = get_user_input(
+                "Enter the meeting URL (must start with https://): ", validate_url
+            )
         if not self.args.ngrok_url:
-            self.args.ngrok_url = get_user_input("Enter the ngrok URL (must start with https://): ", validate_url)
+            self.args.ngrok_url = get_user_input(
+                "Enter the ngrok URL (must start with https://): ", validate_url
+            )
         self.args.ngrok_wss = "wss://" + self.args.ngrok_url[8:]
 
     def create_and_manage_bot(self):
@@ -95,7 +107,8 @@ class BotManager:
             self.args.meeting_url,
             self.args.ngrok_wss,
             self.args.bot_name,
-            self.args.bot_image
+            self.args.bot_image,
+            self.args.theme,
         )
         print(f"Bot created successfully with bot_id: {self.current_bot_id}")
 
@@ -106,7 +119,7 @@ class BotManager:
 
         self.delete_current_bot()
 
-        if user_choice == 'n':
+        if user_choice == "n":
             self.args.meeting_url = None
             self.args.ngrok_url = None
 
@@ -126,17 +139,39 @@ class BotManager:
         print("Bot cleaned up. Exiting...")
         exit(0)
 
+
 def main():
     parser = argparse.ArgumentParser(description="Meeting BaaS Bot")
-    parser.add_argument("--meeting-url", help="The meeting URL (must start with https://)")
+    parser.add_argument(
+        "--meeting-url", help="The meeting URL (must start with https://)"
+    )
     parser.add_argument("--ngrok-url", help="The ngrok URL (must start with https://)")
-    parser.add_argument("--bot-name", default="Speaking MeetingBaas Bot", help="The name of the bot which is going to join the meeting.")
-    parser.add_argument("--bot-image", default="https://utfs.io/f/N2K2zOxB65Cx6UOeGHsoI9OHcetbNxLZB2ErqhAzDfFlMXYK", help="The image of the bot which is going to join the meeting.")
+    parser.add_argument(
+        "--bot-name",
+        default="Speaking MeetingBaas Bot",
+        help="The name of the bot which is going to join the meeting.",
+    )
+    parser.add_argument(
+        "--bot-image",
+        default="https://utfs.io/f/animal-1",
+        help="The image of the bot which is going to join the meeting.",
+    )
+    parser.add_argument(
+        "--system-prompt",
+        help="System prompt for the bot's personality",
+        default=os.getenv("MEETINGBAAS_SYSTEM_PROMPT", "You are a helpful assistant."),
+    )
+    parser.add_argument(
+        "--theme",
+        default="general conversation",
+        help="The theme or topic the bot specializes in",
+    )
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     args = parser.parse_args()
-
     bot_manager = BotManager(args)
     bot_manager.run()
+
 
 if __name__ == "__main__":
     main()
