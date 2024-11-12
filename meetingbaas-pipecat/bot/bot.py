@@ -73,6 +73,10 @@ async def get_time(
         )
 
 
+async def log_transcript(text, source="HUMAN"):
+    logger.info(f"TRANSCRIPT [{source}]: {text}")
+
+
 async def main():
     (host, port, system_prompt, voice_id, args) = await configure()
 
@@ -144,6 +148,29 @@ async def main():
         voice_id=voice_id,
         sample_rate=16000,
     )
+    logger.debug(f"Initialized CartesiaTTSService with voice_id: {voice_id}")
+
+    async def tts_debug_callback(event_type, data):
+        logger.debug(f"TTS Event: {event_type}")
+        if event_type == "audio_chunk":
+            logger.debug(f"Audio chunk size: {len(data)} bytes")
+        elif event_type == "error":
+            logger.error(f"TTS Error: {data}")
+
+    tts.add_event_callback(tts_debug_callback)
+
+    async def test_tts():
+        try:
+            logger.info("Testing TTS generation...")
+            test_audio = await tts.synthesize("This is a test message.")
+            logger.info(
+                f"Successfully generated test TTS audio: {len(test_audio)} bytes"
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate test TTS: {e}")
+            logger.exception(e)
+
+    await test_tts()
 
     messages = [
         {
@@ -155,6 +182,27 @@ async def main():
     context = OpenAILLMContext(messages, tools)
     context_aggregator = llm.create_context_aggregator(context)
 
+    # Verify critical environment variables
+    critical_vars = {
+        "CARTESIA_API_KEY": os.getenv("CARTESIA_API_KEY"),
+        "CARTESIA_VOICE_ID": os.getenv("CARTESIA_VOICE_ID"),
+        "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
+        "DEEPGRAM_API_KEY": os.getenv("DEEPGRAM_API_KEY"),
+    }
+
+    for var_name, value in critical_vars.items():
+        if not value:
+            logger.error(f"Missing critical environment variable: {var_name}")
+        else:
+            logger.debug(f"Found {var_name}: {value[:4]}...{value[-4:]}")
+
+    async def pipeline_debug(event_type, data):
+        logger.debug(f"Pipeline Event: {event_type}")
+        if event_type == "frame_processed":
+            logger.debug(f"Frame processed: {type(data)}")
+        elif event_type == "error":
+            logger.error(f"Pipeline Error: {data}")
+
     pipeline = Pipeline(
         [
             transport.input(),
@@ -164,7 +212,8 @@ async def main():
             tts,
             transport.output(),
             context_aggregator.assistant(),
-        ]
+        ],
+        debug_callback=pipeline_debug,
     )
 
     task = PipelineTask(pipeline, params=PipelineParams(allow_interruptions=True))

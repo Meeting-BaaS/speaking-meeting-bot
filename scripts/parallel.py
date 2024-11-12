@@ -18,6 +18,7 @@ import ngrok
 from dotenv import load_dotenv
 from loguru import logger
 
+from config.bot_pairs import BOT_PAIRS
 from scripts.meetingbaas import create_bot, delete_bot
 
 load_dotenv(override=True)
@@ -44,22 +45,18 @@ class ProcessLogger:
             for line in stream:
                 line = line.strip()
                 if line:
-                    # Log speaker changes, transcripts, and bot responses
-                    if 'isSpeaking":true' in line:
-                        speaker_name = line.split('"name":"')[1].split('"')[0]
-                        logger.info(f"[{self.process_name}] {speaker_name} is speaking")
-                    elif "transcript" in line.lower():
-                        # Extract and log the transcript
-                        transcript = (
-                            line.split("transcript: ")[1]
-                            if "transcript: " in line
-                            else line
+                    # Log raw line at debug level
+                    logger.debug(f"[{self.process_name}] RAW: {line}")
+
+                    # Look for specific patterns
+                    if "TRANSCRIPT [HUMAN]:" in line:
+                        transcript = line.split("TRANSCRIPT [HUMAN]:")[1].strip()
+                        logger.info(f"[{self.process_name}] Human said: {transcript}")
+                    elif "TRANSCRIPT [BOT]:" in line:
+                        transcript = line.split("TRANSCRIPT [BOT]:")[1].strip()
+                        logger.info(
+                            f"[{self.process_name}] Bot responded: {transcript}"
                         )
-                        logger.info(f"[{self.process_name}] Transcript: {transcript}")
-                    elif "bot response:" in line.lower():
-                        # Extract and log bot responses
-                        response = line.split("bot response:")[1].strip()
-                        logger.info(f"[{self.process_name}] Bot says: {response}")
                     elif "ERROR" in line or "CRITICAL" in line:
                         logger.error(f"[{self.process_name}] {line}")
                     elif "WARNING" in line:
@@ -89,130 +86,7 @@ class BotProxyManager:
         self.processes = {}
         self.listeners = []
         self.start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        # Bot pairs configuration with themes
-        self.bot_pairs = [
-            {
-                "theme": "Bangkok Street Market",
-                "bots": [
-                    {
-                        "name": "Souvenir Sage",
-                        "image": "https://utfs.io/f/market-1",
-                        "description": "Charismatic Bangkok souvenir seller with 30 years of stories",
-                    },
-                    {
-                        "name": "Curious Tourist",
-                        "image": "https://utfs.io/f/tourist-1",
-                        "description": "First-time visitor to Thailand seeking authentic experiences",
-                    },
-                ],
-            },
-            {
-                "theme": "Kazakh Farm Life",
-                "bots": [
-                    {
-                        "name": "Steppe Shepherd",
-                        "image": "https://utfs.io/f/farmer-1",
-                        "description": "Traditional Kazakh horse breeder and dairy farmer",
-                    },
-                    {
-                        "name": "City Journalist",
-                        "image": "https://utfs.io/f/journalist-1",
-                        "description": "Urban reporter documenting rural traditions",
-                    },
-                ],
-            },
-            {
-                "theme": "Vintage Cocktail Bar",
-                "bots": [
-                    {
-                        "name": "Mixology Master",
-                        "image": "https://utfs.io/f/bartender-1",
-                        "description": "Third-generation bartender with secret family recipes",
-                    },
-                    {
-                        "name": "Jazz Enthusiast",
-                        "image": "https://utfs.io/f/patron-1",
-                        "description": "Regular customer with stories from the golden age of jazz",
-                    },
-                ],
-            },
-            {
-                "theme": "Space Station",
-                "bots": [
-                    {
-                        "name": "Orbital Engineer",
-                        "image": "https://utfs.io/f/astronaut-1",
-                        "description": "ISS maintenance specialist with 3000 days in space",
-                    },
-                    {
-                        "name": "Space Tourist",
-                        "image": "https://utfs.io/f/tourist-2",
-                        "description": "Wealthy adventurer on their first space vacation",
-                    },
-                ],
-            },
-            {
-                "theme": "Ancient Library",
-                "bots": [
-                    {
-                        "name": "Scroll Keeper",
-                        "image": "https://utfs.io/f/librarian-1",
-                        "description": "Mysterious librarian guarding ancient manuscripts",
-                    },
-                    {
-                        "name": "Digital Archivist",
-                        "image": "https://utfs.io/f/tech-1",
-                        "description": "Modern preservationist bridging past and future",
-                    },
-                ],
-            },
-            {
-                "theme": "Desert Expedition",
-                "bots": [
-                    {
-                        "name": "Bedouin Guide",
-                        "image": "https://utfs.io/f/guide-1",
-                        "description": "Expert navigator of the Sahara's hidden oases",
-                    },
-                    {
-                        "name": "Climate Researcher",
-                        "image": "https://utfs.io/f/scientist-1",
-                        "description": "Scientist studying desert ecosystem adaptation",
-                    },
-                ],
-            },
-            {
-                "theme": "Himalayan Monastery",
-                "bots": [
-                    {
-                        "name": "Mountain Monk",
-                        "image": "https://utfs.io/f/monk-1",
-                        "description": "Meditation master at 15,000 feet elevation",
-                    },
-                    {
-                        "name": "Western Seeker",
-                        "image": "https://utfs.io/f/student-1",
-                        "description": "Former CEO seeking life's deeper meaning",
-                    },
-                ],
-            },
-            {
-                "theme": "Underground Jazz Club",
-                "bots": [
-                    {
-                        "name": "Blues Legend",
-                        "image": "https://utfs.io/f/musician-1",
-                        "description": "Saxophone virtuoso with 50 years of blues history",
-                    },
-                    {
-                        "name": "Music Critic",
-                        "image": "https://utfs.io/f/critic-1",
-                        "description": "Passionate reviewer discovering authentic jazz",
-                    },
-                ],
-            },
-        ]
+        self.bot_pairs = BOT_PAIRS
 
     def run_command(self, command_args, process_name, env=None):
         """Run a command with args and show its output in real-time"""
@@ -415,7 +289,7 @@ class BotProxyManager:
             logger.remove()
             logger.add(
                 sys.stderr,
-                level="INFO",
+                level="DEBUG",
                 filter=lambda record: (
                     "is speaking" in record["message"]
                     or "transcript" in record["message"]
@@ -568,7 +442,7 @@ CRITICAL GUIDELINES:
                     continue
 
                 # Wait for proxy to be ready and verify it's running
-                time.sleep(2)
+                time.sleep(5)
                 if proxy_process.poll() is not None:
                     logger.error(f"Proxy {proxy_name} failed to start properly")
                     continue

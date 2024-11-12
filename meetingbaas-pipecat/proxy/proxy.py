@@ -40,15 +40,27 @@ async def handle_pipecat_messages(pipecat_ws, client_ws):
 async def forward_audio(websocket, websocket_url, sample_rate, channels):
     try:
         async with websockets.connect(websocket_url) as pipecat_ws:
-            logger.debug("Connected to Pipecat WebSocket")
+            logger.debug(f"Connected to Pipecat WebSocket at {websocket_url}")
+            logger.debug(f"Audio config: {sample_rate}Hz, {channels} channels")
 
-            pipecat_handler = asyncio.create_task(
-                handle_pipecat_messages(pipecat_ws, websocket)
-            )
+            # Add counter for monitoring
+            audio_chunks_sent = 0
+            audio_chunks_received = 0
+
+            async def log_stats():
+                while True:
+                    logger.debug(
+                        f"Audio stats - Sent: {audio_chunks_sent}, Received: {audio_chunks_received}"
+                    )
+                    await asyncio.sleep(5)  # Log every 5 seconds
+
+            stats_task = asyncio.create_task(log_stats())
 
             try:
                 async for message in websocket:
                     if isinstance(message, bytes):
+                        audio_chunks_sent += 1
+                        logger.debug(f"Sending audio chunk: {len(message)} bytes")
                         try:
                             frame = frames_pb2.Frame()
                             frame.audio.audio = message
@@ -69,9 +81,9 @@ async def forward_audio(websocket, websocket_url, sample_rate, channels):
                 logger.error(f"Error in client message handler: {str(e)}")
                 logger.exception(e)
             finally:
-                pipecat_handler.cancel()
+                stats_task.cancel()
                 try:
-                    await pipecat_handler
+                    await stats_task
                 except asyncio.CancelledError:
                     pass
     except ConnectionClosedError as e:

@@ -32,6 +32,10 @@ def get_user_input(prompt, validator=None):
 
 
 def create_bot(meeting_url, ngrok_wss, bot_name, bot_image, theme):
+    # Convert https:// to ws:// for local development
+    if ngrok_wss.startswith("https://"):
+        ngrok_wss = "ws://" + ngrok_wss[8:]
+
     url = "https://api.meetingbaas.com/bots"
     headers = {
         "Content-Type": "application/json",
