@@ -31,7 +31,15 @@ def get_user_input(prompt, validator=None):
             return user_input
 
 
-def create_bot(meeting_url, ngrok_wss, bot_name, bot_image, theme):
+def create_bot(
+    meeting_url,
+    ngrok_wss,
+    bot_name,
+    bot_image,
+    theme,
+    proxy_port,
+    websocket_port,
+):
     # Convert https:// to ws:// for local development
     if ngrok_wss.startswith("https://"):
         ngrok_wss = "ws://" + ngrok_wss[8:]
@@ -42,18 +50,24 @@ def create_bot(meeting_url, ngrok_wss, bot_name, bot_image, theme):
         "x-meeting-baas-api-key": API_KEY,
     }
 
-    # Use bot name as part of deduplication key to prevent duplicates
-    deduplication_key = f"{bot_name}-{ngrok_wss}-{meeting_url}"
+    # Create deduplication key using bot name and meeting URL
+    deduplication_key = (
+        f"{bot_name}-{str(proxy_port)}-{str(websocket_port)}-{meeting_url}"
+    )
 
-    # Add extra field with bot metadata
+    # Add streaming configuration with required ports
+    streaming_config = {
+        "input": f"ws://localhost:{proxy_port}",
+        "output": f"ws://localhost:{websocket_port}",
+    }
+
+    # Add extra field with bot metadata and port info
     extra = {
-        "bot_name": bot_name,
         "theme": theme,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime()),
-        "image": bot_image,
         "deduplication_key": deduplication_key,
         "ngrok_url": ngrok_wss,
-        "meeting_url": meeting_url,
+        "ports": {"proxy": proxy_port, "websocket": websocket_port},
     }
 
     config = {
@@ -66,8 +80,8 @@ def create_bot(meeting_url, ngrok_wss, bot_name, bot_image, theme):
         "speech_to_text": {"provider": "Default"},
         "automatic_leave": {"waiting_room_timeout": 600},
         "deduplication_key": deduplication_key,
-        "streaming": {"input": ngrok_wss, "output": ngrok_wss},
-        "extra": extra,  # Add the extra field here
+        "streaming": streaming_config,
+        "extra": extra,
     }
 
     response = requests.post(url, json=config, headers=headers)
@@ -136,6 +150,8 @@ class BotManager:
                 self.args.bot_name,
                 self.args.bot_image,
                 self.args.theme,
+                self.args.proxy_port,
+                self.args.websocket_port,
             )
             print(f"Bot created successfully with bot_id: {self.current_bot_id}")
 
@@ -197,6 +213,10 @@ def main():
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("--bot-id", help="Existing bot ID to use")
+    parser.add_argument("--proxy-port", help="Proxy port for incoming connections")
+    parser.add_argument(
+        "--websocket-port", help="Websocket port for outgoing connections"
+    )
 
     args = parser.parse_args()
     bot_manager = BotManager(args)

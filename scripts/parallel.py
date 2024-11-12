@@ -166,6 +166,8 @@ class BotProxyManager:
                     try:
                         delete_bot(bot_id)
                         logger.success(f"Bot {bot_id} removed from meeting via API")
+                        # Clear the bot_id after successful deletion
+                        process_info["bot_id"] = None
                     except Exception as e:
                         logger.error(f"Error removing bot {bot_id} via API: {e}")
 
@@ -223,9 +225,8 @@ class BotProxyManager:
 
     def check_and_cleanup_ports(self, start_port, count):
         """Check if ports are in use and kill any existing processes"""
-        for i in range(
-            count
-        ):  # Only check proxy ports since we don't have separate bot ports
+        # We need to check count * 2 ports because each bot needs 2 ports
+        for i in range(count * 2):
             port = start_port + i
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
@@ -327,36 +328,37 @@ class BotProxyManager:
         try:
             logger.info(f"Starting {args.count} bot-proxy pairs with ngrok tunnels...")
 
-            # Randomly shuffle the bot pairs at startup
-            available_pairs = self.bot_pairs.copy()
-            random.shuffle(available_pairs)
-
-            # Pre-calculate bot assignments
-            selected_bots = []
-
             # Randomly select one theme/pair
-            pair_index = random.randrange(len(available_pairs))
-            selected_pair = available_pairs[pair_index]
+            pair_index = random.randrange(len(self.bot_pairs))
+            selected_pair = self.bot_pairs[pair_index]
+            theme = selected_pair["theme"]
 
             # Log selected characters
             logger.warning("Selected characters for this session:")
-            logger.warning(f"Theme: {selected_pair['theme']}")
+            logger.warning(f"Theme: {theme}")
 
-            # For each instance, assign the corresponding bot from the pair
+            # Pre-calculate bot assignments - only create exactly args.count bots
+            selected_bots = []
             for i in range(args.count):
-                bot_index = (
-                    i % 2
-                )  # This ensures we alternate between bot 0 and 1 from the pair
+                bot_index = i % len(selected_pair["bots"])
                 current_bot = selected_pair["bots"][bot_index]
-                selected_bots.append((current_bot, selected_pair["theme"]))
+                selected_bots.append((current_bot, theme))
                 logger.warning(
                     f"Bot {i+1}: {current_bot['name']} ({current_bot['description']}) "
-                    f"- Theme: {selected_pair['theme']}"
+                    f"- Theme: {theme}"
                 )
 
             # Use pre-calculated bots in the main loop
             for i, (current_bot, theme) in enumerate(selected_bots):
                 pair_num = i + 1
+
+                # Calculate ports for this bot
+                proxy_port = current_port + (i * 2)
+                websocket_port = proxy_port + 1
+
+                logger.warning(f"Bot {current_bot['name']} Configuration:")
+                logger.warning(f"- Proxy Port: {proxy_port}")
+                logger.warning(f"- Websocket Port: {websocket_port}")
 
                 # Create role-specific system prompt with one random emotion
                 EMOTIONS = [
@@ -430,9 +432,9 @@ CRITICAL GUIDELINES:
                     "run",
                     "proxy",
                     "-p",
-                    str(current_port),
+                    str(proxy_port),
                     "--websocket-url",
-                    f"ws://localhost:{current_port + 1}",
+                    f"ws://localhost:{websocket_port}",
                     "--retry-count",
                     "3",
                     "--retry-delay",
@@ -440,7 +442,7 @@ CRITICAL GUIDELINES:
                 ]
 
                 proxy_name = f"proxy_{pair_num}"
-                logger.info(f"Starting {proxy_name} on port {current_port}")
+                logger.info(f"Starting {proxy_name} on port {proxy_port}")
 
                 # Run proxy process with environment
                 proxy_process = self.run_command(proxy_command, proxy_name)
@@ -457,7 +459,7 @@ CRITICAL GUIDELINES:
                 logger.success(f"Proxy {proxy_name} started successfully")
 
                 # Create and verify ngrok tunnel
-                listener = self.create_ngrok_tunnel(current_port, f"tunnel_{pair_num}")
+                listener = self.create_ngrok_tunnel(proxy_port, f"tunnel_{pair_num}")
                 if not listener:
                     logger.error(f"Failed to create tunnel for {proxy_name}")
                     continue
@@ -473,6 +475,8 @@ CRITICAL GUIDELINES:
                         bot_name=current_bot["name"],
                         bot_image=current_bot["image"],
                         theme=theme,
+                        proxy_port=proxy_port,
+                        websocket_port=websocket_port,
                     )
                     logger.success(
                         f"Bot {current_bot['name']} created with ID: {bot_id}"
@@ -500,6 +504,10 @@ CRITICAL GUIDELINES:
                     current_bot["image"],
                     "--theme",
                     theme,
+                    "--proxy-port",
+                    str(proxy_port),
+                    "--websocket-port",
+                    str(websocket_port),
                 ]
 
                 # After creating the bot via API, add bot_id to command args
@@ -524,9 +532,10 @@ CRITICAL GUIDELINES:
                         "tone": current_bot.get("tone", "neutral"),
                         "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                         "image": current_bot["image"],
-                        "deduplication_key": f"{current_bot['name']}-{listener.url()}-{meeting_url}",
+                        "deduplication_key": f"{current_bot['name']}-{str(proxy_port)}-{str(websocket_port)}-{meeting_url}",
                         "ngrok_url": listener.url(),
                         "meeting_url": meeting_url,
+                        "ports": {"proxy": proxy_port, "websocket": websocket_port},
                     }
 
                     self.processes[meeting_name] = {
