@@ -151,6 +151,13 @@ class BotProxyManager:
         """Cleanup all processes and tunnels in the correct order"""
         logger.info("Initiating cleanup of all processes and tunnels...")
 
+        # Create event loop at the start of cleanup
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
         # 1. First remove bots via API (using meetingbaas process info)
         for name, process_info in list(self.processes.items()):
             if name.startswith("meeting_"):
@@ -425,7 +432,7 @@ CRITICAL GUIDELINES:
                     "-p",
                     str(current_port),
                     "--websocket-url",
-                    f"ws://localhost:{current_port}",
+                    f"ws://localhost:{current_port + 1}",
                     "--retry-count",
                     "3",
                     "--retry-delay",
@@ -495,6 +502,9 @@ CRITICAL GUIDELINES:
                     theme,
                 ]
 
+                # After creating the bot via API, add bot_id to command args
+                command_args.extend(["--bot-id", bot_id])
+
                 if args.verbose:
                     command_args.append("--verbose")
 
@@ -507,9 +517,22 @@ CRITICAL GUIDELINES:
                     command_args, meeting_name, env=env
                 )
                 if meetingbaas_process:
+                    # Store complete bot info before starting process
+                    extra = {
+                        "bot_name": current_bot["name"],
+                        "theme": theme,
+                        "tone": current_bot.get("tone", "neutral"),
+                        "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                        "image": current_bot["image"],
+                        "deduplication_key": f"{current_bot['name']}-{listener.url()}-{meeting_url}",
+                        "ngrok_url": listener.url(),
+                        "meeting_url": meeting_url,
+                    }
+
                     self.processes[meeting_name] = {
                         "process": meetingbaas_process,
                         "bot_id": bot_id,
+                        "extra": extra,
                     }
 
                 current_port += 2

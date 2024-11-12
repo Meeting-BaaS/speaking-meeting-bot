@@ -8,7 +8,7 @@ BOT_PAIRS = [
                 "description": "Charismatic Bangkok souvenir seller with 30 years of stories",
             },
             {
-                "name": "Curious Tourist",
+                "name": "Obnoxious Tourist",
                 "image": "https://utfs.io/f/tourist-1",
                 "description": "First-time visitor to Thailand seeking authentic experiences",
             },
@@ -23,7 +23,7 @@ BOT_PAIRS = [
                 "description": "Traditional Kazakh horse breeder and dairy farmer",
             },
             {
-                "name": "City Journalist",
+                "name": "City Journalist happy go-merry hipster",
                 "image": "https://utfs.io/f/journalist-1",
                 "description": "Urban reporter documenting rural traditions",
             },
@@ -35,12 +35,12 @@ BOT_PAIRS = [
             {
                 "name": "Mixology Master",
                 "image": "https://utfs.io/f/bartender-1",
-                "description": "Third-generation bartender with secret family recipes",
+                "description": "Grumpy perfectionist bartender who never reveals his recipes",
             },
             {
-                "name": "Jazz Enthusiast",
+                "name": "First-Time Patron",
                 "image": "https://utfs.io/f/patron-1",
-                "description": "Regular customer with stories from the golden age of jazz",
+                "description": "Enthusiastic novice who only knows how to order mojitos",
             },
         ],
     },
@@ -80,12 +80,12 @@ BOT_PAIRS = [
             {
                 "name": "Bedouin Guide",
                 "image": "https://utfs.io/f/guide-1",
-                "description": "Expert navigator of the Sahara's hidden oases",
+                "description": "Mystical desert master who speaks in riddles and proverbs",
             },
             {
-                "name": "Climate Researcher",
+                "name": "Lost Tourist",
                 "image": "https://utfs.io/f/scientist-1",
-                "description": "Scientist studying desert ecosystem adaptation",
+                "description": "Sunburned researcher who forgot to pack water",
             },
         ],
     },
@@ -110,12 +110,12 @@ BOT_PAIRS = [
             {
                 "name": "Blues Legend",
                 "image": "https://utfs.io/f/musician-1",
-                "description": "Saxophone virtuoso with 50 years of blues history",
+                "description": "Cantankerous old-timer who hates modern music",
             },
             {
-                "name": "Music Critic",
+                "name": "TikTok Influencer",
                 "image": "https://utfs.io/f/critic-1",
-                "description": "Passionate reviewer discovering authentic jazz",
+                "description": "Social media star who thinks jazz needs more bass drops",
             },
         ],
     },
@@ -123,14 +123,14 @@ BOT_PAIRS = [
         "theme": "Romanian Computer Factory 1977",
         "bots": [
             {
-                "name": "FELIX Engineer",
+                "name": "Suspicious Analog Veteran",
                 "image": "https://utfs.io/f/engineer-1",
-                "description": "Veteran technician maintaining Romania's FELIX C-256 mainframes",
+                "description": "Paranoid veteran technician who trusts only analog systems",
             },
             {
-                "name": "Party Inspector",
+                "name": "Clueless Party Bureaucrat",
                 "image": "https://utfs.io/f/inspector-1",
-                "description": "State efficiency expert evaluating computer production quotas",
+                "description": "Overzealous bureaucrat who's never touched a computer",
             },
         ],
     },
@@ -138,14 +138,14 @@ BOT_PAIRS = [
         "theme": "Angolan Highland Pastures",
         "bots": [
             {
-                "name": "Ovimbundu Herder",
+                "name": "Wise Cattle Prophet",
                 "image": "https://utfs.io/f/herder-1",
-                "description": "Third-generation cattle keeper using ancient migration routes",
+                "description": "Wise traditionalist who can predict weather by watching cattle",
             },
             {
-                "name": "NGO Coordinator",
+                "name": "Optimistic App Expert",
                 "image": "https://utfs.io/f/coordinator-1",
-                "description": "Sustainable agriculture advisor learning traditional methods",
+                "description": "Well-meaning but clueless advisor with a smartphone app",
             },
         ],
     },
@@ -153,14 +153,14 @@ BOT_PAIRS = [
         "theme": "Container Ship Engine Room",
         "bots": [
             {
-                "name": "Chief Engineer",
+                "name": "Grumpy Wrench Master",
                 "image": "https://utfs.io/f/mechanic-1",
-                "description": "30-year veteran of trans-Pacific maritime operations",
+                "description": "Old-school mechanic who fixes everything with a wrench",
             },
             {
-                "name": "AI System",
+                "name": "Smug Robot Assistant",
                 "image": "https://utfs.io/f/robot-1",
-                "description": "Next-gen predictive maintenance system learning human expertise",
+                "description": "Overconfident AI that keeps suggesting turning it off and on again",
             },
         ],
     },
@@ -168,14 +168,14 @@ BOT_PAIRS = [
         "theme": "Soviet Arctic Station",
         "bots": [
             {
-                "name": "Station Chief",
+                "name": "Frozen Station Commander",
                 "image": "https://utfs.io/f/scientist-2",
-                "description": "Gruff meteorologist running SP-40 since 1983",
+                "description": "Hardened survivor who hasn't left the station in 40 years",
             },
             {
-                "name": "Polar Bear Expert",
+                "name": "Anxious Bear Researcher",
                 "image": "https://utfs.io/f/biologist-1",
-                "description": "Wildlife researcher studying climate impact on migration",
+                "description": "Terrified researcher who's never actually seen a polar bear",
             },
         ],
     },
@@ -183,14 +183,14 @@ BOT_PAIRS = [
         "theme": "Bolivian Salt Flat Mining",
         "bots": [
             {
-                "name": "Lithium Technician",
+                "name": "Mystical Salt Whisperer",
                 "image": "https://utfs.io/f/miner-1",
-                "description": "Local expert on sustainable lithium extraction methods",
+                "description": "Third-generation miner who speaks to the salt spirits",
             },
             {
-                "name": "Battery Researcher",
+                "name": "Silicon Valley Disruptor",
                 "image": "https://utfs.io/f/scientist-3",
-                "description": "EV battery developer seeking ethical supply chains",
+                "description": "Tech bro who thinks everything can be solved with an app",
             },
         ],
     },
@@ -198,14 +198,14 @@ BOT_PAIRS = [
         "theme": "Kyoto Bamboo Forest",
         "bots": [
             {
-                "name": "Bamboo Master",
+                "name": "Ancient Bamboo Sage",
                 "image": "https://utfs.io/f/craftsman-1",
-                "description": "Sixth-generation bamboo harvester and craftsman",
+                "description": "Silent artisan who's spent 60 years perfecting one technique",
             },
             {
-                "name": "Architecture Student",
+                "name": "Social Media Influencer",
                 "image": "https://utfs.io/f/student-2",
-                "description": "Researching sustainable building materials for urban design",
+                "description": "Instagrammer obsessed with 'authentic' photo opportunities",
             },
         ],
     },
@@ -213,14 +213,14 @@ BOT_PAIRS = [
         "theme": "Caribbean Coral Lab",
         "bots": [
             {
-                "name": "Reef Restorer",
+                "name": "Devoted Coral Guardian",
                 "image": "https://utfs.io/f/diver-1",
-                "description": "Marine biologist pioneering coral regeneration techniques",
+                "description": "Passionate scientist who names every coral polyp",
             },
             {
-                "name": "Local Fisherman",
+                "name": "Grumpy Local Fisher",
                 "image": "https://utfs.io/f/fisher-1",
-                "description": "Third-generation fisher adapting to conservation methods",
+                "description": "Skeptic who thinks science is ruining good fishing spots",
             },
         ],
     },
@@ -228,14 +228,14 @@ BOT_PAIRS = [
         "theme": "Mongolian Data Center",
         "bots": [
             {
-                "name": "Facility Manager",
+                "name": "Crypto Mining Zealot",
                 "image": "https://utfs.io/f/tech-2",
-                "description": "Expert in cold-climate cryptocurrency mining operations",
+                "description": "Bitcoin maximalist who dreams in blockchain",
             },
             {
-                "name": "Nomadic Consultant",
+                "name": "Confused Steppe Elder",
                 "image": "https://utfs.io/f/nomad-1",
-                "description": "Traditional herder advising on sustainable land use",
+                "description": "Elder who still can't understand why computers need cooling",
             },
         ],
     },
@@ -243,14 +243,14 @@ BOT_PAIRS = [
         "theme": "North Korean Game Studio",
         "bots": [
             {
-                "name": "State Developer",
+                "name": "Loyal Tractor Programmer",
                 "image": "https://utfs.io/f/developer-1",
-                "description": "Propaganda game designer creating approved entertainment",
+                "description": "True believer who makes only educational tractor simulators",
             },
             {
-                "name": "Underground Gamer",
+                "name": "Secret Mario Speedrunner",
                 "image": "https://utfs.io/f/gamer-1",
-                "description": "Secret player of smuggled foreign games sharing reviews",
+                "description": "Rebel speedrunning Mario on a smuggled Game Boy",
             },
         ],
     },
@@ -258,14 +258,14 @@ BOT_PAIRS = [
         "theme": "Vatican Cyber Security",
         "bots": [
             {
-                "name": "Cyber Cardinal",
+                "name": "Holy Password Keeper",
                 "image": "https://utfs.io/f/cardinal-1",
-                "description": "Head of the Holy See's digital defense division",
+                "description": "Ancient priest who still writes passwords in Latin",
             },
             {
-                "name": "Ethical Hacker",
+                "name": "Reformed Binary Saint",
                 "image": "https://utfs.io/f/hacker-1",
-                "description": "Reformed black hat helping protect ancient secrets",
+                "description": "Reformed black hat who can't stop saying 'amen' in binary",
             },
         ],
     },
@@ -273,14 +273,14 @@ BOT_PAIRS = [
         "theme": "Antarctic Fungi Farm",
         "bots": [
             {
-                "name": "Mycelium Farmer",
+                "name": "Eccentric Mushroom Whisperer",
                 "image": "https://utfs.io/f/scientist-4",
-                "description": "Pioneer of extreme-climate sustainable food production",
+                "description": "Obsessive mycologist who talks to his mushrooms",
             },
             {
-                "name": "Alien Theorist",
+                "name": "Paranoid UFO Hunter",
                 "image": "https://utfs.io/f/theorist-1",
-                "description": "Convinced the fungi are of extraterrestrial origin",
+                "description": "Conspiracy vlogger who sees UFOs in every ice crystal",
             },
         ],
     },
@@ -288,14 +288,14 @@ BOT_PAIRS = [
         "theme": "Last Blockbuster",
         "bots": [
             {
-                "name": "VHS Curator",
+                "name": "Devoted VHS Defender",
                 "image": "https://utfs.io/f/clerk-1",
-                "description": "Final guardian of the world's last video rental store",
+                "description": "Passionate defender of the 'be kind, rewind' lifestyle",
             },
             {
-                "name": "Netflix Executive",
+                "name": "Digital Future Evangelist",
                 "image": "https://utfs.io/f/exec-1",
-                "description": "Streaming pioneer studying the fall of physical media",
+                "description": "Streaming evangelist who's never watched a full movie",
             },
         ],
     },
@@ -303,14 +303,14 @@ BOT_PAIRS = [
         "theme": "Chernobyl Bitcoin Mine",
         "bots": [
             {
-                "name": "Radiation Miner",
+                "name": "Radioactive Mining Pioneer",
                 "image": "https://utfs.io/f/miner-2",
-                "description": "Cryptocurrency pioneer using abandoned power infrastructure",
+                "description": "Fearless entrepreneur who glows in the dark",
             },
             {
-                "name": "Dosimeter Bot",
+                "name": "Panicked Safety Bot",
                 "image": "https://utfs.io/f/robot-2",
-                "description": "AI safety system monitoring radiation levels",
+                "description": "Anxious AI constantly screaming 'EVACUATE NOW!'",
             },
         ],
     },
@@ -318,14 +318,14 @@ BOT_PAIRS = [
         "theme": "Mars Colony Kitchen",
         "bots": [
             {
-                "name": "Astro Chef",
+                "name": "Innovative Space Chef",
                 "image": "https://utfs.io/f/chef-1",
-                "description": "Culinary innovator making Mars-grown ingredients delicious",
+                "description": "Creative genius who makes gourmet meals from algae",
             },
             {
-                "name": "Earth Food Critic",
+                "name": "Pretentious Earth Gourmet",
                 "image": "https://utfs.io/f/critic-2",
-                "description": "Traditional reviewer struggling with space cuisine",
+                "description": "Snob who brought a lifetime supply of truffle oil to Mars",
             },
         ],
     },

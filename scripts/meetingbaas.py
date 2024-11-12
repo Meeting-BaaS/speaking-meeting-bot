@@ -43,7 +43,18 @@ def create_bot(meeting_url, ngrok_wss, bot_name, bot_image, theme):
     }
 
     # Use bot name as part of deduplication key to prevent duplicates
-    deduplication_key = f"{bot_name}-{meeting_url}"
+    deduplication_key = f"{bot_name}-{ngrok_wss}-{meeting_url}"
+
+    # Add extra field with bot metadata
+    extra = {
+        "bot_name": bot_name,
+        "theme": theme,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime()),
+        "image": bot_image,
+        "deduplication_key": deduplication_key,
+        "ngrok_url": ngrok_wss,
+        "meeting_url": meeting_url,
+    }
 
     config = {
         "meeting_url": meeting_url,
@@ -56,6 +67,7 @@ def create_bot(meeting_url, ngrok_wss, bot_name, bot_image, theme):
         "automatic_leave": {"waiting_room_timeout": 600},
         "deduplication_key": deduplication_key,
         "streaming": {"input": ngrok_wss, "output": ngrok_wss},
+        "extra": extra,  # Add the extra field here
     }
 
     response = requests.post(url, json=config, headers=headers)
@@ -85,15 +97,24 @@ class BotManager:
     def run(self):
         signal.signal(signal.SIGINT, self.signal_handler)
 
-        while True:
-            try:
-                self.get_or_update_urls()
-                self.create_and_manage_bot()
-            except Exception as e:
+        try:
+            self.get_or_update_urls()
+            self.create_and_manage_bot()
+
+            # Keep process alive without restarting
+            while True:
+                time.sleep(1)
+
+        except Exception as e:
+            if "AlreadyStarted" in str(e):
+                print(f"Bot already exists in meeting, keeping process alive...")
+                # Keep the process alive even if bot exists
+                while True:
+                    time.sleep(1)
+            else:
                 print(f"An error occurred: {e}")
                 if self.current_bot_id:
                     self.delete_current_bot()
-                time.sleep(5)
 
     def get_or_update_urls(self):
         if not self.args.meeting_url:
@@ -107,25 +128,29 @@ class BotManager:
         self.args.ngrok_wss = "wss://" + self.args.ngrok_url[8:]
 
     def create_and_manage_bot(self):
-        self.current_bot_id = create_bot(
-            self.args.meeting_url,
-            self.args.ngrok_wss,
-            self.args.bot_name,
-            self.args.bot_image,
-            self.args.theme,
-        )
-        print(f"Bot created successfully with bot_id: {self.current_bot_id}")
+        # If we already have a bot_id from parallel.py, don't create a new one
+        if not self.current_bot_id:
+            self.current_bot_id = create_bot(
+                self.args.meeting_url,
+                self.args.ngrok_wss,
+                self.args.bot_name,
+                self.args.bot_image,
+                self.args.theme,
+            )
+            print(f"Bot created successfully with bot_id: {self.current_bot_id}")
 
-        print("\nPress Enter to respawn bot with same URLs")
-        print("Enter 'n' to input new URLs")
-        print("Press Ctrl+C to exit")
-        user_choice = input().strip().lower()
+            # Only show interactive prompts when not running in parallel mode
+            if not self.args.bot_id:  # bot_id presence indicates parallel mode
+                print("\nPress Enter to respawn bot with same URLs")
+                print("Enter 'n' to input new URLs")
+                print("Press Ctrl+C to exit")
+                user_choice = input().strip().lower()
 
-        self.delete_current_bot()
+                self.delete_current_bot()
 
-        if user_choice == "n":
-            self.args.meeting_url = None
-            self.args.ngrok_url = None
+                if user_choice == "n":
+                    self.args.meeting_url = None
+                    self.args.ngrok_url = None
 
     def delete_current_bot(self):
         if self.current_bot_id:
@@ -171,6 +196,7 @@ def main():
         help="The theme or topic the bot specializes in",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--bot-id", help="Existing bot ID to use")
 
     args = parser.parse_args()
     bot_manager = BotManager(args)
