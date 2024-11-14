@@ -14,6 +14,7 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.filters.wake_check_filter import WakeCheckFilter
 from pipecat.services.cartesia import CartesiaTTSService
 from pipecat.services.deepgram import DeepgramSTTService
 from pipecat.services.openai import OpenAILLMService
@@ -172,6 +173,20 @@ async def main():
     logger.warning(f"**SYSTEM PROMPT END**")
     logger.warning(f"**FOR BOT NAME: {persona_name}**")
 
+    # Add wake word filter
+    hey_bot_filter = WakeCheckFilter(
+        # [f"hey {persona_name.lower()}", f"hey, {persona_name.lower()}"]
+        [f"hey robot"]
+    )
+
+    # Update your system prompt to include wake word instruction
+    system_prompt = (
+        system_prompt
+        + "\n\n"
+        + f"""Users need to say 'Hey {persona_name}' to get your attention. 
+    Only respond to messages that are directed to you using this wake word."""
+    )
+
     messages = [
         {
             "role": "system",
@@ -196,9 +211,11 @@ MOST IMPORTANTLY - BE CONCISE, SPEAK FAST, AND DO NOT BE TOO POLITE.
     context = OpenAILLMContext(messages, tools)
     context_aggregator = llm.create_context_aggregator(context)
 
+    # Update the pipeline to include the wake word filter
     pipeline = Pipeline(
         [
             transport.input(),
+            hey_bot_filter,  # Add the wake word filter here
             stt,
             context_aggregator.user(),
             llm,
@@ -217,6 +234,8 @@ MOST IMPORTANTLY - BE CONCISE, SPEAK FAST, AND DO NOT BE TOO POLITE.
     async def on_client_connected(transport, client):
         messages.append({"role": "system", "content": system_prompt})
         await task.queue_frames([LLMMessagesFrame(messages)])
+        # Add initial greeting with wake word instruction
+        await tts.say(f"Hi! If you want to talk to me, just say 'Hey {persona_name}'.")
 
     runner = PipelineRunner()
     await runner.run(task)
