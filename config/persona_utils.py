@@ -5,6 +5,13 @@ from typing import Dict, List, Optional, Union
 import markdown
 from loguru import logger
 
+from config.prompts import (
+    DEFAULT_CHARACTERISTICS,
+    DEFAULT_ENTRY_MESSAGE,
+    DEFAULT_VOICE_CHARACTERISTICS,
+    PERSONA_INTERACTION_INSTRUCTIONS,
+)
+
 
 class PersonaManager:
     def __init__(self, personas_dir: Optional[Path] = None):
@@ -81,24 +88,26 @@ class PersonaManager:
             persona_dir = self.personas_dir / key
             persona_dir.mkdir(exist_ok=True)
 
+            # Format characteristics and voice characteristics from prompts
+            characteristics = "\n".join(f"- {char}" for char in DEFAULT_CHARACTERISTICS)
+            voice_chars = "\n".join(
+                f"- {char}" for char in DEFAULT_VOICE_CHARACTERISTICS
+            )
+
             readme_content = f"""# {persona['name']}
 
 {persona['prompt']}
 
 ## Characteristics
-- Gen-Z speech patterns
-- Tech-savvy and modern
-- Playful and engaging personality
-- Unique perspective on their domain
+{characteristics}
 
 ## Voice
 {persona['name']} speaks with:
-- modern internet slang
-- expertise in their field
+{voice_chars}
 
 ## Metadata
 - image: {persona['image']}
-- entry_message: {persona['entry_message']}
+- entry_message: {persona.get('entry_message', DEFAULT_ENTRY_MESSAGE)}
 """
 
             with open(persona_dir / "README.md", "w", encoding="utf-8") as f:
@@ -124,12 +133,6 @@ class PersonaManager:
 
     def get_persona(self, name: Optional[str] = None) -> Dict:
         """Get a persona by name or return a random one"""
-        interaction_instructions = """
-Remember:
-1. Start by clearly stating who you are
-2. When someone new speaks, ask them who they are
-3. Then consider and express how their role/expertise could help you"""
-
         if name:
             if name not in self.personas:
                 raise KeyError(
@@ -145,7 +148,7 @@ Remember:
         if not persona.get("image"):
             persona["image"] = ""  # Empty string instead of default URL
 
-        persona["prompt"] = persona["prompt"] + interaction_instructions
+        persona["prompt"] = persona["prompt"] + PERSONA_INTERACTION_INSTRUCTIONS
         return persona
 
     def get_persona_by_name(self, name: str) -> Dict:
