@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 from datetime import datetime
+import random
 
 import aiohttp
 import pytz
@@ -29,6 +30,8 @@ from config.prompts import DEFAULT_SYSTEM_PROMPT, WAKE_WORD_INSTRUCTION
 from meetingbaas_pipecat.utils.logger import configure_logger
 
 from .runner import configure
+
+from config.persona_utils import persona_manager
 
 load_dotenv(override=True)
 
@@ -120,6 +123,8 @@ async def main():
             # serializer=ProtobufSerializer(),
         ),
     )
+    # Add persona name to transport
+    transport.persona_name = persona_name
 
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4o-mini")
     llm.register_function("get_weather", get_weather)
@@ -204,6 +209,8 @@ async def main():
                 + "\n\n"
                 + "\n\n"
                 + additional_content
+                + "\n\n"
+                + "ALWAYS END UP YOUR ANSWERS WITH A QUESTION. ALWAYS END UP YOUR ANSWERS WITH A QUESTION. ALWAYS END UP YOUR ANSWERS WITH A QUESTION."
             ),
         },
     ]
@@ -230,9 +237,23 @@ async def main():
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        # TODO: enable the persona to store whether or uncomment this when we have a way to send the system prompt to the LLM
-        # messages.append({"role": "system", "content": system_prompt})
-        # await task.queue_frames([LLMMessagesFrame(messages)])
+        try:
+            # Get persona details from manager
+            persona = persona_manager.get_persona(transport.persona_name)
+            
+            # First bot or 50% chance for others
+            should_speak = "bot_1" in transport.persona_name or random.random() < 0.9
+            
+            if should_speak:
+                messages.append({"role": "system", "content": system_prompt})
+                await task.queue_frames([LLMMessagesFrame(messages)])
+                logger.warning(f"Bot {persona['name']} speaking first!")
+            else:
+                logger.warning(f"Bot {persona['name']} staying quiet initially")
+                
+        except Exception as e:
+            logger.error(f"Error in on_client_connected: {e}")
+        
         logger.info("Client connected")
 
     runner = PipelineRunner()
