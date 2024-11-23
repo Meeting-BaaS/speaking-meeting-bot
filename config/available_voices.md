@@ -1,6 +1,6 @@
 # Available Cartesia Voices
 
-Last updated: 2024-11-16 18:21:25
+Last updated: 2024-11-23 14:19:34
 
 ## German Conversational Woman
 
@@ -196,15 +196,6 @@ Last updated: 2024-11-16 18:21:25
 - **ID**: `5c5ad5e7-1020-476b-8b91-fdcbe9cc313c`
 - **Language**: es
 - **Description**: This voice is even with a Mexican accent, perfect for narrational content in Spanish
-- **Public**: Yes
-
----
-
-## California Girl
-
-- **ID**: `b7d50908-b17c-442d-ad8d-810c63997ed9`
-- **Language**: en
-- **Description**: This voice is enthusiastic and friendly, perfect for a casual conversation between friends
 - **Public**: Yes
 
 ---
@@ -1152,6 +1143,33 @@ Last updated: 2024-11-16 18:21:25
 - **ID**: `729651dc-c6c3-4ee5-97fa-350da1f88600`
 - **Language**: en
 - **Description**: A pleasant male voice that's good for use cases like demos and customer support calls
+- **Public**: Yes
+
+---
+
+## California Girl
+
+- **ID**: `b7d50908-b17c-442d-ad8d-810c63997ed9`
+- **Language**: en
+- **Description**: This voice is enthusiastic and friendly, perfect for a casual conversation between friends
+- **Public**: Yes
+
+---
+
+## John
+
+- **ID**: `f785af04-229c-4a7c-b71b-f3194c7f08bb`
+- **Language**: en
+- **Description**: This voice is natural and empathetic with an American accent, perfect for use cases like demos and customer support calls.
+- **Public**: Yes
+
+---
+
+## Anna
+
+- **ID**: `91b4cf29-5166-44eb-8054-30d40ecc8081`
+- **Language**: en
+- **Description**: This voice is natural and expressive with an American accent, perfect for use cases like interviews and customer support calls.
 - **Public**: Yes
 
 ---
