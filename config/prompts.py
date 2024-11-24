@@ -135,38 +135,26 @@ IMAGE_PROMPT_TEMPLATE = (
 
 # Add studio styles and their characteristics
 ANIMATION_STUDIOS = {
-    "Pixar": {
-        "style": "Pixar-style with rounded features and expressive eyes",
-        "lighting": "Pixar's signature warm lighting",
-    },
-    "DreamWorks": {
-        "style": "DreamWorks-style with slightly exaggerated features and dynamic expressions",
-        "lighting": "DreamWorks' dramatic lighting contrasts",
-    },
-    "Industrial Light & Magic": {
-        "style": "ILM-style with realistic proportions and detailed texturing",
-        "lighting": "ILM's cinematic lighting",
-    },
-    "Reel FX": {
-        "style": "Reel FX-style with stylized features and modern appeal",
-        "lighting": "Reel FX's vibrant lighting palette",
-    },
+    "ORTF": {
+        "style": "Retro-futuristic ORTF style with bold geometric shapes, vintage sci-fi aesthetics, and retrofuturistic character design reminiscent of 1960s French television",
+        "lighting": "Vibrant technicolor palette with high contrast and saturated colors typical of 1960s broadcasting, neon accents, and dramatic color overlays",
+    }
 }
 
-# Update IMAGE_STYLE_ELEMENTS to emphasize simplicity
+# Update IMAGE_STYLE_ELEMENTS for retro-futuristic TV style
 IMAGE_STYLE_ELEMENTS = [
-    "Pixar-style human character design",
-    "modern 3D animation quality",
+    "1960s retro-futuristic TV character",
+    "vintage broadcast quality",
     "30% padding around head",
     "complete head always visible",
-    "basic facial features only",
-    "no accessories or details",
-    "soft lighting on face",
-    "clean character modeling",
-    "rich background detail",
-    "centered composition",
-    "human facial proportions",
-    "Pixar-style expressiveness",
+    "cathode ray tube TV screen effect",
+    "scan lines and slight static",
+    "warm tube TV lighting",
+    "retrofuturistic robot-like features",
+    "vintage French TV aesthetic",
+    "centered in TV frame composition",
+    "slightly rounded TV corners",
+    "space-age design elements",
 ]
 
 # Update negative prompt to prevent accessories and cropping
@@ -203,26 +191,29 @@ PERSONA_IMAGE_INSTRUCTIONS = [
     else []
 )
 
-# Update background instructions to be more funky/cool
+# Update background instructions
 BACKGROUND_INSTRUCTIONS = [
-    "Not too many details in the background, we guess it more than we see it.",
-    "The background should be COLOURFUL and LIGHT, in the distance, and one of (unless indicated otherwise):",
+    "Background should have a distinct 1960s/70s French television aesthetic",
+    "Include retro-futuristic control panels or broadcasting equipment",
+    "Warm, vintage TV color palette",
+    "Slight CRT screen curvature effect",
+    "Visible scan lines and mild static interference",
 ]
 
-# Update background locations to be more vibrant
+# Update background locations to be more retro-futuristic
 BACKGROUND_LOCATIONS = [
-    "Neon-soaked Miami beach at night",
-    "Cyberpunk megacity with holographic billboards",
-    "Floating neon sky gardens",
-    "Neo-Tokyo street market",
-    "Synthwave sunset over chrome skyscrapers",
-    "Futuristic space elevator terminal",
-    "Underwater neon coral city",
-    "Holographic desert oasis",
-    "Anti-gravity nightclub district",
-    "Quantum crystal laboratory",
-    "Digital cherry blossom matrix",
-    "Chrome and neon clockwork tower",
+    "1960s French TV studio set",
+    "Retro space station control room",
+    "Vintage computer mainframe room",
+    "Atomic age laboratory",
+    "Space-age broadcasting center",
+    "Retrofuturistic mission control",
+    "60s sci-fi control panel wall",
+    "Vintage TV station backdrop",
+    "Retro electronic testing facility",
+    "Mid-century modern TV studio",
+    "Space-age communications center",
+    "Atomic-punk control room",
 ]
 
 PERSONA_ANIMALS = [
@@ -351,9 +342,11 @@ PERSONA_ANIMALS = [
 
 # Detail level instructions
 DETAIL_LEVEL_INSTRUCTIONS = [
-    "Pixar-quality 3D rendering",
-    "modern animation studio quality",
-    "clean and polished 3D modeling",
+    "1960s/70s television broadcast quality",
+    "Vintage electronic device aesthetics",
+    "Retro-futuristic mechanical details",
+    "Period-appropriate color grading",
+    "Authentic vintage TV effects",
 ]
 
 # Section headers for prompt building
@@ -361,6 +354,16 @@ STYLE_AND_QUALITY_HEADER = "Style and Quality:"
 BACKGROUND_HEADER = "Background Instructions:"
 DETAIL_LEVEL_HEADER = "Detail Level:"
 ADDITIONAL_INSTRUCTIONS_HEADER = "Additional Instructions:"
+
+# Add VIDEO-MATON specific styling
+VIDEO_MATON_ELEMENTS = [
+    "Designed as a French VIDEO-MATON automated TV presenter",
+    "Retrofuturistic robotic features",
+    "Chrome and plastic materials typical of 60s/70s design",
+    "Vintage TV screen integrated into design",
+    "Automated broadcasting unit aesthetic",
+    "Space-age control panel elements",
+]
 
 
 def build_image_prompt(
@@ -409,6 +412,10 @@ def build_image_prompt(
         "age_style": age_style,
         "studio_style": studio_info["style"],
         "studio_lighting": studio_info["lighting"],
+        "additional_style": (
+            "Designed as a French VIDEO-MATON automated TV presenter from the 1960s/70s, "
+            "with retrofuturistic robotic features and vintage television aesthetics"
+        ),
     }
 
     # Build the complete prompt
@@ -448,6 +455,17 @@ def build_image_prompt(
         "THERE MUST BE EXACTLY ONE "
         + ("ANIMAL" if IS_ANIMAL else "PERSON")
         + " IN THE IMAGE, NO MORE NO LESS."
+    )
+
+    # Add VIDEO-MATON specific section
+    sections.append("VIDEO-MATON Specifications:")
+    sections.append("\n".join(VIDEO_MATON_ELEMENTS))
+
+    # Add vintage TV effect reminder
+    sections.append("\nVintage TV Effect Reminder:")
+    sections.append(
+        "MUST INCLUDE VISIBLE SCAN LINES AND CRT SCREEN EFFECTS "
+        "CONSISTENT WITH 1960s/70s TELEVISION TECHNOLOGY"
     )
 
     return "\n\n".join(sections)
