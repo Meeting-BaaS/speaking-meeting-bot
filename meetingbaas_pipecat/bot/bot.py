@@ -1,8 +1,8 @@
 import asyncio
 import os
+import random
 import sys
 from datetime import datetime
-import random
 
 import aiohttp
 import pytz
@@ -15,10 +15,10 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.services.cartesia import CartesiaTTSService
-
-# from pipecat.services.gladia import GladiaSTTService
-from pipecat.services.deepgram import DeepgramSTTService
+from pipecat.services.cartesia import CartesiaTTSService, Language
+from pipecat.services.deepgram import DeepgramSTTService, LiveOptions
+from pipecat.services.elevenlabs import ElevenLabsTTSService
+from pipecat.services.gladia import GladiaSTTService
 from pipecat.services.openai import OpenAILLMService
 from pipecat.transports.network.websocket_server import (
     ProtobufFrameSerializer,
@@ -26,12 +26,11 @@ from pipecat.transports.network.websocket_server import (
     WebsocketServerTransport,
 )
 
+from config.persona_utils import persona_manager
 from config.prompts import DEFAULT_SYSTEM_PROMPT, WAKE_WORD_INSTRUCTION
 from meetingbaas_pipecat.utils.logger import configure_logger
 
 from .runner import configure
-
-from config.persona_utils import persona_manager
 
 load_dotenv(override=True)
 
@@ -174,7 +173,12 @@ async def main():
 
     # use Gladia as our default STT service ;)
     stt = DeepgramSTTService(
-        api_key=os.getenv("DEEPGRAM_API_KEY"), encoding="linear24", sample_rate=24000
+        api_key=os.getenv("DEEPGRAM_API_KEY"),
+        encoding="linear24",
+        sample_rate=24000,
+        live_options=LiveOptions(
+            language="fr-FR",
+        ),
     )
     # stt = GladiaSTTService(
     #     api_key=os.getenv("GLADIA_API_KEY"), encoding="linear24", sample_rate=24000
@@ -184,6 +188,10 @@ async def main():
         api_key=os.getenv("CARTESIA_API_KEY"),
         voice_id=voice_id,
         sample_rate=24000,
+        model="sonic-multilingual",
+        params=CartesiaTTSService.InputParams(
+            language=Language.FR,  # Set language to French
+        ),
     )
 
     logger.warning(f"**BOT NAME: {persona_name}**")
@@ -240,20 +248,20 @@ async def main():
         try:
             # Get persona details from manager
             persona = persona_manager.get_persona(transport.persona_name)
-            
+
             # First bot or 50% chance for others
-            should_speak = "bot_1" in transport.persona_name or random.random() < 0.9
-            
+            should_speak = True
+
             if should_speak:
                 messages.append({"role": "system", "content": system_prompt})
                 await task.queue_frames([LLMMessagesFrame(messages)])
                 logger.warning(f"Bot {persona['name']} speaking first!")
             else:
                 logger.warning(f"Bot {persona['name']} staying quiet initially")
-                
+
         except Exception as e:
             logger.error(f"Error in on_client_connected: {e}")
-        
+
         logger.info("Client connected")
 
     runner = PipelineRunner()
