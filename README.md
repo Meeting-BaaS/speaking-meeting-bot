@@ -13,6 +13,7 @@ This project extends [Pipecat's WebSocket server implementation](https://github.
 -   Meeting agents that can join Google Meet or Microsoft Teams through the [MeetingBaas API](https://meetingbaas.com)
 -   Customizable personas with unique context
 -   Support for running multiple instances locally or at scale
+-   REST API for creating and managing bots programmatically
 
 ## Architecture
 
@@ -40,6 +41,7 @@ Building upon Pipecat, we've added:
 -   Image hosting through [UploadThing](https://uploadthing.com/) (UTFS)
 -   [MeetingBaas](https://meetingbaas.com) integration for video meeting platform support
 -   Multi-agent orchestration
+-   REST API for programmatic control
 
 ## Required API Keys
 
@@ -165,6 +167,56 @@ ngrok start --all --config ~/.config/ngrok/ngrok.yml,./config/ngrok/config.yml
 
 For more than 2 agents, deploy to a web server to avoid Ngrok limitations.
 
+## API Server
+
+The Speaking Meeting Bot now provides a REST API for creating and managing bots programmatically.
+
+### Running the API Server
+
+```bash
+poetry run api
+```
+
+Or with custom host and port:
+
+```bash
+poetry run api --host 127.0.0.1 --port 8080
+```
+
+For development with auto-reload:
+
+```bash
+poetry run api --reload
+```
+
+### API Documentation
+
+Once the API server is running, you can access the API documentation at:
+
+- Swagger UI: http://localhost:8000/docs
+- ReDoc: http://localhost:8000/redoc
+
+### API Endpoints
+
+The API provides the following endpoints:
+
+#### Persona Management
+- `GET /personas` - List all personas
+- `GET /personas/{key}` - Get persona details
+- `POST /personas` - Create a new persona
+- `PUT /personas/{key}` - Update a persona
+- `DELETE /personas/{key}` - Delete a persona
+- `POST /personas/{key}/generate-image` - Generate an image for a persona
+
+#### Bot Management
+- `GET /bots` - List all active bots
+- `GET /bots/{bot_id}` - Get bot details
+- `POST /bots` - Create and start a new bot
+- `DELETE /bots/{bot_id}` - Stop and delete a bot
+
+#### Health Check
+- `GET /health` - API health check
+
 ## Future Extensibility
 
 The persona architecture is designed to support:
@@ -187,7 +239,7 @@ For more detailed information about specific personas or deployment options, che
 
 Sometimes, due to WebSocket connection delays through ngrok, the Meeting Baas bots may join the meeting before your local bot connects. If this happens:
 
--   Simply press `Enter` to respawn your bot
+-   Simply press `Enter` to respawn bot with same URLs
 -   This will reinitiate the connection and allow your bot to join the meeting
 
 This is a normal occurrence and can be easily resolved with a quick bot respawn.

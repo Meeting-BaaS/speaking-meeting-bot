@@ -4,6 +4,7 @@ import signal
 import sys
 import time
 import uuid
+import traceback
 
 import requests
 from dotenv import load_dotenv
@@ -75,14 +76,28 @@ def get_persona_selection():
             logger.warning("Please enter a valid persona name.")
 
 
-def get_baas_bot_dedup_key(character_name: str, is_recorder_only: bool) -> str:
+def get_baas_bot_dedup_key(character_name: str, is_recorder_only: bool, suffix="") -> str:
+    """Generate a unique deduplication key for a bot.
+    
+    Args:
+        character_name: The persona name to use
+        is_recorder_only: Whether this is a recorder-only bot
+        suffix: Optional suffix to make the key unique (e.g., for multiple bots in same meeting)
+        
+    Returns:
+        A unique deduplication key string
+    """
     if is_recorder_only:
         # Generate a random UUID for recorder bots
         return f"BaaS-Recorder-{uuid.uuid4().hex[:8]}"
-    return character_name + "-BaaS"
+    
+    # For speaking bots, include the suffix if provided
+    if suffix:
+        return f"{character_name}-BaaS-{suffix}"
+    return f"{character_name}-BaaS"
 
 
-def create_baas_bot(meeting_url, ngrok_url, persona_name=None, recorder_only=False):
+def create_baas_bot(meeting_url, ngrok_url, persona_name=None, recorder_only=False, dedup_suffix=""):
     if recorder_only:
         config = {
             "meeting_url": meeting_url,
@@ -93,50 +108,51 @@ def create_baas_bot(meeting_url, ngrok_url, persona_name=None, recorder_only=Fal
             "reserved": False,
             "speech_to_text": {"provider": "Default"},
             "automatic_leave": {"waiting_room_timeout": 600},
-            "deduplication_key": get_baas_bot_dedup_key(persona_name, recorder_only),
+            "deduplication_key": get_baas_bot_dedup_key(persona_name, recorder_only, dedup_suffix),
             "extra": {
-                "deduplication_key": get_baas_bot_dedup_key(persona_name, recorder_only)
+                "deduplication_key": get_baas_bot_dedup_key(persona_name, recorder_only, dedup_suffix)
             },
             # "webhook_url": "",
         }
     else:
-        # Existing bot creation logic
-        if not persona_name:
-            persona_name = get_persona_selection()
-
-        try:
-            persona = persona_manager.get_persona(persona_name)
-        except KeyError:
+        # Get persona details for the bot
+        if persona_name:
             try:
-                folder_name = persona_name.lower().replace(" ", "_")
-                persona = persona_manager.get_persona(folder_name)
-            except KeyError:
-                logger.error(
-                    f"Persona '{persona_name}' not found in available personas."
-                )
-                return None
+                persona = persona_manager.get_persona(persona_name)
+                bot_name = persona["name"]
+                entry_message = persona.get("entry_message", "")
+                bot_image = persona.get("image", "")
+            except Exception as e:
+                logger.error(f"Error loading persona data: {e}")
+                bot_name = persona_name
+                entry_message = ""
+                bot_image = ""
+        else:
+            bot_name = "MeetingBaas Bot"
+            entry_message = ""
+            bot_image = ""
 
         config = {
             "meeting_url": meeting_url,
-            "bot_name": persona["name"],
+            "bot_name": bot_name,
             "recording_mode": "speaker_view",
             "reserved": False,
-            # no speech to text for speaking bots, add one to recorder bots
-            # TODO: log speech to text provided by Pipecat and speech to text streaming APIs
-            # "speech_to_text": {"provider": "Default"},
             "automatic_leave": {"waiting_room_timeout": 600},
-            "deduplication_key": get_baas_bot_dedup_key(persona_name, recorder_only),
-            "streaming": {"input": ngrok_url, "output": ngrok_url},
+            "deduplication_key": get_baas_bot_dedup_key(persona_name, recorder_only, dedup_suffix),
+            "streaming": {
+                "input": ngrok_url,
+                "output": ngrok_url,
+            },
             "extra": {
-                "deduplication_key": get_baas_bot_dedup_key(persona_name, recorder_only)
+                "deduplication_key": get_baas_bot_dedup_key(persona_name, recorder_only, dedup_suffix)
             },
             # "webhook_url": "https://webhook-test.com/ce63096bd2c0f2793363fd3fb32bc066",
         }
 
-        if persona.get("image"):
-            config["bot_image"] = persona["image"]
-        if persona.get("entry_message"):
-            config["entry_message"] = persona["entry_message"]
+        if bot_image:
+            config["bot_image"] = bot_image
+        if entry_message:
+            config["entry_message"] = entry_message
 
     url = f"{API_URL}/bots"
     headers = {
@@ -177,75 +193,75 @@ def delete_bot(bot_id):
 
 class BotManager:
     def __init__(self, args):
+        """Initialize the BotManager with the provided arguments.
+        
+        Args:
+            args: The command-line arguments.
+        """
         self.args = args
         self.current_bot_id = None
-        logger.info("BotManager initialized with args: {}", args)
-
+        logger.info(f"BotManager initialized with args: {args}")
+        
     def run(self):
+        """Main method to run the bot creation and management process."""
         logger.info("Starting BotManager")
-        signal.signal(signal.SIGINT, self.signal_handler)
-
-        while True:
-            try:
-                if not self.args.recorder_only:
-                    self.get_or_update_urls()
-                self.create_and_manage_bot()
-            except Exception as e:
-                logger.exception(f"An error occurred during bot management: {e}")
-                if self.current_bot_id:
-                    self.delete_current_bot()
-                time.sleep(5)
-
-    def get_or_update_urls(self):
-        """Get or update URLs in the order: ngrok -> persona -> meeting URL"""
-        if not self.args.ngrok_url:
-            logger.info("Prompting for ngrok URL")
-            self.args.ngrok_url = get_user_input(
-                "Enter the ngrok URL (must start with https://): ", validate_url
-            )
-            self.args.ngrok_url = "wss://" + self.args.ngrok_url[8:]
-
-        if not self.args.persona_name:
-            self.args.persona_name = get_persona_selection()
-
-        if not self.args.meeting_url:
-            logger.info("Prompting for meeting URL")
-            self.args.meeting_url = get_user_input(
-                "Enter the meeting URL (must start with https://): ", validate_url
-            )
-
-        logger.debug(
-            f"URLs configured - Meeting: {self.args.meeting_url}, WSS: {self.args.ngrok_url}"
-        )
-
+        try:
+            self.create_and_manage_bot()
+        except KeyboardInterrupt:
+            logger.info("Received keyboard interrupt, cleaning up...")
+        except Exception as e:
+            logger.error(f"An error occurred during bot management: {e}")
+            logger.error(traceback.format_exc())
+        
     def create_and_manage_bot(self):
-        self.current_bot_id = create_baas_bot(
-            self.args.meeting_url,
-            self.args.ngrok_url,
-            self.args.persona_name,
-            self.args.recorder_only,
-        )
+        """Create a bot and manage its lifecycle."""
+        try:
+            # Get config parameters from CLI args
+            meeting_url = self.args.meeting_url
+            ngrok_url = self.args.ngrok_url
+            persona_name = self.args.persona_name
+            recorder_only = self.args.recorder_only
+            
+            # Get custom config if provided
+            custom_config = self.args.config
+            dedup_suffix = ""
+            
+            # Check if we have a custom config with a deduplication suffix
+            if hasattr(self.args, 'dedup_suffix') and self.args.dedup_suffix:
+                dedup_suffix = self.args.dedup_suffix
+            
+            # Create bot
+            self.current_bot_id = create_baas_bot(
+                meeting_url,
+                ngrok_url,
+                persona_name,
+                recorder_only,
+                dedup_suffix
+            )
 
-        logger.warning(f"Bot name: {self.args.persona_name}")
+            logger.warning(f"Bot name: {persona_name}")
 
-        logger.info("\nOptions:")
-        logger.info("- Press Enter to respawn bot with same URLs")
-        logger.info("- Enter 'n' to input new URLs")
-        logger.info("- Enter 'p' to select a new persona")
-        logger.info("- Press Ctrl+C to exit")
+            logger.info("\nOptions:")
+            logger.info("- Press Enter to respawn bot with same URLs")
+            logger.info("- Enter 'n' to input new URLs")
+            logger.info("- Enter 'p' to select a new persona")
+            logger.info("- Press Ctrl+C to exit")
 
-        user_choice = input().strip().lower()
-        logger.debug(f"User selected option: {user_choice}")
+            user_choice = input().strip().lower()
+            logger.debug(f"User selected option: {user_choice}")
 
-        self.delete_current_bot()
+            self.delete_current_bot()
 
-        if user_choice == "n":
-            logger.warning("User requested new URLs")
-            self.args.meeting_url = None
-            self.args.ngrok_url = None
-        elif user_choice == "p":
-            logger.warning("User requested new persona")
-            self.args.persona_name = None
+            if user_choice == "n":
+                logger.warning("User requested new URLs")
+                self.args.meeting_url = None
+                self.args.ngrok_url = None
+            elif user_choice == "p":
+                logger.warning("User requested new persona")
+                self.args.persona_name = None
+        except Exception as e:
+            logger.exception(f"An error occurred during bot creation: {e}")
+            logger.error(traceback.format_exc())
 
     def delete_current_bot(self):
         if self.current_bot_id:
@@ -255,13 +271,6 @@ class BotManager:
                 logger.exception(f"Error deleting bot: {e}")
             finally:
                 self.current_bot_id = None
-
-    def signal_handler(self, signum, frame):
-        logger.warning("Ctrl+C detected, initiating cleanup...")
-        self.delete_current_bot()
-        logger.success("Bot cleaned up successfully")
-        logger.info("Exiting...")
-        exit(0)
 
 
 def main():
@@ -281,6 +290,9 @@ def main():
     )
     parser.add_argument(
         "--config", type=str, help="JSON configuration for recorder bot"
+    )
+    parser.add_argument(
+        "--dedup-suffix", type=str, help="Deduplication suffix for the bot"
     )
 
     args = parser.parse_args()
