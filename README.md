@@ -12,7 +12,8 @@ This project extends [Pipecat's WebSocket server implementation](https://github.
 
 -   Meeting agents that can join Google Meet or Microsoft Teams through the [MeetingBaas API](https://meetingbaas.com)
 -   Customizable personas with unique context
--   Support for running multiple instances locally or at scale
+-   Support for running multiple instances via a simple API
+-   WebSocket-based communication for real-time interaction
 
 ## Architecture
 
@@ -27,6 +28,38 @@ This project extends [Pipecat's WebSocket server implementation](https://github.
 
 In this implementation, Pipecat is integrated with [Cartesia](https://www.cartesia.ai/) for speech generation (text-to-speech), [Gladia](https://www.gladia.io/) or [Deepgram](https://deepgram.com/) for speech-to-text conversion, and [OpenAI](https://platform.openai.com/)'s GPT-4 as the underlying LLM.
 
+### API-First Architecture
+
+The project now follows an API-first approach with:
+
+- A lightweight FastAPI server that handles bot management
+- WebSocket server for real-time communication
+- Designed to be used as a backend service behind a more comprehensive API
+- No authentication (meant to be handled by the parent API)
+
+#### API Endpoints
+
+1. Root endpoint (`GET /`):
+   - Health check endpoint
+   - Returns: `{"message": "MeetingBaas Bot API is running"}`
+
+2. Run Bots (`POST /run-bots`):
+   ```json
+   {
+     "count": 1,
+     "meeting_url": "https://meet.google.com/xxx-yyyy-zzz",
+     "personas": ["interviewer", "pair_programmer"],
+     "recorder_only": false,
+     "websocket_url": "ws://your-websocket-server:8000"
+   }
+   ```
+   - All fields are optional except `count` and `meeting_url`
+   - Returns WebSocket URL for real-time communication
+
+3. WebSocket endpoint (`/ws/{client_id}`):
+   - Real-time communication channel for bot control
+   - Supports message broadcasting between connected clients
+
 ### Project Extensions
 
 Building upon Pipecat, we've added:
@@ -35,11 +68,10 @@ Building upon Pipecat, we've added:
     -   Core personality traits and behaviors
     -   Knowledge base and domain expertise
     -   Additional contextual information (websites formatted to MD, technical documentation, etc.)
--   CLI-based creation tool
 -   AI image generation via [Replicate](https://replicate.com/docs)
 -   Image hosting through [UploadThing](https://uploadthing.com/) (UTFS)
 -   [MeetingBaas](https://meetingbaas.com) integration for video meeting platform support
--   Multi-agent orchestration
+-   Multi-agent orchestration via API
 
 ## Required API Keys
 
@@ -191,3 +223,56 @@ Sometimes, due to WebSocket connection delays through ngrok, the Meeting Baas bo
 -   This will reinitiate the connection and allow your bot to join the meeting
 
 This is a normal occurrence and can be easily resolved with a quick bot respawn.
+
+## Running the API Server
+
+### Local Development
+
+```bash
+# Install dependencies
+poetry install
+
+# Run the API server with hot reload
+poetry run uvicorn api:app --reload --host 0.0.0.0 --port 8000
+```
+
+### Production Deployment
+
+```bash
+# Run the API server in production mode
+poetry run uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+### API Documentation
+
+Once the server is running, you can access:
+- Interactive API docs: `http://localhost:8000/docs`
+- OpenAPI specification: `http://localhost:8000/openapi.json`
+
+## Future Development
+
+The API-first approach enables several planned features:
+
+1. Parent API Integration:
+   - Authentication and authorization
+   - Rate limiting
+   - User management
+   - Billing integration
+
+2. Enhanced Bot Management:
+   - Real-time bot status monitoring
+   - Dynamic persona loading
+   - Bot lifecycle management
+   - Meeting recording and transcription
+
+3. WebSocket Features:
+   - Real-time bot control
+   - Live transcription streaming
+   - Meeting analytics
+   - Multi-bot coordination
+
+4. Persona Management:
+   - Dynamic persona creation via API
+   - Persona validation and testing
+   - Knowledge base expansion
+   - Voice characteristic customization
