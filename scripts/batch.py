@@ -14,7 +14,6 @@ from contextlib import suppress
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-import ngrok
 from dotenv import load_dotenv
 
 from config.persona_utils import PersonaManager
@@ -106,24 +105,10 @@ class ProcessLogger:
 class BotProxyManager:
     def __init__(self):
         self.processes: Dict = {}
-        self.listeners: List = []
         self.start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.shutdown_event = asyncio.Event()
         self.initial_args = None
         self.selected_persona_names = []
-
-    async def create_ngrok_tunnel(
-        self, port: int, name: str
-    ) -> Optional[ngrok.Listener]:
-        """Create an ngrok tunnel for the given port"""
-        try:
-            logger.info(f"Creating ngrok tunnel for {name} on port {port}")
-            listener = await ngrok.forward(port, authtoken_from_env=True)
-            logger.success(f"Created ngrok tunnel for {name}: {listener.url()}")
-            return listener
-        except Exception as e:
-            logger.error(f"Error creating ngrok tunnel for {name}: {e}")
-            return None
 
     def run_command(self, command: List[str], name: str) -> Optional[subprocess.Popen]:
         """Run a command and store the process"""
@@ -141,7 +126,6 @@ class BotProxyManager:
                 for line in stream:
                     line = line.strip()
                     if line:
-                        # Check for log level indicators in the line
                         if "ERROR" in line:
                             logger.error(f"{prefix}: {line}")
                         elif "WARNING" in line:
@@ -151,7 +135,6 @@ class BotProxyManager:
                         else:
                             logger.info(f"{prefix}: {line}")
 
-            # Start threads to handle stdout and stderr
             threading.Thread(
                 target=log_output, args=(process.stdout, f"{name}"), daemon=True
             ).start()
@@ -169,18 +152,10 @@ class BotProxyManager:
             return None
 
     async def cleanup(self):
-        """Cleanup all processes and ngrok tunnels"""
+        """Cleanup all processes"""
         try:
-            # Close ngrok tunnels
-            for listener in self.listeners:
-                tunnel_url = listener.url()
-                logger.info(f"Closing ngrok tunnel: {tunnel_url}")
-                listener.close()
-                logger.success(f"Successfully closed ngrok tunnel: {tunnel_url}")
-
-            # Terminate processes in reverse order to ensure clean shutdown
             process_names = list(self.processes.keys())
-            process_names.reverse()  # Reverse to terminate in opposite order of creation
+            process_names.reverse()
             
             for name in process_names:
                 process_info = self.processes[name]
@@ -188,14 +163,13 @@ class BotProxyManager:
                 process = process_info["process"]
                 try:
                     process.terminate()
-                    await asyncio.sleep(1)  # Give process time to terminate gracefully
+                    await asyncio.sleep(1)
                     if process.poll() is None:
-                        process.kill()  # Force kill if still running
+                        process.kill()
                     logger.success(f"Process {name} terminated successfully")
                 except Exception as e:
                     logger.error(f"Error terminating process {name}: {e}")
 
-            # Clear the processes dictionary
             self.processes.clear()
             logger.success("Cleanup completed successfully")
         except Exception as e:
@@ -203,7 +177,6 @@ class BotProxyManager:
 
     def signal_handler(self, signum, frame):
         logger.warning("Ctrl+C detected, initiating cleanup...")
-        # Create and run a new event loop for cleanup
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -224,7 +197,6 @@ class BotProxyManager:
                         logger.warning(
                             f"Process {name} exited with code: {process.returncode}"
                         )
-                        # Could add restart logic here if needed
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 break
@@ -234,7 +206,7 @@ class BotProxyManager:
 
     async def async_main(self) -> None:
         parser = argparse.ArgumentParser(
-            description="Run bot and proxy command pairs with ngrok tunnels"
+            description="Run bot and proxy command pairs"
         )
         parser.add_argument(
             "-c",
@@ -259,6 +231,9 @@ class BotProxyManager:
             "--meeting-url", help="The meeting URL (must start with https://)"
         )
         parser.add_argument(
+            "--websocket-url", help="The WebSocket server URL"
+        )
+        parser.add_argument(
             "--add-recorder",
             action="store_true",
             help="Add an additional recording-only bot",
@@ -279,10 +254,6 @@ class BotProxyManager:
             )
             self.initial_args.meeting_url = meeting_url
 
-        if not os.getenv("NGROK_AUTHTOKEN"):
-            logger.error("NGROK_AUTHTOKEN environment variable is not set")
-            return
-
         current_port = args.start_port
 
         # Add recording-only bot if requested
@@ -290,7 +261,6 @@ class BotProxyManager:
             recorder_name = f"recorder_{args.count + 1}"
             logger.info(f"Adding recording-only bot: {recorder_name}")
 
-            # Start recorder bot
             recorder_process = self.run_command(
                 [
                     "poetry",
@@ -309,14 +279,12 @@ class BotProxyManager:
                 logger.error(f"Failed to start recording bot: {recorder_name}")
 
         try:
-            logger.info(f"Starting {args.count} bot-proxy pairs with ngrok tunnels...")
+            logger.info(f"Starting {args.count} bot-proxy pairs...")
 
-            # Store persona selection logic results
             available_personas = PersonaManager().list_personas()
             self.selected_persona_names = []
 
             if args.personas:
-                # Validate provided personas exist
                 for persona_name in args.personas:
                     if persona_name not in available_personas:
                         raise ValueError(
@@ -324,7 +292,6 @@ class BotProxyManager:
                         )
                     self.selected_persona_names.append(persona_name)
 
-            # If we need more personas than provided, fill with random selections
             if len(self.selected_persona_names) < args.count:
                 remaining_count = args.count - len(self.selected_persona_names)
                 remaining_personas = [
@@ -345,22 +312,17 @@ class BotProxyManager:
             for i in range(args.count):
                 pair_num = i + 1
 
-                # Start bot
                 bot_port = current_port
                 bot_name = f"bot_{pair_num}"
 
-                # Get persona object for this iteration
                 persona_name = self.selected_persona_names[i]
                 persona = PersonaManager().get_persona(persona_name)
                 bot_prompt = persona["prompt"]
                 logger.warning(f"**BOT NAME: {persona_name}**")
-                logger.warning(
-                    f"**SYSTEM PROMPT in batch.py from choice {persona_name}**"
-                )
+                logger.warning(f"**SYSTEM PROMPT in batch.py from choice {persona_name}**")
                 logger.warning(f"System prompt: {bot_prompt}")
                 logger.warning(f"**SYSTEM PROMPT END**")
 
-                # Determine if this bot should speak first
                 speak_first = args.speak_first == pair_num if args.speak_first else False
 
                 bot_process = self.run_command(
@@ -386,7 +348,6 @@ class BotProxyManager:
 
                 await asyncio.sleep(1)
 
-                # Start proxy
                 proxy_port = current_port + 1
                 proxy_name = f"proxy_{pair_num}"
                 proxy_process = self.run_command(
@@ -408,16 +369,6 @@ class BotProxyManager:
                     self.processes[bot_name]["process"].terminate()
                     continue
 
-                # Create ngrok tunnel for the proxy
-                listener = await self.create_ngrok_tunnel(
-                    proxy_port, f"tunnel_{pair_num}"
-                )
-                if listener:
-                    self.listeners.append(listener)
-
-                # Determine if this bot should speak first
-                speak_first = args.speak_first == pair_num if args.speak_first else False
-                
                 meeting_name = f"meeting_{pair_num}"
                 meeting_process = self.run_command(
                     [
@@ -428,8 +379,8 @@ class BotProxyManager:
                         self.initial_args.meeting_url,
                         "--persona-name",
                         persona_name,
-                        "--ngrok-url",
-                        listener.url(),
+                        "--websocket-url",
+                        args.websocket_url,
                         *(["--speak-first"] if speak_first else []),
                     ],
                     meeting_name,
@@ -441,11 +392,10 @@ class BotProxyManager:
                 await asyncio.sleep(1)
 
             logger.success(
-                f"Successfully started {args.count} bot-proxy pairs with ngrok tunnels"
+                f"Successfully started {args.count} bot-proxy pairs"
             )
-            logger.info("Press Ctrl+C to stop all processes and close tunnels")
+            logger.info("Press Ctrl+C to stop all processes")
 
-            # Start process monitor
             monitor_task = asyncio.create_task(self.monitor_processes())
 
             try:
@@ -464,140 +414,11 @@ class BotProxyManager:
             await self.cleanup()
             logger.success("Cleanup completed successfully")
 
-        # Add keyboard input handling for adding new bots
-        while not self.shutdown_event.is_set():
-            user_input = await asyncio.get_event_loop().run_in_executor(
-                None,
-                input,
-                "Press Enter to add more bots with the same configuration, or Ctrl+C to exit: ",
-            )
-            if user_input.strip() == "":
-                current_count = len(self.processes) // 3
-                current_port = self.initial_args.start_port + (current_count * 2)
-
-                # If original launch didn't specify personas, select new random ones
-                if not self.initial_args.personas:
-                    available_personas = PersonaManager().list_personas()
-                    # Exclude currently active personas to avoid duplicates
-                    active_personas = set(
-                        self.selected_persona_names[-self.initial_args.count :]
-                    )
-                    available_personas = [
-                        p for p in available_personas if p not in active_personas
-                    ]
-
-                    if len(available_personas) < self.initial_args.count:
-                        logger.warning(
-                            "Not enough unique personas left, reusing some personas"
-                        )
-                        available_personas = PersonaManager().list_personas()
-
-                    new_personas = random.sample(
-                        available_personas, self.initial_args.count
-                    )
-                    self.selected_persona_names.extend(new_personas)
-
-                for i in range(self.initial_args.count):
-                    pair_num = current_count + i + 1
-                    bot_port = current_port
-                    proxy_port = current_port + 1
-
-                    # Get the newly selected persona for this iteration
-                    persona_name = self.selected_persona_names[
-                        -self.initial_args.count + i
-                    ]
-                    persona = PersonaManager().get_persona(persona_name)
-                    bot_prompt = persona["prompt"]
-
-                    # Start bot
-                    bot_name = f"bot_{pair_num}"
-                    logger.warning(f"**STARTING BOT {bot_name} ON PORT {bot_port}**")
-                    bot_process = self.run_command(
-                        [
-                            "poetry",
-                            "run",
-                            "bot",
-                            "-p",
-                            str(bot_port),
-                            "--system-prompt",
-                            bot_prompt,
-                            "--persona-name",
-                            persona_name,
-                            "--voice-id",
-                            "40104aff-a015-4da1-9912-af950fbec99e",
-                        ],
-                        bot_name,
-                    )
-
-                    if not bot_process:
-                        continue
-
-                    await asyncio.sleep(1)
-
-                    # Start proxy
-                    proxy_name = f"proxy_{pair_num}"
-                    proxy_port = bot_port + 1
-                    logger.warning(
-                        f"**STARTING PROXY {proxy_name} ON PORT {proxy_port} CONNECTING TO BOT PORT {bot_port}**"
-                    )
-                    proxy_process = self.run_command(
-                        [
-                            "poetry",
-                            "run",
-                            "proxy",
-                            "-p",
-                            str(proxy_port),
-                            "--websocket-url",
-                            f"ws://localhost:{bot_port}",
-                        ],
-                        proxy_name,
-                    )
-
-                    if not proxy_process:
-                        logger.error(
-                            f"Failed to start {proxy_name}, terminating {bot_name}"
-                        )
-                        self.processes[bot_name]["process"].terminate()
-                        continue
-
-                    # Create ngrok tunnel for the proxy
-                    listener = await self.create_ngrok_tunnel(
-                        proxy_port, f"tunnel_{pair_num}"
-                    )
-                    if listener:
-                        self.listeners.append(listener)
-                        meeting_name = f"meeting_{pair_num}"
-                        meeting_process = self.run_command(
-                            [
-                                "poetry",
-                                "run",
-                                "meetingbaas",
-                                "--meeting-url",
-                                self.initial_args.meeting_url,
-                                "--persona-name",
-                                persona_name,
-                                "--ngrok-url",
-                                listener.url(),
-                            ],
-                            meeting_name,
-                        )
-                        if not meeting_process:
-                            logger.error(f"Failed to start {meeting_name}")
-
-                    current_port += 2
-                    await asyncio.sleep(1)
-
-                logger.success(
-                    f"Successfully added {self.initial_args.count} new bot-proxy pairs"
-                )
-
     def main(self) -> None:
         """Main entry point with proper signal handling"""
         try:
             if sys.platform != "win32":
-                # Set up signal handlers for Unix-like systems
                 import signal
-
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
 
@@ -612,7 +433,6 @@ class BotProxyManager:
                 finally:
                     loop.close()
             else:
-                # Windows doesn't support loop.add_signal_handler
                 asyncio.run(self.async_main())
         except Exception as e:
             logger.exception(f"Fatal error in main program: {e}")

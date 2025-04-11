@@ -12,6 +12,7 @@ bot = "meetingbaas_pipecat.bot.bot:start"
 proxy = "meetingbaas_pipecat.proxy.proxy:start"
 meetingbaas = "scripts.meetingbaas:main"
 parallel = "scripts.parallel:main"
+api = "api:start_server"
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -22,8 +23,10 @@ pytz = "^2024.2"
 aiohttp = "^3.10.10"
 ngrok = "^1.4.0"
 loguru = "^0.7.2"
-replicate = "^0.22.0"  
-
+replicate = "^0.22.0"
+fastapi = ">=0.115.0,<0.116.0"
+uvicorn = "^0.27.1"
+websockets = ">=13.1,<14.0"
 
 [tool.poetry.group.dev.dependencies]
 grpcio-tools = "<=1.67.1"
