@@ -236,6 +236,36 @@ poetry install
 poetry run uvicorn api:app --reload --host 0.0.0.0 --port 8000
 ```
 
+### Local Testing with Multiple Bots
+
+For local development and testing with multiple bots, you'll need two terminals:
+
+```bash
+# Terminal 1: Start the API server
+poetry run uvicorn api:app --reload --host 0.0.0.0 --port 8000
+
+# Terminal 2: Start ngrok to expose your local server
+ngrok http 8000
+```
+
+Once ngrok is running, it will provide you with a public URL (e.g., `https://abc123.ngrok.io`). Use this URL for your WebSocket connections:
+
+```bash
+# Test the API with curl
+curl -X POST https://abc123.ngrok.io/run-bots \
+  -H "Content-Type: application/json" \
+  -d '{
+    "count": 2,
+    "meeting_url": "https://your-meeting-url",
+    "websocket_url": "wss://abc123.ngrok.io"
+  }'
+```
+
+Note: 
+- Use `wss://` instead of `ws://` when connecting through ngrok
+- Each bot will create its own WebSocket connection to the server
+- You can monitor the connections in the uvicorn logs
+
 ### Production Deployment
 
 ```bash

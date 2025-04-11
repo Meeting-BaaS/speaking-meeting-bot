@@ -25,9 +25,9 @@ logger = configure_logger()
 
 
 def validate_url(url):
-    """Validates the URL format, ensuring it starts with https://"""
-    if not url.startswith("https://"):
-        raise ValueError("URL must start with https://")
+    """Validates the URL format, ensuring it starts with https:// or ws://"""
+    if not (url.startswith("https://") or url.startswith("ws://")):
+        raise ValueError("URL must start with https:// or ws://")
     return url
 
 
@@ -198,245 +198,97 @@ class BotProxyManager:
                             f"Process {name} exited with code: {process.returncode}"
                         )
                 await asyncio.sleep(1)
-            except asyncio.CancelledError:
-                break
             except Exception as e:
                 logger.error(f"Error monitoring processes: {e}")
-                await asyncio.sleep(1)
 
     async def async_main(self) -> None:
-        parser = argparse.ArgumentParser(
-            description="Run bot and proxy command pairs"
-        )
-        parser.add_argument(
-            "-c",
-            "--count",
-            type=int,
-            required=True,
-            help="Number of bot-proxy pairs to run",
-        )
-        parser.add_argument(
-            "--personas",
-            nargs="+",
-            help="List of persona names to use (space-separated). If not provided, random personas will be used.",
-        )
-        parser.add_argument(
-            "-s",
-            "--start-port",
-            type=int,
-            default=8765,
-            help="Starting port number (default: 8765)",
-        )
-        parser.add_argument(
-            "--meeting-url", help="The meeting URL (must start with https://)"
-        )
-        parser.add_argument(
-            "--websocket-url", help="The WebSocket server URL"
-        )
-        parser.add_argument(
-            "--add-recorder",
-            action="store_true",
-            help="Add an additional recording-only bot",
-        )
-        parser.add_argument(
-            "--speak-first",
-            type=int,
-            help="Index of the bot that should speak first (1-based)",
-        )
+        """Main async function to run bots"""
+        parser = argparse.ArgumentParser(description="Run multiple bot-proxy pairs")
+        parser.add_argument("-c", "--count", type=int, help="Number of bot-proxy pairs to run")
+        parser.add_argument("--meeting-url", type=str, help="Meeting URL")
+        parser.add_argument("--websocket-url", type=str, default="ws://localhost:8000", help="WebSocket server URL")
+        parser.add_argument("--personas", nargs="+", help="List of personas to use")
+        parser.add_argument("--recorder-only", action="store_true", help="Run only recorder bots")
+        
         args = parser.parse_args()
-
         self.initial_args = args
 
-        meeting_url = args.meeting_url
+        if not args.count:
+            args.count = int(get_user_input("Enter number of bot-proxy pairs to run: "))
+
         if not args.meeting_url:
-            meeting_url = get_user_input(
-                "Enter the meeting URL (must start with https://): ", validate_url
-            )
-            self.initial_args.meeting_url = meeting_url
-
-        current_port = args.start_port
-
-        # Add recording-only bot if requested
-        if args.add_recorder:
-            recorder_name = f"recorder_{args.count + 1}"
-            logger.info(f"Adding recording-only bot: {recorder_name}")
-
-            recorder_process = self.run_command(
-                [
-                    "poetry",
-                    "run",
-                    "meetingbaas",
-                    "--meeting-url",
-                    meeting_url,
-                    "--recorder-only",
-                ],
-                recorder_name,
+            args.meeting_url = get_user_input(
+                "Enter meeting URL (must start with https://): ", validate_url
             )
 
-            if recorder_process:
-                logger.success(f"Successfully added recording bot: {recorder_name}")
+        # Initialize persona manager
+        persona_manager = PersonaManager()
+        persona_options = persona_manager.get_available_personas()
+
+        if not args.personas:
+            if len(persona_options) >= 2:
+                self.selected_persona_names = get_consecutive_personas(persona_options)
             else:
-                logger.error(f"Failed to start recording bot: {recorder_name}")
+                logger.warning("Not enough personas available, using default behavior")
+                self.selected_persona_names = []
+        else:
+            self.selected_persona_names = args.personas
 
         try:
-            logger.info(f"Starting {args.count} bot-proxy pairs...")
-
-            available_personas = PersonaManager().list_personas()
-            self.selected_persona_names = []
-
-            if args.personas:
-                for persona_name in args.personas:
-                    if persona_name not in available_personas:
-                        raise ValueError(
-                            f"Persona '{persona_name}' not found in available personas"
-                        )
-                    self.selected_persona_names.append(persona_name)
-
-            if len(self.selected_persona_names) < args.count:
-                remaining_count = args.count - len(self.selected_persona_names)
-                remaining_personas = [
-                    p
-                    for p in available_personas
-                    if p not in self.selected_persona_names
+            # Start bot processes
+            for i in range(args.count):
+                bot_name = f"bot_{i}"
+                bot_cmd = [
+                    "python3",
+                    "-m",
+                    "meetingbaas_pipecat.bot.bot",
+                    "--meeting-url",
+                    args.meeting_url,
+                    "--websocket-url",
+                    args.websocket_url,
+                    "--bot-id",
+                    str(i),
                 ]
 
-                if remaining_count > len(remaining_personas):
-                    raise ValueError(
-                        f"Not enough remaining personas to select from. Need {remaining_count} more, but only {len(remaining_personas)} available"
-                    )
+                if args.recorder_only:
+                    bot_cmd.append("--recorder-only")
 
-                random.seed(time.time())
-                random_selections = random.sample(remaining_personas, remaining_count)
-                self.selected_persona_names.extend(random_selections)
+                if self.selected_persona_names:
+                    persona = self.selected_persona_names[i % len(self.selected_persona_names)]
+                    bot_cmd.extend(["--persona", persona])
 
-            for i in range(args.count):
-                pair_num = i + 1
+                logger.info(f"Starting bot {i} with command: {' '.join(bot_cmd)}")
+                if not self.run_command(bot_cmd, bot_name):
+                    logger.error(f"Failed to start {bot_name}")
+                    await self.cleanup()
+                    return
 
-                bot_port = current_port
-                bot_name = f"bot_{pair_num}"
-
-                persona_name = self.selected_persona_names[i]
-                persona = PersonaManager().get_persona(persona_name)
-                bot_prompt = persona["prompt"]
-                logger.warning(f"**BOT NAME: {persona_name}**")
-                logger.warning(f"**SYSTEM PROMPT in batch.py from choice {persona_name}**")
-                logger.warning(f"System prompt: {bot_prompt}")
-                logger.warning(f"**SYSTEM PROMPT END**")
-
-                speak_first = args.speak_first == pair_num if args.speak_first else False
-
-                bot_process = self.run_command(
-                    [
-                        "poetry",
-                        "run",
-                        "bot",
-                        "-p",
-                        str(bot_port),
-                        "--system-prompt",
-                        bot_prompt,
-                        "--persona-name",
-                        persona_name,
-                        "--voice-id",
-                        "40104aff-a015-4da1-9912-af950fbec99e",
-                        *(["--speak-first", str(pair_num)] if speak_first else []),
-                    ],
-                    bot_name,
-                )
-
-                if not bot_process:
-                    continue
-
-                await asyncio.sleep(1)
-
-                proxy_port = current_port + 1
-                proxy_name = f"proxy_{pair_num}"
-                proxy_process = self.run_command(
-                    [
-                        "poetry",
-                        "run",
-                        "proxy",
-                        "-p",
-                        str(proxy_port),
-                        "--websocket-url",
-                        f"ws://localhost:{bot_port}",
-                    ],
-                    proxy_name,
-                )
-                if not proxy_process:
-                    logger.error(
-                        f"Failed to start {proxy_name}, terminating {bot_name}"
-                    )
-                    self.processes[bot_name]["process"].terminate()
-                    continue
-
-                meeting_name = f"meeting_{pair_num}"
-                meeting_process = self.run_command(
-                    [
-                        "poetry",
-                        "run",
-                        "meetingbaas",
-                        "--meeting-url",
-                        self.initial_args.meeting_url,
-                        "--persona-name",
-                        persona_name,
-                        "--websocket-url",
-                        args.websocket_url,
-                        *(["--speak-first"] if speak_first else []),
-                    ],
-                    meeting_name,
-                )
-                if not meeting_process:
-                    logger.error(f"Failed to start {meeting_name}")
-
-                current_port += 2
-                await asyncio.sleep(1)
-
-            logger.success(
-                f"Successfully started {args.count} bot-proxy pairs"
-            )
-            logger.info("Press Ctrl+C to stop all processes")
-
-            monitor_task = asyncio.create_task(self.monitor_processes())
-
-            try:
-                await self.shutdown_event.wait()
-            except asyncio.CancelledError:
-                logger.info("\nReceived shutdown signal")
-            finally:
-                self.shutdown_event.set()
-                await monitor_task
+            # Monitor processes
+            await self.monitor_processes()
 
         except KeyboardInterrupt:
-            logger.info("\nReceived shutdown signal (Ctrl+C)")
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-        finally:
+            logger.warning("Keyboard interrupt detected")
             await self.cleanup()
-            logger.success("Cleanup completed successfully")
+        except Exception as e:
+            logger.error(f"Error in main: {e}")
+            logger.error(traceback.format_exc())
+            await self.cleanup()
 
     def main(self) -> None:
-        """Main entry point with proper signal handling"""
+        """Synchronous entry point"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
         try:
-            if sys.platform != "win32":
-                import signal
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+            def signal_handler():
+                self.signal_handler(None, None)
 
-                def signal_handler():
-                    self.shutdown_event.set()
+            loop.add_signal_handler(signal.SIGINT, signal_handler)
+            loop.add_signal_handler(signal.SIGTERM, signal_handler)
 
-                loop.add_signal_handler(signal.SIGINT, signal_handler)
-                loop.add_signal_handler(signal.SIGTERM, signal_handler)
-
-                try:
-                    loop.run_until_complete(self.async_main())
-                finally:
-                    loop.close()
-            else:
-                asyncio.run(self.async_main())
-        except Exception as e:
-            logger.exception(f"Fatal error in main program: {e}")
-            sys.exit(1)
+            loop.run_until_complete(self.async_main())
+        finally:
+            loop.close()
 
 
 if __name__ == "__main__":
