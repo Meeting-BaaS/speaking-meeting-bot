@@ -28,6 +28,26 @@ async def configure(
         type=int,
         help="Index of the bot that should speak first (1-based)",
     )
+    parser.add_argument(
+        "--meeting-url",
+        type=str,
+        help="The meeting URL to join",
+    )
+    parser.add_argument(
+        "--websocket-url",
+        type=str,
+        help="The WebSocket URL for MeetingBaas to connect to",
+    )
+    parser.add_argument(
+        "--bot-id",
+        type=str,
+        help="Unique identifier for the bot",
+    )
+    parser.add_argument(
+        "--recorder-only",
+        action="store_true",
+        help="Whether the bot is a recorder only",
+    )
 
     args, unknown = parser.parse_known_args()
 

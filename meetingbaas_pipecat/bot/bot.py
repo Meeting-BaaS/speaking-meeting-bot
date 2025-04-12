@@ -5,6 +5,7 @@ from datetime import datetime
 
 import aiohttp
 import pytz
+import requests
 from dotenv import load_dotenv
 from loguru import logger
 from openai.types.chat import ChatCompletionToolParam
@@ -33,6 +34,93 @@ from .runner import configure
 load_dotenv(override=True)
 
 logger = configure_logger()
+
+# Add MeetingBaas API constants
+API_KEY = os.getenv("MEETING_BAAS_API_KEY")
+API_URL = os.getenv("MEETING_BAAS_API_URL", "https://api.meetingbaas.com")
+
+# Check for required API keys
+if not API_KEY:
+    logger.error("MEETING_BAAS_API_KEY not found in environment variables")
+    sys.exit(1)
+
+
+# Add this function to create the bot via MeetingBaas API
+def create_baas_bot(
+    meeting_url, websocket_url, bot_id, persona_name, recorder_only=False
+):
+    """Create a bot using MeetingBaas API"""
+    # Create bot configuration
+    logger.info(
+        f"Preparing MeetingBaas bot configuration for {persona_name} (ID: {bot_id})"
+    )
+    logger.info(f"Meeting URL: {meeting_url}")
+    logger.info(f"WebSocket URL: {websocket_url}")
+    logger.info(f"Recorder only: {recorder_only}")
+
+    config = {
+        "meeting_url": meeting_url,
+        "bot_name": persona_name,
+        "recording_mode": "speaker_view",
+        "reserved": False,
+        "automatic_leave": {"waiting_room_timeout": 600},
+        "deduplication_key": f"{persona_name}-BaaS-{bot_id}",
+        "streaming": {"input": websocket_url, "output": websocket_url},
+    }
+
+    if recorder_only:
+        logger.info("Setting up recorder-only mode with Default STT provider")
+        config["speech_to_text"] = {"provider": "Default"}
+
+    # Make API call to create bot
+    url = f"{API_URL}/bots"
+    headers = {
+        "Content-Type": "application/json",
+        "x-meeting-baas-api-key": API_KEY,
+    }
+
+    # Log API key (partially redacted for security)
+    api_key_prefix = API_KEY[:4] if API_KEY and len(API_KEY) > 8 else "****"
+    api_key_suffix = API_KEY[-4:] if API_KEY and len(API_KEY) > 8 else "****"
+    logger.info(f"Using MeetingBaas API key: {api_key_prefix}...{api_key_suffix}")
+
+    logger.info(f"Sending request to MeetingBaas API: {url}")
+    logger.debug(f"Request headers: {headers}")
+    logger.debug(f"Request payload: {config}")
+
+    try:
+        logger.info("Making API call to create MeetingBaas bot...")
+        response = requests.post(url, json=config, headers=headers)
+
+        logger.info(f"API response status code: {response.status_code}")
+        logger.debug(f"API response headers: {dict(response.headers)}")
+
+        if response.status_code == 200:
+            response_data = response.json()
+            bot_id = response_data.get("bot_id")
+            logger.success(f"Bot created successfully with ID: {bot_id}")
+            logger.debug(f"Full API response: {response_data}")
+            return bot_id
+        else:
+            try:
+                error_data = response.json()
+                logger.error(
+                    f"Failed to create bot: {response.status_code} - {error_data}"
+                )
+                logger.error(
+                    f"Error details: {error_data.get('error', {}).get('message', 'No error message')}"
+                )
+            except ValueError:
+                logger.error(
+                    f"Failed to create bot: {response.status_code} - {response.text}"
+                )
+            return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error during MeetingBaas API call: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error creating MeetingBaas bot: {str(e)}")
+        return None
 
 
 async def get_weather(
@@ -89,7 +177,7 @@ async def log_speech(frame):
 
 
 async def main():
-    # Make sure we use the correct order
+    # Get arguments from runner.configure
     (
         host,
         port,
@@ -99,6 +187,38 @@ async def main():
         args,
         additional_content,
     ) = await configure()
+
+    # Extract meeting URL and bot ID from args
+    meeting_url = getattr(args, "meeting_url", None)
+    bot_id = getattr(args, "bot_id", "default")
+    recorder_only = getattr(args, "recorder_only", False)
+    websocket_url = getattr(args, "websocket_url", None)
+
+    # Use fully qualified websocket URL with port
+    if websocket_url:
+        if not websocket_url.startswith("wss://") and not websocket_url.startswith(
+            "ws://"
+        ):
+            websocket_url = f"ws://{websocket_url}"
+
+        # Extract base URL from websocket_url for MeetingBaas
+        if websocket_url.startswith("wss://"):
+            meeting_baas_url = websocket_url
+        else:
+            # If websocket URL is local, we need to use a specific port
+            meeting_baas_url = f"{websocket_url}:{port}"
+
+        # Create bot via MeetingBaas API
+        if meeting_url:
+            bot_baas_id = create_baas_bot(
+                meeting_url, meeting_baas_url, bot_id, persona_name, recorder_only
+            )
+
+            if not bot_baas_id:
+                logger.error(
+                    "Failed to create MeetingBaas bot. Check API key and parameters."
+                )
+                return
 
     logger.warning(f"**CARTESIA VOICE ID: {voice_id}**")
     logger.warning(f"**BOT NAME: {persona_name}**")
@@ -235,7 +355,7 @@ async def main():
             # Send an initial greeting when the bot joins
             initial_message = {
                 "role": "user",
-                "content": "Please introduce yourself and start the conversation."
+                "content": "Please introduce yourself and start the conversation.",
             }
             await task.queue_frames([LLMMessagesFrame([initial_message])])
 
