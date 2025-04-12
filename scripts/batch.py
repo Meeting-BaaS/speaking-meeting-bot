@@ -5,6 +5,7 @@ import os
 import queue
 import random
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -156,7 +157,7 @@ class BotProxyManager:
         try:
             process_names = list(self.processes.keys())
             process_names.reverse()
-            
+
             for name in process_names:
                 process_info = self.processes[name]
                 logger.info(f"Terminating process: {name}")
@@ -201,60 +202,94 @@ class BotProxyManager:
             except Exception as e:
                 logger.error(f"Error monitoring processes: {e}")
 
-    async def async_main(self) -> None:
-        """Main async function to run bots"""
-        parser = argparse.ArgumentParser(description="Run multiple bot-proxy pairs")
-        parser.add_argument("-c", "--count", type=int, help="Number of bot-proxy pairs to run")
-        parser.add_argument("--meeting-url", type=str, help="Meeting URL")
-        parser.add_argument("--websocket-url", type=str, default="ws://localhost:8000", help="WebSocket server URL")
-        parser.add_argument("--personas", nargs="+", help="List of personas to use")
-        parser.add_argument("--recorder-only", action="store_true", help="Run only recorder bots")
-        
-        args = parser.parse_args()
-        self.initial_args = args
+    async def async_main(
+        self,
+        count: int = None,
+        meeting_url: str = None,
+        websocket_url: str = "ws://localhost:8000",
+        personas: List[str] = None,
+        recorder_only: bool = False,
+    ) -> None:
+        """Main async function to run bots with direct parameters instead of command line args
 
-        if not args.count:
-            args.count = int(get_user_input("Enter number of bot-proxy pairs to run: "))
+        Args:
+            count: Number of bot-proxy pairs to run
+            meeting_url: Meeting URL to join
+            websocket_url: WebSocket server URL
+            personas: List of personas to use
+            recorder_only: Whether to run only recorder bots
+        """
+        # For backward compatibility with command line usage
+        if count is None or meeting_url is None:
+            parser = argparse.ArgumentParser(description="Run multiple bot-proxy pairs")
+            parser.add_argument(
+                "-c", "--count", type=int, help="Number of bot-proxy pairs to run"
+            )
+            parser.add_argument("--meeting-url", type=str, help="Meeting URL")
+            parser.add_argument(
+                "--websocket-url",
+                type=str,
+                default="ws://localhost:8000",
+                help="WebSocket server URL",
+            )
+            parser.add_argument("--personas", nargs="+", help="List of personas to use")
+            parser.add_argument(
+                "--recorder-only", action="store_true", help="Run only recorder bots"
+            )
 
-        if not args.meeting_url:
-            args.meeting_url = get_user_input(
+            args = parser.parse_args()
+            self.initial_args = args
+
+            count = count or args.count
+            meeting_url = meeting_url or args.meeting_url
+            websocket_url = websocket_url or args.websocket_url
+            personas = personas or args.personas
+            recorder_only = recorder_only or args.recorder_only
+
+        if not count:
+            count = int(get_user_input("Enter number of bot-proxy pairs to run: "))
+
+        if not meeting_url:
+            meeting_url = get_user_input(
                 "Enter meeting URL (must start with https://): ", validate_url
             )
 
         # Initialize persona manager
         persona_manager = PersonaManager()
-        persona_options = persona_manager.get_available_personas()
+        persona_options = persona_manager.list_personas()
 
-        if not args.personas:
+        if not personas:
             if len(persona_options) >= 2:
                 self.selected_persona_names = get_consecutive_personas(persona_options)
             else:
                 logger.warning("Not enough personas available, using default behavior")
                 self.selected_persona_names = []
         else:
-            self.selected_persona_names = args.personas
+            self.selected_persona_names = personas
 
         try:
             # Start bot processes
-            for i in range(args.count):
+            for i in range(count):
                 bot_name = f"bot_{i}"
                 bot_cmd = [
                     "python3",
                     "-m",
                     "meetingbaas_pipecat.bot.bot",
                     "--meeting-url",
-                    args.meeting_url,
+                    meeting_url,
                     "--websocket-url",
-                    args.websocket_url,
+                    websocket_url,
                     "--bot-id",
                     str(i),
                 ]
 
-                if args.recorder_only:
+                if recorder_only:
                     bot_cmd.append("--recorder-only")
 
                 if self.selected_persona_names:
-                    persona = self.selected_persona_names[i % len(self.selected_persona_names)]
+                    persona = self.selected_persona_names[
+                        i % len(self.selected_persona_names)
+                    ]
                     bot_cmd.extend(["--persona", persona])
 
                 logger.info(f"Starting bot {i} with command: {' '.join(bot_cmd)}")
@@ -274,23 +309,40 @@ class BotProxyManager:
             logger.error(traceback.format_exc())
             await self.cleanup()
 
-    def main(self) -> None:
-        """Synchronous entry point"""
+    def main(
+        self,
+        count: int = None,
+        meeting_url: str = None,
+        websocket_url: str = "ws://localhost:8000",
+        personas: List[str] = None,
+        recorder_only: bool = False,
+    ) -> None:
+        """Synchronous entry point with direct parameters"""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
         try:
+
             def signal_handler():
                 self.signal_handler(None, None)
 
             loop.add_signal_handler(signal.SIGINT, signal_handler)
             loop.add_signal_handler(signal.SIGTERM, signal_handler)
 
-            loop.run_until_complete(self.async_main())
+            loop.run_until_complete(
+                self.async_main(
+                    count=count,
+                    meeting_url=meeting_url,
+                    websocket_url=websocket_url,
+                    personas=personas,
+                    recorder_only=recorder_only,
+                )
+            )
         finally:
             loop.close()
 
 
 if __name__ == "__main__":
     manager = BotProxyManager()
+    # Call main without parameters to use command-line argument parsing
     manager.main()
