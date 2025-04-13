@@ -209,6 +209,7 @@ class BotProxyManager:
         websocket_url: str = "ws://localhost:8000",
         personas: List[str] = None,
         recorder_only: bool = False,
+        meeting_baas_api_key: str = None,
     ) -> None:
         """Main async function to run bots with direct parameters instead of command line args
 
@@ -291,6 +292,9 @@ class BotProxyManager:
                         i % len(self.selected_persona_names)
                     ]
                     bot_cmd.extend(["--persona", persona])
+
+                if meeting_baas_api_key:
+                    bot_cmd.extend(["--meeting-baas-api-key", meeting_baas_api_key])
 
                 logger.info(f"Starting bot {i} with command: {' '.join(bot_cmd)}")
                 if not self.run_command(bot_cmd, bot_name):
