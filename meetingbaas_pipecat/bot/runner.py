@@ -31,16 +31,19 @@ async def configure(
     parser.add_argument(
         "--meeting-url",
         type=str,
+        required=True,
         help="The meeting URL to join",
     )
     parser.add_argument(
         "--websocket-url",
         type=str,
+        default="ws://localhost:8000",
         help="The WebSocket URL for MeetingBaas to connect to",
     )
     parser.add_argument(
         "--bot-id",
         type=str,
+        default="default",
         help="Unique identifier for the bot",
     )
     parser.add_argument(
@@ -51,7 +54,7 @@ async def configure(
     parser.add_argument(
         "--meeting-baas-api-key",
         type=str,
-        help="The API key for MeetingBaas",
+        help="The API key for MeetingBaas (falls back to MEETING_BAAS_API_KEY env var if not provided)",
     )
 
     args, unknown = parser.parse_known_args()

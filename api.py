@@ -51,7 +51,7 @@ manager = ConnectionManager()
 
 
 class BotRequest(BaseModel):
-    count: int
+    count: int = 1  # Default to 1, effectively making this a "per-bot" request
     meeting_url: str
     personas: Optional[List[str]] = None
     recorder_only: bool = False
@@ -66,16 +66,21 @@ async def root():
 
 @app.post("/run-bots")
 async def run_bots(request: BotRequest):
-    # Start WebSocket server if no URL provided
-    websocket_url = request.websocket_url or "ws://localhost:8000"
+    """
+    Create a single bot with its own WebSocket server.
+    For multiple bots, clients should make multiple API calls.
+    """
+    # Require a websocket_url or return an error
+    if not request.websocket_url:
+        return {"message": "WebSocket URL is required", "status": "error"}, 400
 
-    # Create a BotProxyManager instance and run it with direct parameters
+    # Create a BotProxyManager instance and run it
     manager = BotProxyManager()
     asyncio.create_task(
         manager.async_main(
             count=request.count,
             meeting_url=request.meeting_url,
-            websocket_url=websocket_url,
+            websocket_url=request.websocket_url,  # No default fallback
             personas=request.personas,
             recorder_only=request.recorder_only,
             meeting_baas_api_key=request.meeting_baas_api_key,
@@ -83,9 +88,9 @@ async def run_bots(request: BotRequest):
     )
 
     return {
-        "message": f"Starting {request.count} bots for meeting {request.meeting_url}",
+        "message": f"Starting bot for meeting {request.meeting_url}",
         "status": "success",
-        "websocket_url": websocket_url,
+        "websocket_url": request.websocket_url,
     }
 
 
