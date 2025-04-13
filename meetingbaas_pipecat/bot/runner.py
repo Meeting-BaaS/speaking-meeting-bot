@@ -48,6 +48,11 @@ async def configure(
         action="store_true",
         help="Whether the bot is a recorder only",
     )
+    parser.add_argument(
+        "--meeting-baas-api-key",
+        type=str,
+        help="The API key for MeetingBaas",
+    )
 
     args, unknown = parser.parse_known_args()
 

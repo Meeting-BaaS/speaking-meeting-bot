@@ -36,13 +36,13 @@ load_dotenv(override=True)
 logger = configure_logger()
 
 # Add MeetingBaas API constants
-API_KEY = os.getenv("MEETING_BAAS_API_KEY")
+API_KEY = None  # Will be set from args
 API_URL = os.getenv("MEETING_BAAS_API_URL", "https://api.meetingbaas.com")
 
 # Check for required API keys
-if not API_KEY:
-    logger.error("MEETING_BAAS_API_KEY not found in environment variables")
-    sys.exit(1)
+# if not API_KEY:
+#     logger.error("MEETING_BAAS_API_KEY not found in environment variables")
+#     sys.exit(1)
 
 
 # Add this function to create the bot via MeetingBaas API
@@ -193,6 +193,14 @@ async def main():
     bot_id = getattr(args, "bot_id", "default")
     recorder_only = getattr(args, "recorder_only", False)
     websocket_url = getattr(args, "websocket_url", None)
+
+    # Set API key from args
+    global API_KEY
+    API_KEY = getattr(args, "meeting_baas_api_key", os.getenv("MEETING_BAAS_API_KEY"))
+
+    if not API_KEY:
+        logger.error("MeetingBaas API key not provided and not found in environment")
+        return
 
     # Use fully qualified websocket URL with port
     if websocket_url:

@@ -56,6 +56,7 @@ class BotRequest(BaseModel):
     personas: Optional[List[str]] = None
     recorder_only: bool = False
     websocket_url: Optional[str] = None
+    meeting_baas_api_key: str
 
 
 @app.get("/")
@@ -77,6 +78,7 @@ async def run_bots(request: BotRequest):
             websocket_url=websocket_url,
             personas=request.personas,
             recorder_only=request.recorder_only,
+            meeting_baas_api_key=request.meeting_baas_api_key,
         )
     )
 
