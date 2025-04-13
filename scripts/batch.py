@@ -330,27 +330,27 @@ class BotProxyManager:
 
                 # If we want to return the bot ID, wait for it to appear in stdout
                 if return_bot_id:
-                    # Wait a moment to give the process time to start and log its output
-                    await asyncio.sleep(2)
+                    # Create a future that will be completed when the bot ID is found
+                    bot_id_future = asyncio.Future()
 
-                    # Wait for the bot ID to appear (up to 10 seconds)
-                    for _ in range(20):  # 20 iterations * 0.5s = 10 seconds
-                        # Check if the process has stored a bot ID
-                        if (
-                            bot_name in self.processes
-                            and "bot_id" in self.processes[bot_name]
-                        ):
-                            created_bot_id = self.processes[bot_name]["bot_id"]
-                            break
-                        await asyncio.sleep(0.5)
+                    # Store the future in the process info so log_output can complete it
+                    self.processes[bot_name]["bot_id_future"] = bot_id_future
 
-                    if created_bot_id:
-                        # Found a bot ID, we can return it
+                    try:
+                        # Wait for the future to be completed with a timeout
+                        created_bot_id = await asyncio.wait_for(bot_id_future, 10.0)
+                        logger.info(f"Received bot ID: {created_bot_id}")
+
                         if return_bot_id:
                             return created_bot_id
-                        break
-                    else:
-                        logger.warning(f"Failed to obtain bot ID from {bot_name}")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Timed out waiting for bot ID from {bot_name}")
+
+                    # If we're still here and there's no bot ID, try to get it from the process info
+                    if created_bot_id is None and "bot_id" in self.processes[bot_name]:
+                        created_bot_id = self.processes[bot_name]["bot_id"]
+                        if created_bot_id and return_bot_id:
+                            return created_bot_id
 
             # If not waiting for a bot ID or if we already found it, start monitoring
             if not return_bot_id:

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from typing import Dict, List, Optional
 
 import uvicorn
@@ -9,10 +10,10 @@ import websockets
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl
 
 import protobufs.frames_pb2 as frames_pb2  # Import Protobuf definitions
-from scripts.batch import BotProxyManager
+from scripts.meetingbaas_api import create_meeting_bot
 
 # Configure logging
 logging.basicConfig(
@@ -127,6 +128,9 @@ class BotRequest(BaseModel):
     recorder_only: bool = False
     websocket_url: Optional[str] = None
     meeting_baas_api_key: str
+    bot_image: Optional[str] = None
+    entry_message: Optional[str] = None
+    extra: Optional[Dict] = None
 
 
 @app.get("/")
@@ -137,69 +141,70 @@ async def root():
 @app.post("/run-bots")
 async def run_bots(request: BotRequest):
     """
-    Create a single bot with its own WebSocket server.
-    For multiple bots, clients should make multiple API calls.
+    Create a bot directly via MeetingBaas API and establish WebSocket connection.
     """
-    # Require a websocket_url or return an error
+    # Validate required parameters
     if not request.websocket_url:
-        return {"message": "WebSocket URL is required", "status": "error"}, 400
+        return JSONResponse(
+            content={"message": "WebSocket URL is required", "status": "error"},
+            status_code=400,
+        )
+
+    if not request.meeting_url:
+        return JSONResponse(
+            content={"message": "Meeting URL is required", "status": "error"},
+            status_code=400,
+        )
+
+    if not request.meeting_baas_api_key:
+        return JSONResponse(
+            content={"message": "MeetingBaas API key is required", "status": "error"},
+            status_code=400,
+        )
 
     logger.info(f"Starting bot for meeting {request.meeting_url}")
     logger.info(f"WebSocket URL: {request.websocket_url}")
     logger.info(f"Personas: {request.personas}")
 
-    # Create a BotProxyManager instance
-    bot_manager = BotProxyManager()
+    # Generate a UUID for the bot
+    bot_client_id = str(uuid.uuid4())[:8]
 
-    # Create a future to store the bot ID
-    bot_id_future = asyncio.Future()
+    # Select the persona (use first one if provided, otherwise "default")
+    persona_name = (
+        request.personas[0]
+        if request.personas and len(request.personas) > 0
+        else "default"
+    )
 
-    # Start the bot process and pass the future
-    asyncio.create_task(start_bot_and_get_id(bot_manager, request, bot_id_future))
+    # Create bot directly through MeetingBaas API
+    meetingbaas_bot_id = create_meeting_bot(
+        meeting_url=request.meeting_url,
+        websocket_url=request.websocket_url,
+        bot_id=bot_client_id,
+        persona_name=persona_name,
+        api_key=request.meeting_baas_api_key,
+        recorder_only=request.recorder_only,
+        bot_image=request.bot_image,
+        entry_message=request.entry_message,
+        extra=request.extra,
+    )
 
-    # Wait for the bot ID with a timeout (15 seconds)
-    try:
-        bot_id = await asyncio.wait_for(bot_id_future, timeout=15.0)
+    if meetingbaas_bot_id:
         return {
             "message": f"Bot successfully created for meeting {request.meeting_url}",
             "status": "success",
             "websocket_url": request.websocket_url,
-            "bot_id": bot_id,
+            "bot_id": meetingbaas_bot_id,
+            "client_id": bot_client_id,
         }
-    except asyncio.TimeoutError:
-        # Return a response without the bot ID if it takes too long
-        logger.warning("Timed out waiting for bot ID, returning response without it")
-        return {
-            "message": f"Bot started for meeting {request.meeting_url}, but creation is still in progress",
-            "status": "pending",
-            "websocket_url": request.websocket_url,
-        }
-
-
-async def start_bot_and_get_id(bot_manager, request, bot_id_future):
-    """
-    Start the bot process and set the future with the bot ID when available.
-    """
-    try:
-        # Start the bot process
-        bot_id = await bot_manager.async_main(
-            count=request.count,
-            meeting_url=request.meeting_url,
-            websocket_url=request.websocket_url,
-            personas=request.personas,
-            recorder_only=request.recorder_only,
-            meeting_baas_api_key=request.meeting_baas_api_key,
-            return_bot_id=True,  # Signal that we want the bot ID returned
+    else:
+        return JSONResponse(
+            content={
+                "message": "Failed to create bot through MeetingBaas API",
+                "status": "error",
+            },
+            status_code=500,
         )
-
-        # Set the result in the future
-        if not bot_id_future.done():
-            bot_id_future.set_result(bot_id)
-            logger.info(f"Bot created with ID: {bot_id}")
-    except Exception as e:
-        logger.error(f"Error starting bot: {str(e)}")
-        if not bot_id_future.done():
-            bot_id_future.set_exception(e)
 
 
 @app.websocket("/ws/{client_id}")
