@@ -30,12 +30,12 @@ In this implementation, Pipecat is integrated with [Cartesia](https://www.cartes
 
 ### API-First Architecture
 
-The project now follows an API-first approach with:
+The project follows a streamlined API-first approach with:
 
-- A lightweight FastAPI server that handles bot management
-- WebSocket server for real-time communication
-- Designed to be used as a backend service behind a more comprehensive API
-- No authentication (meant to be handled by the parent API)
+- A lightweight FastAPI server that handles bot management via direct MeetingBaas API calls
+- WebSocket server for real-time communication between MeetingBaas and Pipecat
+- Properly typed Pydantic models for request/response validation
+- Clean separation of concerns with modular components
 
 #### API Endpoints
 
@@ -48,20 +48,25 @@ The project now follows an API-first approach with:
 
    ```json
    {
-     "count": 1,
      "meeting_url": "https://meet.google.com/xxx-yyyy-zzz",
-     "personas": ["interviewer", "pair_programmer"],
+     "personas": ["interviewer"],
      "recorder_only": false,
-     "websocket_url": "ws://your-websocket-server:8000"
+     "websocket_url": "ws://your-websocket-server:8000",
+     "meeting_baas_api_key": "your-api-key",
+     "bot_image": "https://example.com/avatar.jpg",
+     "entry_message": "Hello, I'm here to help!"
    }
    ```
 
-   - All fields are optional except `count` and `meeting_url`
-   - Returns WebSocket URL for real-time communication
+   - Required fields: `meeting_url`, `websocket_url`, and `meeting_baas_api_key`
+   - Returns: MeetingBaas bot ID and client ID for WebSocket connections
 
 3. WebSocket endpoint (`/ws/{client_id}`):
-   - Real-time communication channel for bot control
-   - Supports message broadcasting between connected clients
+   - Real-time communication channel for audio streaming
+   - Binary audio data and control messages
+4. Pipecat WebSocket endpoint (`/pipecat/{client_id}`):
+   - Connection point for Pipecat services
+   - Bidirectional conversion between raw audio and Protobuf frames
 
 ### Project Extensions
 
@@ -172,33 +177,51 @@ Edit `.env` with your MeetingBaas credentials.
 
 ## Running Meeting Agents
 
-### Single Agent Deployment
+### API Server Setup
 
-To launch one agent into a meeting:
+To start the API server:
 
 ```bash
-poetry run python scripts/batch.py -c 1 --meeting-url <your-meeting-url>
+# Run the API server with hot reload
+poetry run uvicorn api:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Multiple Agent Deployment
+### Creating Bots via API
 
-To launch two agents simultaneously:
+Use the `/run-bots` endpoint to create bots directly:
 
 ```bash
-poetry run python scripts/batch.py -c 2 --meeting-url <your-meeting-url>
+curl -X POST http://localhost:8000/run-bots \
+  -H "Content-Type: application/json" \
+  -d '{
+    "meeting_url": "https://meet.google.com/xxx-yyyy-zzz",
+    "personas": ["interviewer"],
+    "recorder_only": false,
+    "websocket_url": "ws://localhost:8000",
+    "meeting_baas_api_key": "your-api-key"
+  }'
 ```
 
 ### Local Deployment with Ngrok
 
-For 1-2 agents, use Ngrok to expose your local server:
+For external access, use Ngrok to expose your local server:
 
 ```bash
-ngrok start --all --config ~/.config/ngrok/ngrok.yml,./config/ngrok/config.yml
+ngrok http 8000
 ```
 
-### Web Deployment
+When using Ngrok, update your WebSocket URL to use the Ngrok domain with `wss://` protocol:
 
-For more than 2 agents, deploy to a web server to avoid Ngrok limitations.
+```bash
+curl -X POST https://your-ngrok-url/run-bots \
+  -H "Content-Type: application/json" \
+  -d '{
+    "meeting_url": "https://meet.google.com/xxx-yyyy-zzz",
+    "personas": ["interviewer"],
+    "websocket_url": "wss://your-ngrok-url",
+    "meeting_baas_api_key": "your-api-key"
+  }'
+```
 
 ## Future Extensibility
 
@@ -277,29 +300,33 @@ Note:
 
 ### API Improvements
 
-The API has been improved to use direct parameter passing instead of modifying sys.argv, which makes it:
+The API has been completely redesigned for simplicity and reliability:
 
-- More maintainable and less error-prone
-- Compatible with Python best practices
-- Easier to integrate with other systems
-- Ready for containerization
+- Direct integration with the MeetingBaas API without subprocess management
+- Strongly typed Pydantic models with proper validation
+- Cleaner WebSocket handling with better error management
+- Improved logging with better visibility into the system
+- Enhanced JSON message processing for debugging
 
-The BotProxyManager now accepts parameters directly:
+The direct API integration provides several benefits:
 
 ```python
-manager = BotProxyManager()
-asyncio.create_task(
-    manager.async_main(
-        count=request.count,
-        meeting_url=request.meeting_url,
-        websocket_url=websocket_url,
-        personas=request.personas,
-        recorder_only=request.recorder_only,
-    )
+# Direct API call to MeetingBaas
+meetingbaas_bot_id = create_meeting_bot(
+    meeting_url=request.meeting_url,
+    websocket_url=request.websocket_url,
+    bot_id=bot_client_id,
+    persona_name=persona_name,
+    api_key=request.meeting_baas_api_key,
+    # Additional parameters
+    recorder_only=request.recorder_only,
+    bot_image=request.bot_image,
+    entry_message=request.entry_message,
+    extra=request.extra,
 )
 ```
 
-This approach maintains backward compatibility with command-line usage while providing a cleaner API for programmatic use.
+This approach eliminates the complexity of subprocess management, provides immediate feedback on bot creation, and returns both the MeetingBaas bot ID and client ID for WebSocket connections.
 
 ### Production Deployment
 
