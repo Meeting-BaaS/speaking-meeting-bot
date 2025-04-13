@@ -22,6 +22,7 @@ load_dotenv(override=True)
 
 logger = configure_logger()
 
+
 async def main(
     meeting_url: str,
     persona_name: str,
@@ -58,10 +59,10 @@ async def main(
 
         # Create Daily transport
         transport = DailyTransport(
-            room_url=meeting_url,
-            token=os.getenv("DAILY_API_KEY"),
+            meeting_url,
             "Bot",
-            DailyParams(
+            token=os.getenv("DAILY_API_KEY"),
+            params=DailyParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
                 camera_out_enabled=True,
@@ -72,7 +73,7 @@ async def main(
             ),
         )
 
-        # Create pipeline
+        # Set up messages only once
         messages = [
             {
                 "role": "system",
@@ -80,20 +81,7 @@ async def main(
             },
         ]
 
-        tts = ElevenLabsTTSService(
-            api_key=os.getenv("ELEVENLABS_API_KEY"),
-            voice_id="40104aff-a015-4da1-9912-af950fbec99e",
-        )
-
-        # Create pipeline
-        messages = [
-            {
-                "role": "system",
-                "content": persona["prompt"],
-            },
-        ]
-
-        # Create pipeline
+        # Create pipeline using the single instances
         pipeline = Pipeline(
             [
                 transport.input(),
@@ -116,6 +104,7 @@ async def main(
     except Exception as e:
         logger.error(f"Error in main: {e}")
         raise
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run MeetingBaas bot")
