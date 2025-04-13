@@ -114,6 +114,7 @@ class BotProxyManager:
     def run_command(self, command: List[str], name: str) -> Optional[subprocess.Popen]:
         """Run a command and store the process"""
         try:
+            logger.info(f"Running command: {' '.join(command)}")
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
@@ -122,17 +123,28 @@ class BotProxyManager:
                 bufsize=1,
                 universal_newlines=True,
             )
+            self.processes[name] = {"process": process, "start_time": time.time()}
 
             def log_output(stream, prefix):
+                """Log the output from the stream with the given prefix"""
                 for line in stream:
                     line = line.strip()
                     if line:
+                        # Check for bot ID in the output
+                        if "BOT_ID:" in line:
+                            try:
+                                bot_id = line.split("BOT_ID:")[1].strip()
+                                logger.info(f"Captured bot ID for {name}: {bot_id}")
+                                self.processes[name]["bot_id"] = bot_id
+                            except Exception as e:
+                                logger.error(f"Error parsing bot ID: {e}")
+
                         if "ERROR" in line:
                             logger.error(f"{prefix}: {line}")
                         elif "WARNING" in line:
                             logger.warning(f"{prefix}: {line}")
-                        elif "SUCCESS" in line:
-                            logger.success(f"{prefix}: {line}")
+                        elif "SUCCESS" in line or "INFO" in line:
+                            logger.info(f"{prefix}: {line}")
                         else:
                             logger.info(f"{prefix}: {line}")
 
@@ -140,16 +152,13 @@ class BotProxyManager:
                 target=log_output, args=(process.stdout, f"{name}"), daemon=True
             ).start()
             threading.Thread(
-                target=log_output, args=(process.stderr, f"{name}"), daemon=True
+                target=log_output, args=(process.stderr, f"{name}_err"), daemon=True
             ).start()
 
-            self.processes[name] = {"process": process, "command": command}
+            logger.success(f"Successfully started process: {name}")
             return process
         except Exception as e:
-            logger.error(f"Failed to start {name}: {e}")
-            logger.error(
-                "".join(traceback.format_exception(type(e), e, e.__traceback__))
-            )
+            logger.error(f"Error running command {' '.join(command)}: {e}")
             return None
 
     async def cleanup(self):
@@ -210,7 +219,8 @@ class BotProxyManager:
         personas: List[str] = None,
         recorder_only: bool = False,
         meeting_baas_api_key: str = None,
-    ) -> None:
+        return_bot_id: bool = False,
+    ) -> Optional[str]:
         """Main async function to run bots with direct parameters instead of command line args
 
         Args:
@@ -219,6 +229,11 @@ class BotProxyManager:
             websocket_url: WebSocket server URL
             personas: List of personas to use
             recorder_only: Whether to run only recorder bots
+            meeting_baas_api_key: API key for MeetingBaas
+            return_bot_id: Whether to return the bot ID (for API integration)
+
+        Returns:
+            The created bot ID if return_bot_id is True, otherwise None
         """
         # For backward compatibility with command line usage
         if count is None or meeting_url is None:
@@ -268,6 +283,9 @@ class BotProxyManager:
         else:
             self.selected_persona_names = personas
 
+        # Variable to store bot ID for return
+        created_bot_id = None
+
         try:
             # Start bot processes
             for i in range(count):
@@ -296,14 +314,48 @@ class BotProxyManager:
                 if meeting_baas_api_key:
                     bot_cmd.extend(["--meeting-baas-api-key", meeting_baas_api_key])
 
-                logger.info(f"Starting bot {i} with command: {' '.join(bot_cmd)}")
-                if not self.run_command(bot_cmd, bot_name):
-                    logger.error(f"Failed to start {bot_name}")
-                    await self.cleanup()
-                    return
+                # Add flag to output the bot ID to stdout
+                if return_bot_id:
+                    bot_cmd.extend(["--output-bot-id"])
 
-            # Monitor processes
-            await self.monitor_processes()
+                logger.info(f"Starting bot {i} with command: {' '.join(bot_cmd)}")
+                process = self.run_command(bot_cmd, bot_name)
+
+                if not process:
+                    logger.error(f"Failed to start {bot_name}")
+                    if return_bot_id:
+                        return None
+                    await self.cleanup()
+                    return None
+
+                # If we want to return the bot ID, wait for it to appear in stdout
+                if return_bot_id:
+                    # Wait a moment to give the process time to start and log its output
+                    await asyncio.sleep(2)
+
+                    # Wait for the bot ID to appear (up to 10 seconds)
+                    for _ in range(20):  # 20 iterations * 0.5s = 10 seconds
+                        # Check if the process has stored a bot ID
+                        if (
+                            bot_name in self.processes
+                            and "bot_id" in self.processes[bot_name]
+                        ):
+                            created_bot_id = self.processes[bot_name]["bot_id"]
+                            break
+                        await asyncio.sleep(0.5)
+
+                    if created_bot_id:
+                        # Found a bot ID, we can return it
+                        if return_bot_id:
+                            return created_bot_id
+                        break
+                    else:
+                        logger.warning(f"Failed to obtain bot ID from {bot_name}")
+
+            # If not waiting for a bot ID or if we already found it, start monitoring
+            if not return_bot_id:
+                # Monitor processes
+                await self.monitor_processes()
 
         except KeyboardInterrupt:
             logger.warning("Keyboard interrupt detected")
@@ -312,6 +364,11 @@ class BotProxyManager:
             logger.error(f"Error in main: {e}")
             logger.error(traceback.format_exc())
             await self.cleanup()
+
+        # Return the bot ID if requested and found
+        if return_bot_id:
+            return created_bot_id
+        return None
 
     def main(
         self,

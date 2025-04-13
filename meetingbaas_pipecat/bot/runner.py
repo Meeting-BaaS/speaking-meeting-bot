@@ -56,6 +56,11 @@ async def configure(
         type=str,
         help="The API key for MeetingBaas (falls back to MEETING_BAAS_API_KEY env var if not provided)",
     )
+    parser.add_argument(
+        "--output-bot-id",
+        action="store_true",
+        help="Print the MeetingBaas bot ID in a machine-readable format",
+    )
 
     args, unknown = parser.parse_known_args()
 

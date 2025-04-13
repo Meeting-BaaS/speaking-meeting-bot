@@ -47,7 +47,12 @@ API_URL = os.getenv("MEETING_BAAS_API_URL", "https://api.meetingbaas.com")
 
 # Add this function to create the bot via MeetingBaas API
 def create_baas_bot(
-    meeting_url, websocket_url, bot_id, persona_name, recorder_only=False
+    meeting_url,
+    websocket_url,
+    bot_id,
+    persona_name,
+    recorder_only=False,
+    output_bot_id=False,
 ):
     """Create a bot using MeetingBaas API"""
     # Create bot configuration
@@ -100,6 +105,12 @@ def create_baas_bot(
             bot_id = response_data.get("bot_id")
             logger.success(f"Bot created successfully with ID: {bot_id}")
             logger.debug(f"Full API response: {response_data}")
+
+            # Print the bot ID in a special format that can be captured by the parent process
+            if output_bot_id:
+                print(f"BOT_ID: {bot_id}")
+                sys.stdout.flush()  # Ensure the output is sent immediately
+
             return bot_id
         else:
             try:
@@ -193,6 +204,7 @@ async def main():
     bot_id = getattr(args, "bot_id", "default")
     recorder_only = getattr(args, "recorder_only", False)
     websocket_url = getattr(args, "websocket_url", None)
+    output_bot_id = getattr(args, "output_bot_id", False)
 
     # Set API key from args
     global API_KEY
@@ -216,10 +228,18 @@ async def main():
             # If websocket URL is local, we need to use a specific port
             meeting_baas_url = f"{websocket_url}:{port}"
 
+        # Add the path /ws/{bot_id} to the WebSocket URL for streaming
+        websocket_with_path = f"{meeting_baas_url}/ws/{bot_id}"
+
         # Create bot via MeetingBaas API
         if meeting_url:
             bot_baas_id = create_baas_bot(
-                meeting_url, meeting_baas_url, bot_id, persona_name, recorder_only
+                meeting_url,
+                websocket_with_path,
+                bot_id,
+                persona_name,
+                recorder_only,
+                output_bot_id,
             )
 
             if not bot_baas_id:
