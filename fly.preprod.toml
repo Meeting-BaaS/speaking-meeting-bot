@@ -1,16 +1,16 @@
-# fly.toml app configuration file for production environment
+# fly.preprod.toml app configuration file for pre-production environment
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'speaking-meetingbaas'
+app = 'speaking-preprod-meetingbaas'
 primary_region = 'cdg'
 
 [build]
 
 [env]
   PORT = '8766'
-  API_URL = 'https://api.meetingbaas.com'
+  API_URL = 'https://api.pre-prod-meetingbaas.com'
 
 [http_service]
   internal_port = 8766
@@ -21,8 +21,8 @@ primary_region = 'cdg'
   processes = ['app']
 
 [[http_service.domains]]
-  name = "speaking.meetingbaas.com"
-  zone = "meetingbaas.com"
+  name = "speaking.pre-prod-meetingbaas.com" 
+  zone = "pre-prod-meetingbaas.com"
 
 [[vm]]
   memory = '2gb'

@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
@@ -7,6 +8,9 @@ import requests
 from pydantic import BaseModel, Field, HttpUrl
 
 logger = logging.getLogger("meetingbaas-api")
+
+# Get API base URL from environment, default to production
+api_base_url = os.environ.get("API_URL", "https://api.meetingbaas.com")
 
 
 class RecordingMode(str, Enum):
@@ -172,7 +176,7 @@ def create_meeting_bot(
         # Ensure all values are serializable
         config = stringify_values(config)
 
-    url = "https://api.meetingbaas.com/bots"
+    url = f"{api_base_url}/bots"
     headers = {
         "Content-Type": "application/json",
         "x-meeting-baas-api-key": api_key,
@@ -219,7 +223,7 @@ def leave_meeting_bot(bot_id: str, api_key: str) -> bool:
     Returns:
         bool: True if successful, False otherwise
     """
-    url = f"https://api.meetingbaas.com/bots/{bot_id}"
+    url = f"{api_base_url}/bots/{bot_id}"
     headers = {
         "x-meeting-baas-api-key": api_key,
     }

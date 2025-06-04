@@ -6,7 +6,7 @@ import os
 import sys
 from typing import Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, Request, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
@@ -35,7 +35,9 @@ async def api_key_middleware(request: Request, call_next):
     if not api_key:
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"message": "Missing MeetingBaas API key in x-meeting-baas-api-key header"},
+            content={
+                "message": "Missing MeetingBaas API key in x-meeting-baas-api-key header"
+            },
         )
 
     # Add the API key to the request state for use in routes
@@ -90,7 +92,7 @@ def create_app() -> FastAPI:
             "name": "x-meeting-baas-api-key",
             "description": "MeetingBaas API key for authentication",
         }
-        
+
         schemas = components.setdefault("schemas", {})
         schemas.update(
             {
@@ -100,44 +102,42 @@ def create_app() -> FastAPI:
                     "properties": {
                         "name": {
                             "type": "string",
-                            "description": "Name of the persona to generate an image for"
+                            "description": "Name of the persona to generate an image for",
                         },
                         "description": {
                             "type": "string",
-                            "description": "Detailed description of the persona's appearance and characteristics"
+                            "description": "Detailed description of the persona's appearance and characteristics",
                         },
                         "gender": {
                             "type": "string",
                             "description": "Gender of the persona (optional)",
-                            "enum": ["male", "female", "non-binary"]
+                            "enum": ["male", "female", "non-binary"],
                         },
                         "characteristics": {
                             "type": "array",
-                            "items": {
-                                "type": "string"
-                            },
-                            "description": "List of specific characteristics or features of the persona"
-                        }
-                    }
+                            "items": {"type": "string"},
+                            "description": "List of specific characteristics or features of the persona",
+                        },
+                    },
                 },
                 "PersonaImageResponse": {
                     "type": "object",
                     "properties": {
                         "name": {
                             "type": "string",
-                            "description": "Name of the persona"
+                            "description": "Name of the persona",
                         },
                         "image_url": {
                             "type": "string",
-                            "description": "URL of the generated image"
+                            "description": "URL of the generated image",
                         },
                         "generated_at": {
                             "type": "string",
                             "format": "date-time",
-                            "description": "Timestamp when the image was generated"
-                        }
-                    }
-                }
+                            "description": "Timestamp when the image was generated",
+                        },
+                    },
+                },
             }
         )
 
@@ -147,7 +147,9 @@ def create_app() -> FastAPI:
         # Update the paths to include the required description parameter
         if "paths" in openapi_schema:
             if "/personas/generate-image" in openapi_schema["paths"]:
-                openapi_schema["paths"]["/personas/generate-image"]["post"]["requestBody"] = {
+                openapi_schema["paths"]["/personas/generate-image"]["post"][
+                    "requestBody"
+                ] = {
                     "required": True,
                     "content": {
                         "application/json": {
@@ -155,13 +157,17 @@ def create_app() -> FastAPI:
                                 "$ref": "#/components/schemas/PersonaImageRequest"
                             }
                         }
-                    }
+                    },
                 }
 
         openapi_schema["servers"] = [
             {
                 "url": "https://speaking.meetingbaas.com",
                 "description": "Production server",
+            },
+            {
+                "url": "https://speaking.pre-prod-meetingbaas.com",
+                "description": "Internal pre-production server (not for public use)",
             },
             {"url": "/", "description": "Local development server"},
         ]
