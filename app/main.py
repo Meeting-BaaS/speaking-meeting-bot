@@ -231,6 +231,20 @@ def create_app() -> FastAPI:
 
 def start_server(host: str = "0.0.0.0", port: int = 7014, local_dev: bool = False):
     """Start the Uvicorn server for the FastAPI application."""
+    # Parse command line arguments if called via poetry script
+    # This allows `poetry run api --local-dev` to work correctly
+    import sys
+    if "--local-dev" in sys.argv:
+        local_dev = True
+    if "--host" in sys.argv:
+        idx = sys.argv.index("--host")
+        if idx + 1 < len(sys.argv):
+            host = sys.argv[idx + 1]
+    if "--port" in sys.argv:
+        idx = sys.argv.index("--port")
+        if idx + 1 < len(sys.argv):
+            port = int(sys.argv[idx + 1])
+
     # If the PORT environment variable is set, use it; otherwise, use the default.
     try:
         server_port = int(os.getenv("PORT", str(port)))

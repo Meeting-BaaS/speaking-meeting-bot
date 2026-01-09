@@ -137,6 +137,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
             logger.warning("Failed to extract persona details from custom prompt or received unexpected type. Falling back to default bot persona.")
             resolved_persona_data = persona_manager.get_persona("baas_onboarder")
             resolved_persona_data["is_temporary"] = False # Ensure fallback is not marked temporary
+            resolved_persona_data["folder_name"] = "baas_onboarder"  # Store folder name for subprocess
             persona_name_for_logging = resolved_persona_data.get("name", "baas_onboarder")
             final_prompt = resolved_persona_data["prompt"] + PERSONA_INTERACTION_INSTRUCTIONS
 
@@ -162,6 +163,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
         try:
             resolved_persona_data = persona_manager.get_persona(resolved_persona_name)
             resolved_persona_data["is_temporary"] = False # Mark as not temporary
+            resolved_persona_data["folder_name"] = resolved_persona_name  # Store folder name for subprocess
             persona_name_for_logging = resolved_persona_data.get("name", resolved_persona_name)
             final_prompt = resolved_persona_data["prompt"] + PERSONA_INTERACTION_INSTRUCTIONS
             logger.info(f"Using pre-defined persona '{persona_name_for_logging}'.")
@@ -169,6 +171,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
             logger.error(f"Resolved persona '{resolved_persona_name}' not found: {e}. Falling back to baas_onboarder.")
             resolved_persona_data = persona_manager.get_persona("baas_onboarder")
             resolved_persona_data["is_temporary"] = False # Ensure fallback is not marked temporary
+            resolved_persona_data["folder_name"] = "baas_onboarder"  # Store folder name for subprocess
             persona_name_for_logging = resolved_persona_data.get("name", "baas_onboarder")
             final_prompt = resolved_persona_data["prompt"] + PERSONA_INTERACTION_INSTRUCTIONS
             logger.info(f"Using fallback persona '{persona_name_for_logging}'.")

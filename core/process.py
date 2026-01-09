@@ -52,8 +52,11 @@ def start_pipecat_process(
         os.path.dirname(__file__), "..", "scripts", "meetingbaas.py"
     )
 
-    # Use the persona's display name directly from persona_data
-    display_name = persona_data.get("name", "Unknown Bot")
+    # Get the folder name for persona lookup (falls back to display name converted to folder format)
+    folder_name = persona_data.get(
+        "folder_name",
+        persona_data.get("name", "baas_onboarder").lower().replace(" ", "_")
+    )
 
     # Build command with all parameters
     command = [
@@ -65,6 +68,8 @@ def start_pipecat_process(
         websocket_url,
         "--meeting-url",
         meeting_url,
+        "--persona-name",
+        folder_name,
         "--persona-data-json",
         persona_data_json,
         "--streaming-audio-frequency",

@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import json
 import os
 import os
 from datetime import datetime
@@ -103,18 +104,20 @@ async def main(
     streaming_audio_frequency: str = "24khz",
     websocket_url: str = "",
     enable_tools: bool = True,
+    persona_data_json: str = "",
 ):
     """
     Run the MeetingBaas bot with specified configurations
 
     Args:
         meeting_url: URL to join the meeting
-        persona_name: Name to display for the bot
+        persona_name: Name/folder name of the persona to use
         entry_message: Message to send when joining
         bot_image: URL for bot avatar
         streaming_audio_frequency: Audio frequency for streaming (16khz or 24khz)
         websocket_url: Full WebSocket URL to connect to, including any path
         enable_tools: Whether to enable function tools like weather and time
+        persona_data_json: JSON string containing persona data (for temporary personas)
     """
     # Set TaskManager event loop FIRST, before any other pipecat operations
     from pipecat.utils.asyncio import TaskManager
@@ -193,11 +196,24 @@ async def main(
         log_and_flush(logging.ERROR, f"[WEBSOCKET] Connection error: {error}")
 
     persona_manager = PersonaManager()
-    persona = persona_manager.get_persona(persona_name)
+    persona = None
+    
+    # Try to load persona from disk first
+    try:
+        persona = persona_manager.get_persona(persona_name)
+        log_and_flush(logging.INFO, f"[PERSONA] Loaded persona from disk: {persona_name}")
+    except KeyError:
+        # If not found on disk, try to use persona_data_json (for temporary personas)
+        if persona_data_json:
+            try:
+                persona = json.loads(persona_data_json)
+                log_and_flush(logging.INFO, f"[PERSONA] Using persona from JSON data: {persona.get('name', persona_name)}")
+            except json.JSONDecodeError as e:
+                log_and_flush(logging.ERROR, f"[ERROR] Failed to parse persona_data_json: {e}")
+        
     if not persona:
-        log_and_flush(logging.ERROR, f"[ERROR] Persona '{persona_name}' not found")
+        log_and_flush(logging.ERROR, f"[ERROR] Persona '{persona_name}' not found on disk or in JSON data")
         return
-    log_and_flush(logging.INFO, f"[PERSONA] Loaded persona: {persona_name}")
 
     additional_content = persona.get("additional_content", "")
     if additional_content:
@@ -423,5 +439,6 @@ if __name__ == "__main__":
             streaming_audio_frequency=args.streaming_audio_frequency,
             websocket_url=args.websocket_url,
             enable_tools=args.enable_tools,
+            persona_data_json=args.persona_data_json or "",
         )
     )

@@ -235,7 +235,7 @@ There are two ways to run the server:
 poetry run uvicorn app:app --reload --host 0.0.0.0 --port ${PORT}
 
 # Local development mode with ngrok auto-configuration
-poetry run python run.py --local-dev
+poetry run api --local-dev
 ```
 
 The local development mode simplifies WebSocket setup by:
@@ -263,7 +263,7 @@ The local development mode simplifies WebSocket setup by:
 3. Start the server in local development mode:
 
    ```bash
-   poetry run python run.py --local-dev
+   poetry run api --local-dev
    ```
 
 4. When prompted, enter the ngrok URLs shown in the ngrok terminal.
