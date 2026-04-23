@@ -21,14 +21,14 @@ logger = configure_logger()
 logger.name = "meetingbaas-api"  # Set logger name after configuring
 
 # Set logging level for pipecat WebSocket client to WARNING to reduce noise
-pipecat_ws_logger = logging.getLogger("pipecat.transports.network.websocket_client")
+pipecat_ws_logger = logging.getLogger("pipecat.transports.websocket.client")
 pipecat_ws_logger.setLevel(logging.WARNING)
 
 
 async def api_key_middleware(request: Request, call_next):
     """Middleware to check for MeetingBaas API key in headers."""
     # Skip API key check for docs and openapi endpoints
-    if request.url.path in ["/docs", "/openapi.json", "/redoc"]:
+    if request.url.path in ["/docs", "/openapi.json", "/redoc", "/health", "/"]:
         return await call_next(request)
 
     api_key = request.headers.get("x-meeting-baas-api-key")

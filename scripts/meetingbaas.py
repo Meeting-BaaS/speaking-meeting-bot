@@ -10,18 +10,22 @@ from dotenv import load_dotenv
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
-from pipecat.frames.frames import LLMMessagesFrame, TextFrame
+from pipecat.frames.frames import LLMMessagesAppendFrame, TextFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 
 # from pipecat.services.gladia.stt import GladiaSTTService
 from pipecat.services.openai.llm import OpenAILLMService
-from pipecat.transports.network.websocket_client import (
+from pipecat.transports.websocket.client import (
     WebsocketClientParams,
     WebsocketClientTransport,
 )
@@ -117,8 +121,8 @@ async def main(
         enable_tools: Whether to enable function tools like weather and time
     """
     # Set TaskManager event loop FIRST, before any other pipecat operations
-    from pipecat.utils.asyncio import TaskManager
-    TaskManager.set_event_loop(TaskManager, asyncio.get_running_loop())
+    from pipecat.utils.asyncio.task_manager import TaskManager, TaskManagerParams
+    TaskManager().setup(TaskManagerParams(loop=asyncio.get_running_loop()))
     
     log_and_flush(logging.INFO, f"[STARTUP] MeetingBaas bot launching with persona: {persona_name}")
     load_dotenv()
@@ -156,18 +160,8 @@ async def main(
             audio_out_enabled=True,
             add_wav_header=False,
             audio_in_enabled=True,
-            vad_analyzer=SileroVADAnalyzer(
-                sample_rate=16000,
-                params=VADParams(
-                    threshold=0.5,
-                    min_speech_duration_ms=250,
-                    min_silence_duration_ms=100,
-                    min_volume=0.6,
-                ),
-            ),
             audio_in_passthrough=True,
             serializer=ProtobufFrameSerializer(),
-            timeout=300,
         ),
     )
     log_and_flush(logging.INFO, "[TRANSPORT] WebSocket transport initialized")
@@ -213,16 +207,15 @@ async def main(
         api_key=os.getenv("CARTESIA_API_KEY"),
         voice_id=voice_id,
         sample_rate=output_sample_rate,
-        speed="normal",
     )
     log_and_flush(logging.INFO, f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}")
 
     llm = OpenAILLMService(
         api_key=os.getenv("OPENAI_API_KEY"),
-        model="gpt-4-turbo-preview",
+        model="gpt-4.1",
         run_in_parallel=False,
     )
-    log_and_flush(logging.INFO, f"[LLM] OpenAI LLM initialized with model=gpt-4-turbo-preview")
+    log_and_flush(logging.INFO, f"[LLM] OpenAI LLM initialized with model=gpt-4.1")
 
     if enable_tools:
         log_and_flush(logging.INFO, "[TOOLS] Registering function tools")
@@ -272,7 +265,7 @@ async def main(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
         encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
         sample_rate=output_sample_rate,
-        language=language,
+        settings=DeepgramSTTService.Settings(language=language),
     )
     # stt = GladiaSTTService(
     #     api_key=os.getenv("GLADIA_API_KEY"),
@@ -306,13 +299,25 @@ async def main(
 
     # Create the context object - with or without tools
     if enable_tools and tools:
-        context = OpenAILLMContext(messages, tools)
+        context = LLMContext(messages, tools)
     else:
-        context = OpenAILLMContext(messages)
+        context = LLMContext(messages)
 
-    # Get the context aggregator pair using the LLM's method
-    # This handles properly setting up the context aggregators
-    aggregator_pair = llm.create_context_aggregator(context)
+    # Create the context aggregator pair with VAD on the user aggregator
+    aggregator_pair = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(
+                sample_rate=16000,
+                params=VADParams(
+                    confidence=0.5,
+                    start_secs=0.25,
+                    stop_secs=0.1,
+                    min_volume=0.6,
+                ),
+            ),
+        ),
+    )
 
     # Get the user and assistant aggregators from the pair
     user_aggregator = aggregator_pair.user()
@@ -335,7 +340,7 @@ async def main(
         transport.output(),  # Add transport output to send audio/data
     ])
 
-    task = PipelineTask(pipeline, params=PipelineParams(allow_interruptions=True, check_dangling_tasks=True))
+    task = PipelineTask(pipeline, params=PipelineParams(), check_dangling_tasks=True)
     runner = PipelineRunner()
 
     # Add a simple test to verify TTS is working
@@ -358,7 +363,9 @@ async def main(
             log_and_flush(logging.INFO, "[BOT] Waiting 2 seconds before sending initial message")
             await asyncio.sleep(2)
             log_and_flush(logging.INFO, f"[BOT] Queuing initial message: {initial_message}")
-            await task.queue_frames([LLMMessagesFrame([initial_message])])
+            # Append to the existing context so we don't overwrite any messages
+            # (system prompt, or user speech) that arrived during the 2-second delay.
+            await task.queue_frames([LLMMessagesAppendFrame(messages=[initial_message], run_llm=True)])
             log_and_flush(logging.INFO, "[BOT] Initial greeting message queued successfully")
             
             # Also queue a simple TTS test
