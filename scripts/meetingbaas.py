@@ -1,7 +1,6 @@
-import argparse
 import asyncio
 import os
-import os
+import argparse
 from datetime import datetime
 
 import aiohttp
@@ -387,7 +386,8 @@ async def main(
         raise
 
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Console entrypoint for running the MeetingBaas bot process."""
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Run a MeetingBaas bot")
     parser.add_argument("--meeting-url", help="URL of the meeting to join")
@@ -454,3 +454,7 @@ if __name__ == "__main__":
             enable_tools=args.enable_tools,
         )
     )
+
+
+if __name__ == "__main__":
+    cli()

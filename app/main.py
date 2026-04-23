@@ -4,9 +4,8 @@ import argparse
 import logging
 import os
 import sys
-from typing import Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, Request, HTTPException, status
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
@@ -14,11 +13,13 @@ from fastapi.responses import JSONResponse
 from app.routes import router as app_router
 from app.websockets import websocket_router
 from meetingbaas_pipecat.utils.logger import configure_logger
+from utils.runtime import build_public_base_url, parse_cors_origins
 from utils.ngrok import LOCAL_DEV_MODE, NGROK_URL_INDEX, NGROK_URLS, load_ngrok_urls
 
 # Configure logging with the prettier logger
 logger = configure_logger()
 logger.name = "meetingbaas-api"  # Set logger name after configuring
+APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
 
 # Set logging level for pipecat WebSocket client to WARNING to reduce noise
 pipecat_ws_logger = logging.getLogger("pipecat.transports.websocket.client")
@@ -28,7 +29,7 @@ pipecat_ws_logger.setLevel(logging.WARNING)
 async def api_key_middleware(request: Request, call_next):
     """Middleware to check for MeetingBaas API key in headers."""
     # Skip API key check for docs and openapi endpoints
-    if request.url.path in ["/docs", "/openapi.json", "/redoc", "/health", "/"]:
+    if request.url.path in ["/docs", "/openapi.json", "/redoc", "/health", "/ready", "/"]:
         return await call_next(request)
 
     api_key = request.headers.get("x-meeting-baas-api-key")
@@ -53,7 +54,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Speaking Meeting Bot API",
         description="API for deploying AI-powered speaking agents in video meetings. Combines MeetingBaas for meeting connectivity with Pipecat for voice AI processing.",
-        version="0.0.1",
+        version=APP_VERSION,
         contact={
             "name": "Speaking Bot API by MeetingBaas",
             "url": "https://meetingbaas.com",
@@ -170,11 +171,14 @@ def create_app() -> FastAPI:
 
     app.openapi = custom_openapi
 
+    cors_origins = parse_cors_origins(os.getenv("CORS_ALLOW_ORIGINS"))
+    allow_credentials = "*" not in cors_origins
+
     # Add CORS middleware
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=cors_origins,
+        allow_credentials=allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -187,10 +191,12 @@ def create_app() -> FastAPI:
     @app.get("/health", tags=["system"])
     async def health():
         """Health check endpoint"""
+        public_base_url = os.getenv("BASE_URL")
         return {
             "status": "ok",
             "service": "speaking-meeting-bot",
-            "version": "1.0.0",
+            "version": APP_VERSION,
+            "public_base_url": public_base_url,
             "endpoints": [
                 {
                     "path": "/bots",
@@ -224,6 +230,22 @@ def create_app() -> FastAPI:
                     "description": "WebSocket endpoint for Pipecat connections",
                 },
             ],
+        }
+
+    @app.get("/ready", tags=["system"])
+    async def ready(request: Request):
+        """Readiness endpoint with externally visible base URL resolution."""
+        return {
+            "status": "ready",
+            "service": "speaking-meeting-bot",
+            "version": APP_VERSION,
+            "public_base_url": build_public_base_url(
+                request, configured_base_url=os.getenv("BASE_URL")
+            ),
+            "cors": {
+                "allow_origins": cors_origins,
+                "allow_credentials": allow_credentials,
+            },
         }
 
     return app

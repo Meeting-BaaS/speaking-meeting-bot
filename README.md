@@ -58,9 +58,10 @@ The project follows a streamlined API-first approach with:
    }
    ```
 
-   - Required fields: `meeting_url` and `meeting_baas_api_key`
-   - The WebSocket URL is determined automatically (see WebSocket URL Resolution below)
-   - Returns: MeetingBaas bot ID and client ID for WebSocket connections
+   - Required field: `meeting_url`
+   - Authentication: send `x-meeting-baas-api-key` as a request header
+   - Optional override: `websocket_url`
+   - Returns: MeetingBaas `bot_id`
 
 3. WebSocket endpoint (`/ws/{client_id}`):
    - Real-time communication channel for audio streaming
@@ -215,13 +216,15 @@ poetry run python -m grpc_tools.protoc --proto_path=./protobufs --python_out=./p
 cp env.example .env
 ```
 
-Edit `.env` with your MeetingBaas credentials and add the `BASE_URL` variable for production deployments.
+Edit `.env` with your MeetingBaas credentials and add the runtime settings needed for your environment.
 
 Example `.env` file:
 
 ```
 MEETING_BAAS_API_KEY=your_api_key_here
 BASE_URL=https://your-server-domain.com  # For production
+PORT=7014
+CORS_ALLOW_ORIGINS=https://your-frontend.example.com
 ```
 
 ## Running Meeting Agents
@@ -232,7 +235,7 @@ There are two ways to run the server:
 
 ```bash
 # Standard mode
-poetry run uvicorn app:app --reload --host 0.0.0.0 --port ${PORT}
+poetry run api --host 0.0.0.0 --port ${PORT}
 
 # Local development mode with ngrok auto-configuration
 poetry run python app/main.py --local-dev
@@ -287,25 +290,25 @@ The local development mode simplifies WebSocket setup by:
 The WebSocket URL is optional in all cases. The server determines the appropriate URL based on the priority list described in the [WebSocket URL Resolution](#websocket-url-resolution) section:
 
 ```bash
-curl -X POST http://localhost:${PORT}/run-bots \
+curl -X POST http://localhost:${PORT}/bots \
   -H "Content-Type: application/json" \
+  -H "x-meeting-baas-api-key: your-api-key" \
   -d '{
     "meeting_url": "https://meet.google.com/xxx-yyyy-zzz",
-    "personas": ["interviewer"],
-    "meeting_baas_api_key": "your-api-key"
+    "personas": ["interviewer"]
   }'
 ```
 
 You can still manually specify a WebSocket URL if needed:
 
 ```bash
-curl -X POST http://localhost:${PORT}/run-bots \
+curl -X POST http://localhost:${PORT}/bots \
   -H "Content-Type: application/json" \
+  -H "x-meeting-baas-api-key: your-api-key" \
   -d '{
     "meeting_url": "https://meet.google.com/xxx-yyyy-zzz",
     "personas": ["interviewer"],
-    "websocket_url": "ws://your-custom-websocket-url:${PORT}",
-    "meeting_baas_api_key": "your-api-key"
+    "websocket_url": "wss://your-custom-websocket-url.example.com"
   }'
 ```
 
@@ -428,7 +431,7 @@ For production deployment, always set the BASE_URL environment variable:
 export BASE_URL=https://your-server-domain.com
 
 # Run the API server in production mode
-poetry run uvicorn app:app --host 0.0.0.0 --port ${PORT}
+poetry run api --host 0.0.0.0 --port ${PORT}
 ```
 
 ### API Documentation
@@ -437,6 +440,8 @@ Once the server is running, you can access:
 
 - Interactive API docs: `http://localhost:${PORT}/docs`
 - OpenAPI specification: `http://localhost:${PORT}/openapi.json`
+- Health endpoint: `http://localhost:${PORT}/health`
+- Readiness endpoint: `http://localhost:${PORT}/ready`
 
 ## Future Development
 
