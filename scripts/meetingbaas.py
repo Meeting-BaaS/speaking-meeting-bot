@@ -215,7 +215,7 @@ async def main(
         model="gpt-4.1",
         run_in_parallel=False,
     )
-    log_and_flush(logging.INFO, f"[LLM] OpenAI LLM initialized with model=gpt-4.1")
+    log_and_flush(logging.INFO, "[LLM] OpenAI LLM initialized with model=gpt-4.1")
 
     if enable_tools:
         log_and_flush(logging.INFO, "[TOOLS] Registering function tools")

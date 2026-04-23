@@ -244,12 +244,15 @@ def create_meeting_bot(
             config = stringify_values(config)
             logger.info("Applied stringify_values to fix JSON serialization issues")
 
-        response = requests.post(url, json=config, headers=headers)
+        response = requests.post(url, json=config, headers=headers, timeout=(5, 30))
 
         if response.status_code == 201:
             data = response.json()
             # v2 response: {"success": true, "data": {"bot_id": "..."}}
             bot_id = data.get("data", {}).get("bot_id")
+            if not bot_id:
+                logger.error(f"201 response missing bot_id: {data}")
+                return None
             logger.info(f"Bot created with ID: {bot_id}")
             return bot_id
         else:
@@ -280,7 +283,7 @@ def leave_meeting_bot(bot_id: str, api_key: str) -> bool:
 
     try:
         logger.info(f"Removing bot with ID: {bot_id}")
-        response = requests.post(url, headers=headers)
+        response = requests.post(url, headers=headers, timeout=(5, 30))
 
         if response.status_code == 200:
             logger.info(f"Bot {bot_id} successfully left the meeting")
