@@ -9,6 +9,7 @@ from core.process import start_pipecat_process, terminate_process_gracefully
 from core.router import router as message_router
 from meetingbaas_pipecat.utils.logger import logger
 from utils.ngrok import LOCAL_DEV_MODE, log_ngrok_status, release_ngrok_url
+from utils.runtime import get_internal_pipecat_ws_url
 
 websocket_router = APIRouter()
 
@@ -65,7 +66,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             logger.info(f"Pipecat process already running for client {internal_client_id}")
         else:
             # Start Pipecat process if not already running
-            pipecat_websocket_url = f"ws://localhost:7014/pipecat/{internal_client_id}"
+            pipecat_websocket_url = get_internal_pipecat_ws_url(internal_client_id)
             process = start_pipecat_process(
                 client_id=internal_client_id,
                 websocket_url=pipecat_websocket_url,

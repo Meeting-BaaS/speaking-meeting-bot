@@ -1,13 +1,47 @@
 """Data models for the Speaking Meeting Bot API."""
 
-from typing import Any, Dict, List, Optional
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def _validate_meeting_url(value: str) -> str:
+    """Validate that a meeting URL uses http(s) and includes a host."""
+    if not value:
+        raise ValueError("meeting_url is required")
+
+    normalized = value.strip()
+    if not normalized.startswith(("http://", "https://")):
+        raise ValueError("meeting_url must start with http:// or https://")
+
+    without_scheme = normalized.split("://", 1)[1]
+    if "/" not in without_scheme and "." not in without_scheme:
+        raise ValueError("meeting_url must include a valid host")
+
+    return normalized
 
 
 class BotRequest(BaseModel):
     """Request model for creating a speaking bot in a meeting."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "meeting_url": "https://meet.google.com/abc-defg-hij",
+                "bot_name": "Meeting Assistant",
+                "personas": ["helpful_assistant", "meeting_facilitator"],
+                "bot_image": "https://example.com/bot-avatar.png",
+                "entry_message": "Hello! I'm here to assist with the meeting.",
+                "enable_tools": True,
+                "extra": {"company": "ACME Corp", "meeting_purpose": "Weekly sync"},
+                "websocket_url": "wss://bots.example.com",
+                "prompt": "You are Meeting Assistant, a concise and professional \
+                AI bot that helps summarize key points and keep the meeting on track. Speak clearly and stay on topic.",
+            }
+        },
+    )
 
     # Define ONLY the fields we want in our API
     meeting_url: str = Field(
@@ -24,23 +58,28 @@ class BotRequest(BaseModel):
     extra: Optional[Dict[str, Any]] = None
     enable_tools: bool = True
     prompt: Optional[str] = None
+    websocket_url: Optional[str] = Field(
+        None,
+        description="Optional public WebSocket base URL override, e.g. wss://bot.example.com",
+    )
 
     # NOTE: streaming_audio_frequency is intentionally excluded and handled internally
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "meeting_url": "https://meet.google.com/abc-defg-hij",
-                "bot_name": "Meeting Assistant",
-                "personas": ["helpful_assistant", "meeting_facilitator"],
-                "bot_image": "https://example.com/bot-avatar.png",
-                "entry_message": "Hello! I'm here to assist with the meeting.",
-                "enable_tools": True,
-                "extra": {"company": "ACME Corp", "meeting_purpose": "Weekly sync"},
-                "prompt": "You are Meeting Assistant, a concise and professional \
-                AI bot that helps summarize key points and keep the meeting on track. Speak clearly and stay on topic."
-            }
-        }
+    @field_validator("meeting_url")
+    @classmethod
+    def validate_meeting_url(cls, value: str) -> str:
+        return _validate_meeting_url(value)
+
+    @field_validator("websocket_url")
+    @classmethod
+    def validate_websocket_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+
+        normalized = value.strip()
+        if not normalized.startswith(("ws://", "wss://")):
+            raise ValueError("websocket_url must start with ws:// or wss://")
+        return normalized
 
 class JoinResponse(BaseModel):
     """Response model for a bot joining a meeting"""
@@ -60,6 +99,8 @@ class LeaveResponse(BaseModel):
 class LeaveBotRequest(BaseModel):
     """Request model for making a bot leave a meeting"""
 
+    model_config = ConfigDict(extra="forbid")
+
     bot_id: Optional[str] = Field(
         None,
         description="The MeetingBaas bot ID to remove from the meeting. This will also close the WebSocket connection made through Pipecat by this bot.",
@@ -68,6 +109,8 @@ class LeaveBotRequest(BaseModel):
 
 class PersonaImageRequest(BaseModel):
     """Request model for generating persona images."""
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(..., description="Name of the persona")
     description: str = Field(None, description="Description of the persona")
     gender: Optional[str] = Field(None, description="Gender of the persona")

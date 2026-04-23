@@ -1,10 +1,10 @@
 """API routes for the Speaking Meeting Bot application."""
 
 import asyncio
+import os
 import uuid
 from datetime import datetime
-from io import BytesIO
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 import random
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -33,6 +33,7 @@ from utils.ngrok import (
     release_ngrok_url,
     update_ngrok_client_id,
 )
+from utils.runtime import build_public_base_url, get_internal_pipecat_ws_url
 from config.prompts import PERSONA_INTERACTION_INSTRUCTIONS
 
 # Import the new persona detail extraction service
@@ -78,7 +79,9 @@ async def join_meeting(request: BotRequest, client_request: Request):
         logger.info("🔍 Running in standard mode")
 
     # Determine WebSocket URL (works in all cases now)
-    websocket_url, temp_client_id = determine_websocket_url(None, client_request)
+    websocket_url, temp_client_id = determine_websocket_url(
+        request.websocket_url, client_request
+    )
 
     logger.info(f"Starting bot for meeting {request.meeting_url}")
     logger.info(f"WebSocket URL: {websocket_url}")
@@ -287,7 +290,10 @@ async def join_meeting(request: BotRequest, client_request: Request):
     # Create bot directly through MeetingBaas API
     # Use persona display name from resolved_persona_data for MeetingBaas API call
     # Use the websocket_url as the webhook_url (same base URL, different endpoint)
-    webhook_url = f"{websocket_url}/webhook"
+    public_base_url = build_public_base_url(
+        client_request, configured_base_url=os.getenv("BASE_URL")
+    )
+    webhook_url = f"{public_base_url}/webhook"
     meetingbaas_bot_id = create_meeting_bot(
         meeting_url=request.meeting_url,
         websocket_url=websocket_url,
@@ -314,7 +320,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
 
         # Start the Pipecat process as a subprocess
         # The Pipecat process should connect to our LOCAL WebSocket server, not the external one
-        pipecat_websocket_url = f"ws://localhost:7014/pipecat/{bot_client_id}"
+        pipecat_websocket_url = get_internal_pipecat_ws_url(bot_client_id)
         process = start_pipecat_process(
             client_id=bot_client_id,
             websocket_url=pipecat_websocket_url,  # Use internal URL, not external
