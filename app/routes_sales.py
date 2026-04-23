@@ -135,7 +135,7 @@ async def run_bot(body: RunBotRequest, request: Request) -> RunBotResponse:
     """
     Create a MeetingBaaS bot that joins the meeting, then registers a session
     and starts the Pipecat/Gemini subprocess.
-    The bot starts in **passive** mode (listen-only, takes notes).
+    The bot is active at all times and will participate in the meeting.
     """
     api_key: str = getattr(request.state, "api_key", "") or os.getenv(
         "MEETING_BAAS_API_KEY", ""
@@ -200,7 +200,6 @@ async def run_bot(body: RunBotRequest, request: Request) -> RunBotResponse:
         "--websocket-url", pipecat_ws_url,
         "--client-name", body.client_name,
         "--marketing-email", body.marketing_person_email,
-        "--mode", "passive",
     ]
 
     process = subprocess.Popen(
@@ -338,10 +337,6 @@ async def get_report(
 async def meetingbaas_webhook(request: Request) -> Dict[str, str]:
     """
     Handles inbound webhooks from MeetingBaaS (v2 API schema).
-
-    MeetingBaaS sends two event types:
-      - bot.status_change  → lifecycle events (joining, in_call, call_ended…)
-      - complete           → end-of-meeting payload with full transcript array
     """
     try:
         body: Dict[str, Any] = await request.json()
@@ -350,12 +345,9 @@ async def meetingbaas_webhook(request: Request) -> Dict[str, str]:
 
     event: str = body.get("event", "unknown")
     data: Dict[str, Any] = body.get("data", {})
-
-    # bot_id lives inside data for bot.status_change; at top level for complete
     bot_id: Optional[str] = data.get("bot_id") or body.get("bot_id")
 
     logger.info(f"[Webhook] event={event} bot_id={bot_id}")
-
     session = session_manager.get_session_by_bot_id(bot_id) if bot_id else None
 
     # ── bot.status_change ────────────────────────────────────────────────────
@@ -385,38 +377,56 @@ async def meetingbaas_webhook(request: Request) -> Dict[str, str]:
 
     # ── complete – full transcript delivered at end of meeting ────────────────
     elif event == "complete":
-        # bot_id is at the top-level data object here
         bot_id = bot_id or body.get("bot_id")
         session = session_manager.get_session_by_bot_id(bot_id) if bot_id else session
 
+        # FIX: MeetingBaaS sends transcript as array of objects with speaker/words
         transcript = body.get("transcript") or data.get("transcript", [])
-        speakers = body.get("speakers") or data.get("speakers", [])
-        mp4_url = body.get("mp4") or data.get("mp4", "")
-        audio_url = body.get("audio") or data.get("audio", "")
-
-        logger.info(
-            f"[Webhook] complete event — {len(transcript)} transcript segments, "
-            f"speakers={speakers}, bot_id={bot_id}"
-        )
+        
+        logger.info(f"[Webhook] complete event — {len(transcript) if isinstance(transcript, list) else 0} transcript segments")
 
         if session:
-            for entry in transcript:
-                speaker = entry.get("speaker", "Unknown")
-                words = entry.get("words", [])
-                # words is a list of {word, start_time, end_time}
-                text = " ".join(w.get("word", "") for w in words if w.get("word"))
-                if not text:
-                    # Some payloads have no words but have start/end_time ranges
-                    text = f"[speech {entry.get('start_time', 0):.1f}s – {entry.get('end_time', 0):.1f}s]"
-                session_manager.add_transcription(
-                    session.client_id, speaker=speaker, text=text
-                )
-
-            if mp4_url:
-                session_manager.add_note(
-                    session.client_id,
-                    f"[System] Recording available: {mp4_url}",
-                )
+            # FIX: Properly handle MeetingBaaS transcript format
+            if isinstance(transcript, list):
+                for entry in transcript:
+                    speaker = entry.get("speaker", "Unknown")
+                    
+                    # Handle both formats:
+                    # Format 1: {"speaker": "X", "words": [{"word": "...", "start_time": ..., "end_time": ...}]}
+                    # Format 2: {"speaker": "X", "text": "..."}
+                    
+                    words = entry.get("words", [])
+                    if isinstance(words, list) and len(words) > 0:
+                        # Extract text from words array
+                        text = " ".join(
+                            w.get("word", "") 
+                            for w in words 
+                            if isinstance(w, dict) and w.get("word")
+                        )
+                    else:
+                        # Fall back to direct text field
+                        text = entry.get("text", "")
+                    
+                    if text.strip():  # Only add non-empty transcriptions
+                        session_manager.add_transcription(
+                            session.client_id, 
+                            speaker=speaker, 
+                            text=text
+                        )
+                        logger.info(f"[Webhook] Added transcript: {speaker}: {text[:50]}...")
+            
+            # Get recording URLs if present
+            mp4_url = body.get("mp4") or data.get("mp4", "")
+            audio_url = body.get("audio") or data.get("audio", "")
+            
+            if mp4_url or audio_url:
+                notes = []
+                if mp4_url:
+                    notes.append(f"Video: {mp4_url}")
+                if audio_url:
+                    notes.append(f"Audio: {audio_url}")
+                session_manager.add_note(session.client_id, f"[System] Recording URLs: {', '.join(notes)}")
+            
             session_manager.set_mode(session.client_id, "ended")
 
     else:

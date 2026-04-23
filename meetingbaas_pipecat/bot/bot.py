@@ -1,29 +1,19 @@
-# meetingbaas_pipecat/bot/bot.py
-"""
-Sales meeting agent powered by Gemini Live API.
-
-Architecture:
-  MeetingBaaS → /ws/{client_id} on FastAPI server
-      → message_router bridges to /pipecat/{client_id}
-      → THIS subprocess connects (as WebSocket client) to /pipecat/{client_id}
-      → GeminiLiveLLMService (native audio: STT + LLM + TTS in one)
-      → audio response back through the WebSocket to MeetingBaaS
-"""
+# scripts/meetingbaas.py - UPDATED for Gemini Live API
 
 import argparse
 import asyncio
 import os
+import logging
 import sys
-
 from dotenv import load_dotenv
-from loguru import logger
 
-
+from pipecat.frames.frames import LLMMessagesAppendFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.processors.logger import FrameLogger
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
-from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
+from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService, GeminiModalities
 from pipecat.transports.websocket.client import (
     WebsocketClientParams,
     WebsocketClientTransport,
@@ -31,27 +21,36 @@ from pipecat.transports.websocket.client import (
 
 load_dotenv()
 
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s | %(name)s:%(funcName)s:%(lineno)d | %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 
 async def run_sales_bot(
     client_id: str,
     websocket_url: str,
     client_name: str = "Client",
     marketing_person_email: str = "",
-    mode: str = "passive",
-    max_engage_minutes: int = 3,
 ) -> None:
     """
-    Connect to the FastAPI /pipecat/{client_id} WebSocket endpoint
-    and run the Gemini Live pipeline.
+    Connect via WebSocket to FastAPI server and run Gemini Live pipeline.
+    
+    Gemini Live handles STT + LLM + TTS natively (speech-to-speech).
     """
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        logger.error("No GEMINI_API_KEY or GOOGLE_API_KEY found in environment!")
+    gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not gemini_api_key:
+        logger.error("❌ No GEMINI_API_KEY or GOOGLE_API_KEY in environment!")
         sys.exit(1)
 
-    logger.info(f"[Bot:{client_id}] Connecting to {websocket_url}")
+    logger.info(f"✅ Starting bot {client_id}")
+    logger.info(f"   WebSocket: {websocket_url}")
+    logger.info(f"   Client: {client_name}")
+    logger.info(f"   Email: {marketing_person_email}")
 
-    # ── Transport: connect as client to the FastAPI /pipecat/{client_id} endpoint ──
+    # ── Transport: WebSocket client connecting to FastAPI /pipecat/{client_id} ──
     transport = WebsocketClientTransport(
         uri=websocket_url,
         params=WebsocketClientParams(
@@ -62,38 +61,47 @@ async def run_sales_bot(
             serializer=ProtobufFrameSerializer(),
         ),
     )
+    logger.info("✅ WebSocket transport configured")
 
-    # ── Gemini Live: handles STT + reasoning + TTS natively ──────────────────────
+    # ── Gemini Live LLM (CRITICAL: handles audio natively) ──
     system_instruction = (
-        f"You are a smart AI sales assistant in a meeting between "
+        f"You are an AI sales assistant in a meeting between "
         f"{marketing_person_email or 'a sales representative'} and {client_name}. "
-        f"In PASSIVE mode: listen carefully. Stay quiet — only speak if someone directly "
-        f"addresses you by name ('hey bot', 'assistant', etc). "
-        f"In ACTIVE mode: introduce yourself warmly and ask one discovery question at a time: "
-        f"1) What is the biggest challenge your team faces today? "
-        f"2) What would success look like for you in the next 6 months? "
-        f"3) Who else is involved in the buying decision? "
-        f"Keep answers brief, professional, and empathetic. "
-        f"When finished, say: 'Thank you — our team will follow up shortly.'"
+        f"\n\nBehavior Instructions:"
+        f"\n- Actively participate and ask discovery questions:"
+        f"\n  1) What is the biggest challenge your team faces today?"
+        f"\n  2) What would success look like in the next 6 months?"
+        f"\n  3) Who else is involved in the buying decision?"
+        f"\n- Keep responses brief, professional, and empathetic."
+        f"\n- Speak clearly and naturally."
+        f"\n- When finished: 'Thank you — our team will follow up shortly.'"
     )
 
     gemini = GeminiLiveLLMService(
-        api_key=api_key,
+        api_key=gemini_api_key,
         settings=GeminiLiveLLMService.Settings(
             model="models/gemini-2.5-flash-native-audio-preview-12-2025",
             system_instruction=system_instruction,
-            voice="Puck",
+            voice="Puck",  # or "Charon", "Sage"
             temperature=0.7,
-            modalities=["audio"],
+            max_tokens=2048,
+            language="en-US",
+            modalities=GeminiModalities.AUDIO,
         ),
+        inference_on_context_initialization=False,  # Don't speak on startup
     )
+    logger.info("✅ Gemini Live LLM configured with native audio")
 
-    # ── Pipeline ──────────────────────────────────────────────────────────────────
+    transcript_logger = FrameLogger("Transcription")
+
+    # ── Pipeline: Audio in → Gemini (speech-to-speech) → Audio out ──
     pipeline = Pipeline([
-        transport.input(),
-        gemini,
-        transport.output(),
+        transport.input(),    # Receive audio from meeting
+        gemini,              # Gemini handles STT + LLM + TTS
+        transcript_logger,   # Log Gemini's output (text/audio frames)
+        transport.output(),  # Send audio back to meeting
     ])
+    logger.info("✅ Pipeline created: Transport.Input → Gemini → Transport.Output")
 
     task = PipelineTask(
         pipeline,
@@ -103,47 +111,43 @@ async def run_sales_bot(
         ),
     )
 
-    from pipecat.frames.frames import LLMMessagesAppendFrame
-
-    async def mode_watcher():
-        flag_file = f"/tmp/bot_{client_id}_engage"
-        while True:
-            await asyncio.sleep(2)
-            if os.path.exists(flag_file):
-                os.remove(flag_file)
-                logger.info(f"[Bot:{client_id}] Received engage trigger! Switching mode...")
-                await task.queue_frame(LLMMessagesAppendFrame([
-                    {
-                        "role": "user",
-                        "content": "The user has switched you to ACTIVE mode. Introduce yourself warmly and ask your first discovery question now."
-                    }
-                ]))
-
-    asyncio.create_task(mode_watcher())
-
+    # ── Event handlers ──
     @transport.event_handler("on_connected")
-    async def on_connected(*args, **kwargs):
-        logger.info(f"[Bot:{client_id}] Connected to Pipecat WebSocket — sending greeting")
-        # Send a short greeting so we can verify the bot can speak
-        await task.queue_frame(LLMMessagesAppendFrame([
-            {
-                "role": "user",
-                "content": "You just joined the meeting. Say a brief, friendly greeting to let participants know you're here to help take notes. Keep it under 2 sentences."
-            }
-        ]))
+    async def on_connected(transport, client):
+        logger.info("🔗 Transport connected to FastAPI server!")
+        # Give Gemini a second to connect to Google
+        await asyncio.sleep(1)
+        logger.info("✅ Sending greeting...")
+        greeting = f"Hi everyone, I'm an AI assistant here to help take notes for this meeting. Nice to meet you {client_name}!"
+        await task.queue_frames([
+            LLMMessagesAppendFrame([
+                {"role": "user", "content": greeting}
+            ])
+        ])
+        logger.info(f"📢 Queued greeting: {greeting}")
 
+    @transport.event_handler("on_connection_error")
+    async def on_error(error, *args, **kwargs):
+        logger.error(f"❌ Connection error: {error}")
+
+    # ── Run pipeline ──
     runner = PipelineRunner()
-    await runner.run(task)
+    try:
+        logger.info("🚀 Starting pipeline...")
+        await runner.run(task)
+    except Exception as e:
+        logger.error(f"❌ Pipeline error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def start() -> None:
-    parser = argparse.ArgumentParser(description="Sales Meeting Bot (Gemini Live API)")
+    parser = argparse.ArgumentParser(description="Sales Meeting Bot (Gemini Live)")
     parser.add_argument("--client-id", required=True)
     parser.add_argument("--websocket-url", required=True)
     parser.add_argument("--client-name", default="Client")
     parser.add_argument("--marketing-email", default="")
-    parser.add_argument("--mode", default="passive", choices=["passive", "active"])
-    parser.add_argument("--max-engage-minutes", type=int, default=3)
+    
     args = parser.parse_args()
 
     asyncio.run(
@@ -152,8 +156,6 @@ def start() -> None:
             websocket_url=args.websocket_url,
             client_name=args.client_name,
             marketing_person_email=args.marketing_email,
-            mode=args.mode,
-            max_engage_minutes=args.max_engage_minutes,
         )
     )
 
