@@ -17,7 +17,7 @@ api = "api:start_server"
 [tool.poetry.dependencies]
 python = "^3.11"
 python-dotenv = "^1.0.1"
-pipecat-ai = {extras = ["cartesia", "daily", "deepgram", "openai", "silero", "websocket"], version = "^0.0.69"}
+pipecat-ai = {extras = ["google", "cartesia", "deepgram", "silero"], version = "^1.0.0"}
 ruff = "^0.7.3"
 pytz = "^2024.2"
 aiohttp = "^3.10.10"
@@ -26,13 +26,14 @@ loguru = "^0.7.2"
 replicate = "^0.22.0"
 fastapi = ">=0.115.0,<0.116.0"
 uvicorn = "^0.27.1"
-websockets = ">=13.1,<14.0"
+websockets = "^14.0"
 pyyaml = "^6.0"
 requests = "^2.31.0"
 daily = "^0.2.1"
+google-genai = "^1.73.1"
 
 [tool.poetry.group.dev.dependencies]
-grpcio-tools = "<=1.67.1"
+grpcio-tools = "^1.67.1"
 ipdb = "^0.13.13"
 
 [tool.ruff]

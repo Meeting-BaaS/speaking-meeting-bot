@@ -93,7 +93,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             # logger.info(f"Received message type: {type(message)}, keys: {list(message.keys())}")
             if "bytes" in message:
                 audio_data = message["bytes"]
-                logger.debug(
+                logger.info(
                     f"Received audio data ({len(audio_data)} bytes) from client {client_id}"
                 )
                 # Route to Pipecat using internal_client_id
@@ -101,8 +101,24 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             elif "text" in message:
                 text_data = message["text"]
                 logger.info(
-                    f"Received text message from client {client_id}: {text_data[:100]}..."
+                    f"Received text message from client {client_id}: {text_data[:120]}..."
                 )
+                # MeetingBaaS sends a JSON handshake first with sample_rate
+                # e.g. {"protocol_version":1,"bot_id":"...","sample_rate":16000,...}
+                # Sync the converter so audio is tagged with the correct rate.
+                try:
+                    import json as _json
+                    handshake = _json.loads(text_data)
+                    sr = handshake.get("sample_rate")
+                    if sr and isinstance(sr, int):
+                        from core.converter import converter as _conv
+                        _conv.set_sample_rate(sr)
+                        logger.info(
+                            f"[WS] Updated converter sample_rate to {sr} Hz "
+                            f"for client {internal_client_id}"
+                        )
+                except Exception:
+                    pass
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for client {client_id}")
     except Exception as e:

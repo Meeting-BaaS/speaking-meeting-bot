@@ -12,6 +12,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
 from app.routes import router as app_router
+from app.routes_sales import sales_router
 from app.websockets import websocket_router
 from meetingbaas_pipecat.utils.logger import configure_logger
 from utils.ngrok import LOCAL_DEV_MODE, NGROK_URL_INDEX, NGROK_URLS, load_ngrok_urls
@@ -181,6 +182,7 @@ def create_app() -> FastAPI:
 
     # Include the routers
     app.include_router(app_router)
+    app.include_router(sales_router)
     app.include_router(websocket_router)
 
     # Add a health endpoint
@@ -192,10 +194,11 @@ def create_app() -> FastAPI:
             "service": "speaking-meeting-bot",
             "version": "1.0.0",
             "endpoints": [
+                # ── Legacy / original endpoints ──────────────────────────
                 {
                     "path": "/bots",
                     "method": "POST",
-                    "description": "Create a bot that joins a meeting",
+                    "description": "Create a bot that joins a meeting (legacy)",
                 },
                 {
                     "path": "/bots/{bot_id}",
@@ -223,13 +226,34 @@ def create_app() -> FastAPI:
                     "method": "WebSocket",
                     "description": "WebSocket endpoint for Pipecat connections",
                 },
+                # ── Sales-agent endpoints ─────────────────────────────────
+                {
+                    "path": "/run-bot",
+                    "method": "POST",
+                    "description": "Launch sales bot → joins meeting in passive mode",
+                },
+                {
+                    "path": "/bot/{client_id}/engage",
+                    "method": "POST",
+                    "description": "Switch bot to active Q&A mode for 2-4 minutes",
+                },
+                {
+                    "path": "/bot/{client_id}/report",
+                    "method": "GET",
+                    "description": "Retrieve meeting notes and extracted client needs",
+                },
+                {
+                    "path": "/meeting-baas/webhook",
+                    "method": "POST",
+                    "description": "Receive MeetingBaaS event callbacks",
+                },
             ],
         }
 
     return app
 
 
-def start_server(host: str = "0.0.0.0", port: int = 7014, local_dev: bool = False):
+def start_server(host: str = "0.0.0.0", port: int = 8000, local_dev: bool = False):
     """Start the Uvicorn server for the FastAPI application."""
     # If the PORT environment variable is set, use it; otherwise, use the default.
     try:
@@ -242,24 +266,18 @@ def start_server(host: str = "0.0.0.0", port: int = 7014, local_dev: bool = Fals
         server_port = port
     logger.info(f"Starting server on {host}:{server_port}")
 
-    # Global variables for ngrok URL tracking
-    NGROK_URLS = []
-    NGROK_URL_INDEX = 0
-
     # Set LOCAL_DEV_MODE based on parameter
     LOCAL_DEV_MODE = local_dev
-
-    # Reset the ngrok URL counter when starting the server
-    NGROK_URL_INDEX = 0
 
     if local_dev:
         print("\n⚠️ Starting in local development mode")
         # Cache the ngrok URLs at server start
-        NGROK_URLS = load_ngrok_urls()
+        import utils.ngrok as ngrok_utils
+        ngrok_utils.NGROK_URLS = load_ngrok_urls()
 
-        if NGROK_URLS:
-            print(f"✅ {len(NGROK_URLS)} Bot(s) available from Ngrok")
-            for i, url in enumerate(NGROK_URLS):
+        if ngrok_utils.NGROK_URLS:
+            print(f"✅ {len(ngrok_utils.NGROK_URLS)} Bot(s) available from Ngrok")
+            for i, url in enumerate(ngrok_utils.NGROK_URLS):
                 print(f"  Bot {i + 1}: {url}")
         else:
             print(
@@ -303,7 +321,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.getenv("PORT", "7014")), # Read from env var, fallback to 7014
+        default=int(os.getenv("PORT", "8000")), # Read from env var, fallback to 8000
         help="Port to listen on",
     )
     parser.add_argument(

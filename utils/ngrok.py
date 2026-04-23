@@ -9,8 +9,8 @@ from fastapi import HTTPException, Request
 from meetingbaas_pipecat.utils.logger import logger
 from utils.url import convert_http_to_ws_url
 
-# Get the configured server port from environment variable, default to 8766
-CONFIGURED_PORT = os.getenv("PORT", "7014")
+# Get the configured server port from environment variable, default to 8000
+CONFIGURED_PORT = os.getenv("PORT", "8000")
 
 # Global variables for ngrok URL tracking
 NGROK_URLS = []

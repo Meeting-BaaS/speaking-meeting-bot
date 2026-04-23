@@ -99,9 +99,19 @@ class MessageRouter:
                 audio_data = self.converter.protobuf_to_raw(message)
                 if audio_data:
                     await client.send_bytes(audio_data)
-                    self.logger.debug(
-                        f"Forwarded audio ({len(audio_data)} bytes) from Pipecat to client {client_id}"
+                    self.logger.info(
+                        f"Forwarded audio ({len(audio_data)} bytes) from Pipecat to MeetingBaaS client {client_id}"
                     )
+                else:
+                    self.logger.warning(
+                        f"Extracted audio_data was None, maybe it's not a valid protobuf or has no audio field. Trying raw bytes."
+                    )
+                    # If it's already raw bytes from pipecat instead of protobuf?
+                    # Pipecat 1.0.0 might be sending something else. Let's try raw.
+                    # Or maybe it's text? If it's short, it's not audio.
+                    if len(message) > 100:
+                        await client.send_bytes(message)
+                        self.logger.info(f"Forwarded raw bytes ({len(message)}) as fallback")
             except Exception as e:
                 # Check for connection closed errors specifically
                 if "close" in str(e).lower() or "closed" in str(e).lower():
