@@ -94,9 +94,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             # logger.info(f"Received message type: {type(message)}, keys: {list(message.keys())}")
             if "bytes" in message:
                 audio_data = message["bytes"]
-                logger.debug(
-                    f"Received audio data ({len(audio_data)} bytes) from client {client_id}"
-                )
+                # Audio logging disabled - we confirmed audio is being received
                 # Route to Pipecat using internal_client_id
                 await message_router.send_to_pipecat(audio_data, internal_client_id)
             elif "text" in message:

@@ -34,6 +34,12 @@ from config.prompts import DEFAULT_SYSTEM_PROMPT
 from meetingbaas_pipecat.utils.logger import configure_logger
 import sys
 import logging
+import json
+
+# Global transcript storage - will be saved to file for webhook to read
+TRANSCRIPT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "transcripts")
+# Directory for ready signals from webhook
+READY_SIGNALS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ready_signals")
 
 
 from pipecat.services.llm_service import FunctionCallParams
@@ -55,6 +61,33 @@ def log_and_flush(level, msg):
     logger.log(level, msg)
     for h in logger.handlers:
         h.flush()
+
+
+def save_transcript(bot_id: str, persona_name: str, messages: list):
+    """Save the conversation transcript to a JSON file for webhook processing."""
+    os.makedirs(TRANSCRIPT_DIR, exist_ok=True)
+    transcript_file = os.path.join(TRANSCRIPT_DIR, f"{bot_id}.json")
+
+    # Filter out system messages and just keep user/assistant conversation
+    conversation = []
+    for msg in messages:
+        if msg.get("role") in ["user", "assistant"]:
+            conversation.append({
+                "role": msg["role"],
+                "content": msg.get("content", "")
+            })
+
+    data = {
+        "bot_id": bot_id,
+        "persona_name": persona_name,
+        "timestamp": datetime.now().isoformat(),
+        "messages": conversation
+    }
+
+    with open(transcript_file, "w") as f:
+        json.dump(data, f, indent=2)
+
+    log_and_flush(logging.DEBUG, f"[TRANSCRIPT] Saved transcript to {transcript_file}")
 
 # Function tool implementations
 async def get_weather(params: FunctionCallParams):
@@ -96,6 +129,47 @@ async def get_time(params: FunctionCallParams):
         await params.result_callback(
             f"Invalid location specified. Could not determine time for {location}."
         )
+
+
+async def save_call_summary(params: FunctionCallParams):
+    """Save a summary of the discovery call to a file."""
+    arguments = params.arguments
+    prospect_name = arguments.get("prospect_name", "Unknown")
+    company_name = arguments.get("company_name", "Unknown")
+    summary = arguments.get("summary", "")
+    next_steps = arguments.get("next_steps", "")
+    qualified = arguments.get("qualified", "unknown")
+
+    # Create call_summaries directory if it doesn't exist
+    summaries_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "call_summaries")
+    os.makedirs(summaries_dir, exist_ok=True)
+
+    # Generate filename with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = "".join(c if c.isalnum() else "_" for c in prospect_name)
+    filename = f"{timestamp}_{safe_name}.md"
+    filepath = os.path.join(summaries_dir, filename)
+
+    # Write the summary
+    content = f"""# Discovery Call Summary
+
+**Date:** {datetime.now().strftime("%Y-%m-%d %H:%M")}
+**Prospect:** {prospect_name}
+**Company:** {company_name}
+**Qualified:** {qualified}
+
+## Summary
+{summary}
+
+## Next Steps
+{next_steps}
+"""
+
+    with open(filepath, "w") as f:
+        f.write(content)
+
+    log_and_flush(logging.INFO, f"[SUMMARY] Saved call summary to {filepath}")
+    await params.result_callback(f"Great, I've saved the summary of our call. Thank you so much for your time today, {prospect_name}!")
 
 
 async def main(
@@ -186,11 +260,14 @@ async def main(
         log_and_flush(logging.ERROR, f"[WEBSOCKET] Connection error: {error}")
 
     persona_manager = PersonaManager()
+    log_and_flush(logging.INFO, f"[PERSONA] Available personas: {list(persona_manager.personas.keys())}")
+    log_and_flush(logging.INFO, f"[PERSONA] Looking for persona: '{persona_name}'")
     persona = persona_manager.get_persona(persona_name)
     if not persona:
         log_and_flush(logging.ERROR, f"[ERROR] Persona '{persona_name}' not found")
         return
     log_and_flush(logging.INFO, f"[PERSONA] Loaded persona: {persona_name}")
+    log_and_flush(logging.INFO, f"[PERSONA] Entry message: {persona.get('entry_message', 'NONE')[:100]}...")
 
     additional_content = persona.get("additional_content", "")
     if additional_content:
@@ -220,6 +297,7 @@ async def main(
         log_and_flush(logging.INFO, "[TOOLS] Registering function tools")
         llm.register_function("get_weather", get_weather)
         llm.register_function("get_time", get_time)
+        llm.register_function("save_call_summary", save_call_summary)
 
         # Define function schemas
         weather_function = FunctionSchema(
@@ -251,8 +329,37 @@ async def main(
             required=["location"],
         )
 
+        save_call_summary_function = FunctionSchema(
+            name="save_call_summary",
+            description="Save a summary of the discovery call. Use this at the end of a sales or discovery call to record the key information gathered.",
+            properties={
+                "prospect_name": {
+                    "type": "string",
+                    "description": "The name of the prospect/person you spoke with",
+                },
+                "company_name": {
+                    "type": "string",
+                    "description": "The name of the prospect's company",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "A summary of the conversation including: their current situation, pain points, goals, and any relevant details about their needs",
+                },
+                "next_steps": {
+                    "type": "string",
+                    "description": "The agreed upon next steps, such as scheduling a demo or follow-up call",
+                },
+                "qualified": {
+                    "type": "string",
+                    "enum": ["yes", "no", "maybe"],
+                    "description": "Whether the prospect seems qualified and a good fit for the product",
+                },
+            },
+            required=["prospect_name", "company_name", "summary", "next_steps", "qualified"],
+        )
+
         # Create tools schema
-        tools = ToolsSchema(standard_tools=[weather_function, time_function])
+        tools = ToolsSchema(standard_tools=[weather_function, time_function, save_call_summary_function])
     else:
         log_and_flush(logging.INFO, "[TOOLS] Function tools are disabled")
         tools = None
@@ -260,12 +367,17 @@ async def main(
     language = persona.get("language_code", "en-US")
     log_and_flush(logging.INFO, f"[PERSONA] Using language: {language}")
 
+    deepgram_api_key = os.getenv("DEEPGRAM_API_KEY")
+    log_and_flush(logging.INFO, f"[STT] Deepgram API key present: {bool(deepgram_api_key)}")
+    log_and_flush(logging.INFO, f"[STT] Deepgram config: encoding=linear16, sample_rate={output_sample_rate}, language={language}")
+
     stt = DeepgramSTTService(
-        api_key=os.getenv("DEEPGRAM_API_KEY"),
+        api_key=deepgram_api_key,
         encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
         sample_rate=output_sample_rate,
         settings=DeepgramSTTService.Settings(language=language),
     )
+
     # stt = GladiaSTTService(
     #     api_key=os.getenv("GLADIA_API_KEY"),
     #     encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
@@ -322,13 +434,6 @@ async def main(
     user_aggregator = aggregator_pair.user()
     assistant_aggregator = aggregator_pair.assistant()
 
-    # Log pipeline step data
-    def log_pipeline_step(step_name, data):
-        log_and_flush(logging.INFO, f"[PIPELINE] Step: {step_name}, Type: {type(data)}, Data: {str(data)[:120]}")
-
-    # Remove the LoggingStep wrapper - it doesn't properly proxy all methods
-    # Instead, we'll log in the pipeline components themselves if needed
-    
     pipeline = Pipeline([
         transport.input(),   # Add transport input to receive audio/data
         stt,
@@ -342,37 +447,72 @@ async def main(
     task = PipelineTask(pipeline, params=PipelineParams(), check_dangling_tasks=True)
     runner = PipelineRunner()
 
-    # Add a simple test to verify TTS is working
-    async def test_tts_output():
-        log_and_flush(logging.INFO, "[TEST] Testing TTS output directly")
-        try:
-            # Try to generate some test audio
-            test_text = "Testing TTS output"
-            log_and_flush(logging.INFO, f"[TEST] Generating TTS for: {test_text}")
-            # We'll let the pipeline handle this rather than calling TTS directly
-            await task.queue_frames([TextFrame(test_text)])
-            log_and_flush(logging.INFO, "[TEST] Test TTS frame queued")
-        except Exception as e:
-            log_and_flush(logging.ERROR, f"[TEST] TTS test failed: {e}")
+    # Task to periodically save the transcript
+    async def periodic_transcript_save():
+        while True:
+            await asyncio.sleep(10)  # Save every 10 seconds
+            try:
+                save_transcript(bot_id, persona_name, context.messages)
+            except Exception as e:
+                log_and_flush(logging.ERROR, f"[TRANSCRIPT] Error saving transcript: {e}")
 
-    if entry_message:
-        log_and_flush(logging.INFO, "[BOT] Bot will speak first with an introduction")
-        initial_message = {"role": "user", "content": entry_message}
-        async def queue_initial_message():
-            log_and_flush(logging.INFO, "[BOT] Waiting 2 seconds before sending initial message")
-            await asyncio.sleep(2)
-            log_and_flush(logging.INFO, f"[BOT] Queuing initial message: {initial_message}")
-            # Append to the existing context so we don't overwrite any messages
-            # (system prompt, or user speech) that arrived during the 2-second delay.
-            await task.queue_frames([LLMMessagesAppendFrame(messages=[initial_message], run_llm=True)])
-            log_and_flush(logging.INFO, "[BOT] Initial greeting message queued successfully")
-            
-            # Also queue a simple TTS test
-            await asyncio.sleep(1)
-            await test_tts_output()
-        asyncio.create_task(queue_initial_message())
-    else:
-        log_and_flush(logging.INFO, "[BOT] No entry message configured")
+    # Entry message: prefer the per-request CLI arg (--entry-message), then the
+    # persona's own entry message. This is what the bot should SAY (not a prompt).
+    persona_entry_message = entry_message or persona.get("entry_message", "")
+    if persona_entry_message:
+        log_and_flush(logging.INFO, f"[BOT] Will speak entry message: {persona_entry_message[:100]}...")
+
+
+    # Bot should speak its introduction and then drive the conversation
+    async def start_conversation():
+        # Wait for ready signal from webhook (in_call_recording event)
+        ready_file = os.path.join(READY_SIGNALS_DIR, f"{bot_id}.ready")
+        max_wait_seconds = 60  # Maximum time to wait for ready signal
+        poll_interval = 0.5  # Check every 500ms
+        waited = 0
+
+        log_and_flush(logging.INFO, f"[BOT] Waiting for ready signal from webhook (in_call_recording)...")
+        log_and_flush(logging.INFO, f"[BOT] Looking for ready file: {ready_file}")
+
+        while waited < max_wait_seconds:
+            if os.path.exists(ready_file):
+                log_and_flush(logging.INFO, f"[BOT] Ready signal received! Bot is in call and recording.")
+                # Clean up the ready file
+                try:
+                    os.remove(ready_file)
+                except:
+                    pass
+                break
+            await asyncio.sleep(poll_interval)
+            waited += poll_interval
+
+        if waited >= max_wait_seconds:
+            log_and_flush(logging.WARNING, f"[BOT] Timeout waiting for ready signal, proceeding anyway...")
+
+        # Small additional delay to ensure audio pipeline is stable
+        await asyncio.sleep(1)
+
+        # Speak the entry message by prompting the LLM
+        if persona_entry_message:
+            log_and_flush(logging.INFO, f"[BOT] Prompting LLM to speak entry message")
+            # Add a system instruction to say exactly the entry message
+            speak_prompt = {
+                "role": "user",
+                "content": f"[SYSTEM: Say exactly the following to start the conversation, word for word, do not add anything else]: {persona_entry_message}"
+            }
+            await task.queue_frames([LLMMessagesAppendFrame(messages=[speak_prompt], run_llm=True)])
+            log_and_flush(logging.INFO, "[BOT] LLM prompted to speak entry message")
+        else:
+            # No entry message - prompt LLM to introduce itself
+            log_and_flush(logging.INFO, f"[BOT] No entry message, prompting LLM to introduce")
+            initial_prompt = {"role": "user", "content": "Please introduce yourself and start the conversation."}
+            await task.queue_frames([LLMMessagesAppendFrame(messages=[initial_prompt], run_llm=True)])
+            log_and_flush(logging.INFO, "[BOT] LLM prompted to introduce itself")
+
+    asyncio.create_task(start_conversation())
+
+    # Start periodic transcript saving
+    transcript_task = asyncio.create_task(periodic_transcript_save())
 
     try:
         log_and_flush(logging.INFO, "[RUN] Starting pipeline runner...")
@@ -384,6 +524,15 @@ async def main(
         import traceback
         log_and_flush(logging.ERROR, f"[ERROR] Traceback: {traceback.format_exc()}")
         raise
+    finally:
+        # Cancel the periodic save task
+        transcript_task.cancel()
+        # Save final transcript
+        try:
+            save_transcript(bot_id, persona_name, context.messages)
+            log_and_flush(logging.INFO, "[TRANSCRIPT] Final transcript saved on shutdown")
+        except Exception as e:
+            log_and_flush(logging.ERROR, f"[TRANSCRIPT] Error saving final transcript: {e}")
 
 
 def cli() -> None:
@@ -421,24 +570,20 @@ def cli() -> None:
 
     args = parser.parse_args()
 
-    # Determine persona name from persona data JSON if provided
+    # Use the persona name passed via command line (should be the folder name like "account_executive")
     persona_name = args.persona_name
+    print(f"[STARTUP] Using persona name from args: {persona_name}")
+
+    # If persona-data-json is provided, we can extract the folder name from the path as a fallback
     if args.persona_data_json:
         try:
             import json
             persona_data = json.loads(args.persona_data_json)
-            # Use the folder name key if available, otherwise fall back to looking up by display name
-            # The persona_data should contain a key that matches the folder name
-            # For now, we'll extract it from the persona data or use a mapping
-            # The persona folder names are like "interviewer", not "Technical Interviewer Bot"
-            # We need to find the folder name that corresponds to this persona
-            from config.persona_utils import PersonaManager
-            pm = PersonaManager()
-            # Try to find persona by matching the display name
-            for folder_name, data in pm.personas.items():
-                if data.get("name") == persona_data.get("name"):
-                    persona_name = folder_name
-                    break
+            # If persona_name is still the default, try to get folder name from path
+            if persona_name == "Meeting Bot" and persona_data.get("path"):
+                import os
+                persona_name = os.path.basename(persona_data["path"])
+                print(f"[STARTUP] Extracted persona name from path: {persona_name}")
         except Exception as e:
             print(f"Error parsing persona data JSON: {e}")
 

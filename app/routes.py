@@ -1,11 +1,14 @@
 """API routes for the Speaking Meeting Bot application."""
 
 import asyncio
+import json
 import os
 import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional
 import random
+
+import openai
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -552,6 +555,10 @@ async def generate_persona_image(request: PersonaImageRequest) -> PersonaImageRe
         raise HTTPException(status_code=status_code, detail=str(e))
 
 
+# Directory for signaling between webhook and Pipecat process
+READY_SIGNALS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ready_signals")
+
+
 @router.post(
     "/webhook",
     tags=["webhook"],
@@ -561,12 +568,226 @@ async def meetingbaas_webhook(request: Request):
     """
     Webhook endpoint for MeetingBaas callbacks.
 
-    Receives events like bot_joined, bot_left, transcription, etc.
+    Receives events like bot_joined, bot_left, call_ended, transcription, etc.
+    - On 'in_call_recording': signals Pipecat to start speaking
+    - On call end: generates a summary from the transcript
     """
     try:
         body = await request.json()
         logger.info(f"Received MeetingBaas webhook: {body}")
+
+        # Extract event info - MeetingBaaS uses nested structure:
+        # {'event': 'bot.status_change', 'data': {'bot_id': '...', 'status': {'code': 'in_call_recording'}}}
+        event_type = body.get("event") or body.get("type") or ""
+        data = body.get("data", {})
+        bot_id = body.get("bot_id") or body.get("botId") or data.get("bot_id")
+
+        # The actual status code is nested in data.status.code for status_change events
+        status_code = ""
+        if isinstance(data.get("status"), dict):
+            status_code = data["status"].get("code", "")
+
+        # Combine event type and status code for checking
+        event_type_lower = str(event_type).lower()
+        status_code_lower = str(status_code).lower()
+
+        logger.info(f"Webhook event: {event_type}, status_code: {status_code}, bot_id: {bot_id}")
+
+        # Check for "in_call_not_recording" or "in_call_recording" - bot can speak as soon as it's in the call
+        ready_events = ["in_call_not_recording", "in_call_recording", "recording_started", "bot_ready"]
+
+        # Check both event_type and status_code for ready events
+        is_ready_event = (
+            any(ready in event_type_lower for ready in ready_events) or
+            any(ready in status_code_lower for ready in ready_events)
+        )
+
+        if is_ready_event:
+            logger.info(f"Bot {bot_id} is ready (in_call_recording) - signaling Pipecat to start speaking")
+
+            # Find the internal client_id for this bot
+            internal_client_id = None
+            for internal_id, details in MEETING_DETAILS.items():
+                if len(details) > 2 and details[2] == bot_id:
+                    internal_client_id = internal_id
+                    break
+
+            if internal_client_id:
+                # Write ready signal file
+                os.makedirs(READY_SIGNALS_DIR, exist_ok=True)
+                ready_file = os.path.join(READY_SIGNALS_DIR, f"{internal_client_id}.ready")
+                with open(ready_file, "w") as f:
+                    f.write(datetime.now().isoformat())
+                logger.info(f"Created ready signal for client {internal_client_id}")
+            else:
+                logger.warning(f"Could not find internal client_id for bot {bot_id}")
+
+        # Check for call ended events
+        end_events = ["call_ended", "bot_left", "meeting_ended", "complete"]
+
+        # Check both event_type and status_code for end events
+        is_end_event = (
+            any(end in event_type_lower for end in end_events) or
+            any(end in status_code_lower for end in end_events)
+        )
+
+        if is_end_event:
+            logger.info(f"Call ended event detected for bot {bot_id}, generating summary...")
+
+            # Try to find the transcript file
+            # First try with the MeetingBaaS bot_id, then look for any matching internal client_id
+            transcript_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "transcripts")
+            transcript_file = None
+
+            if bot_id and os.path.exists(os.path.join(transcript_dir, f"{bot_id}.json")):
+                transcript_file = os.path.join(transcript_dir, f"{bot_id}.json")
+            else:
+                # Try to find by looking up internal client_id from MEETING_DETAILS
+                for internal_id, details in MEETING_DETAILS.items():
+                    if len(details) > 2 and details[2] == bot_id:
+                        potential_file = os.path.join(transcript_dir, f"{internal_id}.json")
+                        if os.path.exists(potential_file):
+                            transcript_file = potential_file
+                            break
+
+                # If still not found, try to find any recent transcript
+                if not transcript_file and os.path.exists(transcript_dir):
+                    files = sorted(os.listdir(transcript_dir), key=lambda x: os.path.getmtime(os.path.join(transcript_dir, x)), reverse=True)
+                    for f in files:
+                        if f.endswith('.json'):
+                            transcript_file = os.path.join(transcript_dir, f)
+                            break
+
+            if transcript_file and os.path.exists(transcript_file):
+                await generate_summary_from_transcript(transcript_file, bot_id)
+            else:
+                logger.warning(f"No transcript file found for bot {bot_id}")
+
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Error processing webhook: {e}")
         return {"status": "error", "message": str(e)}
+
+
+async def generate_summary_from_transcript(transcript_file: str, bot_id: str = None):
+    """Generate a call summary from a transcript file using OpenAI.
+
+    Uses bot_id in filename to prevent duplicate summaries when multiple
+    call_ended webhooks are received for the same bot.
+    """
+    try:
+        # Check if summary already exists for this bot_id
+        summaries_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "call_summaries")
+        os.makedirs(summaries_dir, exist_ok=True)
+
+        if bot_id:
+            # Check if a summary file for this bot_id already exists
+            existing_summary = os.path.join(summaries_dir, f"{bot_id}.md")
+            if os.path.exists(existing_summary):
+                logger.info(f"[WEBHOOK] Summary already exists for bot {bot_id}, skipping generation")
+                return
+
+        with open(transcript_file, "r") as f:
+            transcript_data = json.load(f)
+
+        messages = transcript_data.get("messages", [])
+        persona_name = transcript_data.get("persona_name", "Bot")
+
+        if not messages or len(messages) < 2:
+            logger.info("Not enough messages in transcript to generate summary")
+            return
+
+        # Format the conversation for the summary prompt
+        conversation_text = ""
+        for msg in messages:
+            role = "Bot" if msg["role"] == "assistant" else "Prospect"
+            content = msg.get("content", "")
+            if content:
+                conversation_text += f"{role}: {content}\n"
+
+        # Generate summary using OpenAI
+        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+        summary_prompt = f"""You are analyzing a sales discovery call transcript. Please extract the following information and provide a structured summary:
+
+TRANSCRIPT:
+{conversation_text}
+
+Please provide:
+1. Prospect Name (if mentioned)
+2. Company Name (if mentioned)
+3. Summary of the conversation (key points discussed, pain points, current situation, goals)
+4. Qualification Status (yes/no/maybe - based on whether they seem like a good fit)
+5. Recommended Next Steps
+
+Format your response as JSON with these keys: prospect_name, company_name, summary, qualified, next_steps"""
+
+        response = client.chat.completions.create(
+            model="gpt-4-turbo-preview",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that analyzes sales call transcripts. Always respond with valid JSON."},
+                {"role": "user", "content": summary_prompt}
+            ],
+            temperature=0.3,
+        )
+
+        summary_text = response.choices[0].message.content
+
+        # Try to parse as JSON, otherwise use as-is
+        try:
+            # Clean up the response if it has markdown code blocks
+            if "```json" in summary_text:
+                summary_text = summary_text.split("```json")[1].split("```")[0]
+            elif "```" in summary_text:
+                summary_text = summary_text.split("```")[1].split("```")[0]
+
+            summary_data = json.loads(summary_text)
+        except json.JSONDecodeError:
+            summary_data = {
+                "prospect_name": "Unknown",
+                "company_name": "Unknown",
+                "summary": summary_text,
+                "qualified": "unknown",
+                "next_steps": "Review transcript manually"
+            }
+
+        # Save the summary - use bot_id in filename to prevent duplicates
+        # summaries_dir already created at top of function
+        if bot_id:
+            filename = f"{bot_id}.md"
+        else:
+            # Fallback to timestamp + prospect name if no bot_id
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            prospect_name = summary_data.get("prospect_name", "Unknown")
+            safe_name = "".join(c if c.isalnum() else "_" for c in prospect_name)
+            filename = f"{timestamp}_{safe_name}.md"
+        filepath = os.path.join(summaries_dir, filename)
+
+        content = f"""# Discovery Call Summary (Auto-Generated)
+
+**Date:** {datetime.now().strftime("%Y-%m-%d %H:%M")}
+**Prospect:** {summary_data.get("prospect_name", "Unknown")}
+**Company:** {summary_data.get("company_name", "Unknown")}
+**Qualified:** {summary_data.get("qualified", "Unknown")}
+**Bot Persona:** {persona_name}
+
+## Summary
+{summary_data.get("summary", "No summary available")}
+
+## Next Steps
+{summary_data.get("next_steps", "No next steps identified")}
+
+---
+*This summary was auto-generated from the call transcript when the meeting ended.*
+"""
+
+        with open(filepath, "w") as f:
+            f.write(content)
+
+        logger.info(f"[WEBHOOK] Generated call summary: {filepath}")
+
+        # Optionally, clean up the transcript file
+        # os.remove(transcript_file)
+
+    except Exception as e:
+        logger.error(f"[WEBHOOK] Error generating summary from transcript: {e}")

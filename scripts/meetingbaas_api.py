@@ -1,10 +1,15 @@
 import json
 import logging
+import os
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
 import requests
 from pydantic import BaseModel, Field, HttpUrl
+
+# Base URL for the MeetingBaas API. Override to target a self-hosted
+# deployment (e.g. https://api.gmeetrecorder.com).
+MEETING_BAAS_API_URL = os.getenv("MEETING_BAAS_API_URL", "https://api.meetingbaas.com")
 
 logger = logging.getLogger("meetingbaas-api")
 
@@ -225,7 +230,7 @@ def create_meeting_bot(
         # Ensure all values are serializable
         config = stringify_values(config)
 
-    url = "https://api.meetingbaas.com/v2/bots"
+    url = f"{MEETING_BAAS_API_URL}/v2/bots"
     headers = {
         "Content-Type": "application/json",
         "x-meeting-baas-api-key": api_key,
@@ -276,7 +281,7 @@ def leave_meeting_bot(bot_id: str, api_key: str) -> bool:
     Returns:
         bool: True if successful, False otherwise
     """
-    url = f"https://api.meetingbaas.com/v2/bots/{bot_id}/leave"
+    url = f"{MEETING_BAAS_API_URL}/v2/bots/{bot_id}/leave"
     headers = {
         "x-meeting-baas-api-key": api_key,
     }

@@ -163,3 +163,7 @@ cython_debug/
 
 # MacOSX
 .DS_Store
+
+transcripts/*
+ready_signals/*
+call_summaries/*
