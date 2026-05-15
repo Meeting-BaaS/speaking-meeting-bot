@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meeting Bot — Control Panel</title>
+  <meta name="description" content="AI-powered speaking meeting bot control panel for persona management, real-time transcription, and meeting summaries." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0d0f14;
+      --surface: #161b26;
+      --surface2: #1e2535;
+      --border: #2a3348;
+      --accent: #6366f1;
+      --accent2: #8b5cf6;
+      --green: #22c55e;
+      --red: #ef4444;
+      --amber: #f59e0b;
+      --text: #e2e8f0;
+      --muted: #64748b;
+      --radius: 12px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* NAV */
+    nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 32px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.1rem; }
+    .logo-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.6;transform:scale(1.3)} }
+    .status-pill {
+      padding: 5px 14px; border-radius: 999px; font-size: .75rem; font-weight: 600;
+      background: #16231f; color: var(--green); border: 1px solid #1d3a2e;
+    }
+    .status-pill.inactive { background: #1f1a1a; color: var(--red); border-color: #3a1d1d; }
+
+    /* MAIN GRID */
+    main { display: grid; grid-template-columns: 340px 1fr; gap: 24px; padding: 28px 32px; flex: 1; }
+    @media(max-width:900px){ main { grid-template-columns: 1fr; } }
+
+    /* PANELS */
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .panel-title { font-weight: 600; font-size: .9rem; display: flex; align-items: center; gap: 8px; }
+    .panel-body { padding: 20px; }
+
+    /* FORM */
+    .field { margin-bottom: 16px; }
+    label { display: block; font-size: .78rem; color: var(--muted); margin-bottom: 6px; font-weight: 500; text-transform: uppercase; letter-spacing: .04em; }
+    input, textarea, select {
+      width: 100%;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: var(--text);
+      font-size: .88rem;
+      font-family: inherit;
+      transition: border-color .2s;
+      outline: none;
+    }
+    input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+    textarea { resize: vertical; min-height: 80px; }
+
+    /* BUTTONS */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 20px;
+      border-radius: 8px;
+      border: none;
+      font-size: .88rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .15s, transform .1s;
+      font-family: inherit;
+    }
+    .btn:active { transform: scale(.97); }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover:not(:disabled) { opacity: .88; }
+    .btn-danger { background: var(--red); color: #fff; }
+    .btn-danger:hover:not(:disabled) { opacity: .88; }
+    .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+    .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); font-size: .78rem; padding: 6px 12px; }
+    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+
+    /* TRANSCRIPTION */
+    #transcript-box {
+      height: 340px;
+      overflow-y: auto;
+      background: var(--bg);
+      border-radius: 8px;
+      padding: 14px;
+      border: 1px solid var(--border);
+      font-size: .83rem;
+      line-height: 1.7;
+    }
+    .transcript-entry { margin-bottom: 10px; animation: fadeIn .3s ease; }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:none} }
+    .transcript-speaker { font-weight: 600; color: var(--accent); font-size: .78rem; }
+    .transcript-speaker.bot { color: var(--accent2); }
+    .transcript-text { color: var(--text); }
+    .transcript-time { color: var(--muted); font-size: .72rem; margin-left: 6px; }
+    .empty-state { color: var(--muted); font-style: italic; text-align: center; margin-top: 60px; }
+
+    /* SUMMARY */
+    #summary-box {
+      background: var(--bg);
+      border-radius: 8px;
+      padding: 14px;
+      border: 1px solid var(--border);
+      min-height: 120px;
+      font-size: .85rem;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      color: var(--text);
+    }
+    .summary-badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: .72rem;
+      font-weight: 600;
+      margin-right: 6px;
+    }
+    .badge-passive { background: #1c2530; color: var(--muted); }
+    .badge-active { background: #1d2b1e; color: var(--green); }
+    .badge-ended { background: #2a1e1e; color: var(--red); }
+
+    /* SIDEBAR SECTIONS */
+    .section-label {
+      font-size: .7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .info-row { display: flex; justify-content: space-between; font-size: .82rem; margin-bottom: 8px; }
+    .info-val { color: var(--text); font-weight: 500; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .info-key { color: var(--muted); }
+
+    /* TOAST */
+    #toast {
+      position: fixed;
+      bottom: 28px;
+      right: 28px;
+      padding: 12px 20px;
+      border-radius: 10px;
+      font-size: .85rem;
+      font-weight: 500;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      transform: translateY(100px);
+      opacity: 0;
+      transition: all .3s cubic-bezier(.34,1.56,.64,1);
+      z-index: 999;
+      max-width: 320px;
+    }
+    #toast.show { transform: translateY(0); opacity: 1; }
+    #toast.success { border-color: var(--green); color: var(--green); }
+    #toast.error { border-color: var(--red); color: var(--red); }
+
+    /* SCROLLBAR */
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+    /* DIVIDER */
+    .divider { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">
+    <div class="logo-dot"></div>
+    Meeting Bot
+  </div>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span id="bot-status-pill" class="status-pill inactive">● No Active Bot</span>
+    <button class="btn btn-ghost" onclick="fetchSummary()" title="Refresh summary">↻ Refresh</button>
+  </div>
+</nav>
+
+<main>
+  <!-- LEFT SIDEBAR: Controls -->
+  <aside>
+    <div class="panel" style="margin-bottom:20px;">
+      <div class="panel-header">
+        <span class="panel-title">🚀 Launch Bot</span>
+      </div>
+      <div class="panel-body">
+
+        <div class="field">
+          <label>Meeting URL</label>
+          <input id="meeting-url" type="url" placeholder="https://meet.google.com/..." />
+        </div>
+        <div class="field">
+          <label>Bot Name</label>
+          <input id="bot-name" type="text" placeholder="Meeting Assistant" value="Meeting Assistant" />
+        </div>
+        <div class="field">
+          <label style="display: flex; justify-content: space-between; align-items: center;">
+            System Prompt (optional)
+            <label for="prompt-file-upload" class="btn btn-ghost" style="margin: 0; cursor: pointer; display: inline-flex;">Upload .md</label>
+            <input type="file" id="prompt-file-upload" accept=".md,.txt" style="display: none;" onchange="handleFileUpload(event)" />
+          </label>
+          <textarea id="bot-prompt" placeholder="You are a helpful meeting assistant..."></textarea>
+        </div>
+        <div class="field">
+          <label>Entry Message</label>
+          <input id="entry-msg" type="text" placeholder="Hello! I'm here to help." />
+        </div>
+        <div class="btn-row">
+          <button id="join-btn" class="btn btn-primary" onclick="joinMeeting()">▶ Join Meeting</button>
+          <button id="leave-btn" class="btn btn-danger" onclick="leaveMeeting()" disabled>✕ Leave</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">📋 Session Info</span>
+      </div>
+      <div class="panel-body">
+        <div class="info-row"><span class="info-key">Bot ID</span><span class="info-val" id="info-bot-id">—</span></div>
+        <div class="info-row"><span class="info-key">Mode</span><span class="info-val" id="info-mode">—</span></div>
+        <div class="info-row"><span class="info-key">Started</span><span class="info-val" id="info-started">—</span></div>
+        <hr class="divider" />
+        <div class="section-label">Actions</div>
+        <div class="btn-row">
+          <button class="btn btn-secondary" onclick="fetchSummary()" style="font-size:.8rem;padding:7px 14px;">📊 Get Summary</button>
+          <button class="btn btn-ghost" onclick="clearTranscript()">🗑 Clear</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- RIGHT: Transcription + Summary -->
+  <div style="display:flex;flex-direction:column;gap:20px;">
+    <div class="panel" style="flex:1;">
+      <div class="panel-header">
+        <span class="panel-title">🎙 Live Transcription</span>
+        <span id="live-badge" style="font-size:.72rem;color:var(--muted);">Waiting...</span>
+      </div>
+      <div class="panel-body" style="padding:14px;">
+        <div id="transcript-box">
+          <div class="empty-state">Transcription will appear here once a bot joins a meeting.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">📝 Session Summary</span>
+        <span id="mode-badge" class="summary-badge badge-passive">passive</span>
+      </div>
+      <div class="panel-body" style="padding:14px;">
+        <div id="summary-box">No summary yet. Join a meeting and click "Get Summary".</div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+  // ─── State ────────────────────────────────────────────────────────────────
+  const state = { botId: null, apiKey: '', summaryInterval: null };
+
+  // ─── File Upload ──────────────────────────────────────────────────────────
+  function handleFileUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      document.getElementById('bot-prompt').value = e.target.result;
+      toast('Prompt loaded from file', 'success');
+    };
+    reader.onerror = function() {
+      toast('Error reading file', 'error');
+    };
+    reader.readAsText(file);
+    event.target.value = ''; // Reset input
+  }
+
+  // ─── Helpers ──────────────────────────────────────────────────────────────
+  function apiBase() { 
+    return window.location.protocol === 'file:' ? 'http://localhost:8000' : window.location.origin; 
+  }
+
+  function headers() {
+    const h = { 'Content-Type': 'application/json' };
+    if (state.apiKey) h['x-meeting-baas-api-key'] = state.apiKey;
+    return h;
+  }
+
+  function toast(msg, type = '') {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = 'show ' + type;
+    setTimeout(() => { el.className = ''; }, 3500);
+  }
+
+  function setStatus(active) {
+    const pill = document.getElementById('bot-status-pill');
+    pill.textContent = active ? '● Bot Active' : '● No Active Bot';
+    pill.className = 'status-pill' + (active ? '' : ' inactive');
+    document.getElementById('join-btn').disabled = active;
+    document.getElementById('leave-btn').disabled = !active;
+  }
+
+  function formatTime(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleTimeString();
+  }
+
+  function addTranscript(speaker, text, isBot = false) {
+    const box = document.getElementById('transcript-box');
+    const empty = box.querySelector('.empty-state');
+    if (empty) empty.remove();
+    const entry = document.createElement('div');
+    entry.className = 'transcript-entry';
+    entry.innerHTML = `
+      <span class="transcript-speaker${isBot ? ' bot' : ''}">${speaker}</span>
+      <span class="transcript-time">${new Date().toLocaleTimeString()}</span>
+      <div class="transcript-text">${text}</div>`;
+    box.appendChild(entry);
+    box.scrollTop = box.scrollHeight;
+    document.getElementById('live-badge').textContent = '● Live';
+  }
+
+  function clearTranscript() {
+    const box = document.getElementById('transcript-box');
+    box.innerHTML = '<div class="empty-state">Transcription cleared.</div>';
+    document.getElementById('live-badge').textContent = 'Waiting...';
+  }
+
+  // ─── Join Meeting ─────────────────────────────────────────────────────────
+  async function joinMeeting() {
+    const meetingUrl = document.getElementById('meeting-url').value.trim();
+    const botName = document.getElementById('bot-name').value.trim() || 'Meeting Assistant';
+    const prompt = document.getElementById('bot-prompt').value.trim();
+    const entryMsg = document.getElementById('entry-msg').value.trim();
+
+    if (!meetingUrl) { toast('Please enter a meeting URL', 'error'); return; }
+
+    document.getElementById('join-btn').disabled = true;
+    toast('Joining meeting…');
+
+    try {
+      const body = { meeting_url: meetingUrl, bot_name: botName };
+      if (prompt) body.prompt = prompt;
+      if (entryMsg) body.entry_message = entryMsg;
+
+      const res = await fetch(`${apiBase()}/bots`, {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify(body),
+      });
+
+      const data = await res.json();
+      if (!res.ok) { toast(data.message || 'Failed to join', 'error'); document.getElementById('join-btn').disabled = false; return; }
+
+      state.botId = data.bot_id;
+      setStatus(true);
+      document.getElementById('info-bot-id').textContent = state.botId.slice(0, 16) + '…';
+      document.getElementById('info-started').textContent = new Date().toLocaleTimeString();
+      toast('Bot joined meeting ✓', 'success');
+
+      // Auto-refresh summary every 15s
+      state.summaryInterval = setInterval(fetchSummary, 15000);
+    } catch (e) {
+      toast('Network error: ' + e.message, 'error');
+      document.getElementById('join-btn').disabled = false;
+    }
+  }
+
+  // ─── Leave Meeting ────────────────────────────────────────────────────────
+  async function leaveMeeting() {
+    if (!state.botId) return;
+    try {
+      await fetch(`${apiBase()}/bots/${state.botId}`, {
+        method: 'DELETE',
+        headers: headers(),
+        body: JSON.stringify({ bot_id: state.botId }),
+      });
+      toast('Bot left meeting', 'success');
+    } catch (e) {
+      toast('Error leaving: ' + e.message, 'error');
+    } finally {
+      state.botId = null;
+      setStatus(false);
+      clearInterval(state.summaryInterval);
+      document.getElementById('info-bot-id').textContent = '—';
+      document.getElementById('info-mode').textContent = '—';
+      document.getElementById('info-started').textContent = '—';
+    }
+  }
+
+  // ─── Fetch Summary ────────────────────────────────────────────────────────
+  async function fetchSummary() {
+    if (!state.botId) return;
+    try {
+      const res = await fetch(`${apiBase()}/bots/${state.botId}/summary`, { headers: headers() });
+      if (!res.ok) { return; }
+      const data = await res.json();
+
+      // Update mode badge
+      const badge = document.getElementById('mode-badge');
+      badge.textContent = data.mode || 'unknown';
+      badge.className = `summary-badge badge-${data.mode || 'passive'}`;
+      document.getElementById('info-mode').textContent = data.mode || '—';
+
+      // Update transcription
+      if (data.transcriptions && data.transcriptions.length > 0) {
+        clearTranscript();
+        data.transcriptions.forEach(t => addTranscript(t.speaker, t.text, t.speaker === 'Bot'));
+      }
+
+      // Build summary text
+      const summaryBox = document.getElementById('summary-box');
+      let txt = '';
+      if (data.notes && data.notes.length > 0) {
+        txt += '📌 Notes:\n' + data.notes.join('\n') + '\n\n';
+      }
+      if (data.extracted_needs && data.extracted_needs.length > 0) {
+        txt += '🎯 Extracted Needs:\n' + data.extracted_needs.join('\n') + '\n\n';
+      }
+      if (!txt) txt = 'Session active. No notes or extracted needs yet.';
+      summaryBox.textContent = txt;
+    } catch (e) {
+      console.error('Summary fetch failed:', e);
+    }
+  }
+</script>
+</body>
+</html>

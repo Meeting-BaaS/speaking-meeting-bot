@@ -6,16 +6,19 @@ import os
 import sys
 from typing import Dict, List, Optional, Tuple
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
-from app.routes import router as app_router
-from app.routes_sales import sales_router
-from app.websockets import websocket_router
-from meetingbaas_pipecat.utils.logger import configure_logger
-from utils.ngrok import LOCAL_DEV_MODE, NGROK_URL_INDEX, NGROK_URLS, load_ngrok_urls
+from app.api.routes import router as app_router
+from app.api.routes_sales import sales_router
+from app.api.websockets import websocket_router
+from app.utils.pipecat_logger import configure_logger
+from app.utils.ngrok import LOCAL_DEV_MODE, NGROK_URL_INDEX, NGROK_URLS, load_ngrok_urls
 
 # Configure logging with the prettier logger
 logger = configure_logger()
@@ -28,15 +31,15 @@ pipecat_ws_logger.setLevel(logging.WARNING)
 
 async def api_key_middleware(request: Request, call_next):
     """Middleware to check for MeetingBaas API key in headers."""
-    # Skip API key check for docs and openapi endpoints
-    if request.url.path in ["/docs", "/openapi.json", "/redoc"]:
+    # Skip API key check for docs, openapi endpoints, and preflight OPTIONS requests
+    if request.method == "OPTIONS" or request.url.path in ["/docs", "/openapi.json", "/redoc"]:
         return await call_next(request)
 
-    api_key = request.headers.get("x-meeting-baas-api-key")
+    api_key = request.headers.get("x-meeting-baas-api-key") or os.getenv("MEETING_BAAS_API_KEY")
     if not api_key:
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"message": "Missing MeetingBaas API key in x-meeting-baas-api-key header"},
+            content={"message": "Missing MeetingBaas API key in environment or headers"},
         )
 
     # Add the API key to the request state for use in routes
@@ -253,6 +256,10 @@ def create_app() -> FastAPI:
     return app
 
 
+# Create the app instance for uvicorn
+app = create_app()
+
+
 def start_server(host: str = "0.0.0.0", port: int = 8000, local_dev: bool = False):
     """Start the Uvicorn server for the FastAPI application."""
     # If the PORT environment variable is set, use it; otherwise, use the default.
@@ -272,7 +279,7 @@ def start_server(host: str = "0.0.0.0", port: int = 8000, local_dev: bool = Fals
     if local_dev:
         print("\n⚠️ Starting in local development mode")
         # Cache the ngrok URLs at server start
-        import utils.ngrok as ngrok_utils
+        import app.utils.ngrok as ngrok_utils
         ngrok_utils.NGROK_URLS = load_ngrok_urls()
 
         if ngrok_utils.NGROK_URLS:
@@ -292,7 +299,7 @@ def start_server(host: str = "0.0.0.0", port: int = 8000, local_dev: bool = Fals
         sys.executable,
         "-m",
         "uvicorn",
-        "app:app",  # Use the app from app/__init__.py
+        "app.main:app",  # Point to the app instance in this module
         "--host",
         host,
         "--port",

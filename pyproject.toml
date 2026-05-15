@@ -5,14 +5,10 @@ description = "A bot that uses MeetingBaas APIs and pipecat's WebsocketServerTra
 authors = ["Anirudh Sriram <hello@techwithanirudh.com>"]
 license = "MIT"
 readme = "README.md"
-packages = [{include = "meetingbaas_pipecat"}]
+packages = [{include = "app"}]
 
 [tool.poetry.scripts]
-bot = "meetingbaas_pipecat.bot.bot:start"
-proxy = "meetingbaas_pipecat.proxy.proxy:start"
-meetingbaas = "scripts.meetingbaas:main"
-parallel = "scripts.parallel:main"
-api = "api:start_server"
+api = "app.main:app"
 
 [tool.poetry.dependencies]
 python = "^3.11"

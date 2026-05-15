@@ -38,3 +38,5 @@ personas.json
 
 # Generated MD backups
 *.bak
+
+.DS_Store

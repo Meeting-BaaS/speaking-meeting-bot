@@ -1,0 +1,51 @@
+version: "3.9"
+
+services:
+  # ── Main API Server ──────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: speaking-bot-api
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+      - "7014:7014"
+    env_file:
+      - .env
+    environment:
+      - PORT=8000
+    volumes:
+      - ./config/personas:/app/config/personas:ro
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health", "-H", "x-meeting-baas-api-key: healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - bot-network
+
+  # ── Ngrok Tunnel (local dev only) ────────────────────────────────────────────
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: speaking-bot-ngrok
+    restart: unless-stopped
+    command: http api:8000 --authtoken=${NGROK_AUTHTOKEN}
+    ports:
+      - "4040:4040"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - bot-network
+    profiles:
+      - local-dev
+
+networks:
+  bot-network:
+    driver: bridge
+
+volumes:
+  logs:

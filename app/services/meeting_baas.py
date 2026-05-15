@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 import aiohttp
 from dotenv import load_dotenv
 
-from meetingbaas_pipecat.utils.logger import logger
+from app.utils.pipecat_logger import logger
 
 load_dotenv()
 

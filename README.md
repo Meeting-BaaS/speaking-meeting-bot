@@ -36,38 +36,35 @@ The project follows a streamlined API-first approach with:
 
 - A lightweight FastAPI server that handles bot management via direct MeetingBaas API calls
 - WebSocket server for real-time communication between MeetingBaas and Pipecat
+- Robust session management with persistent state for transcription and notes
 - Properly typed Pydantic models for request/response validation
-- Clean separation of concerns with modular components
+- Clean production-ready structure: `app/api`, `app/core`, `app/bots`, `app/services`
 
 #### API Endpoints
 
 1. Root endpoint (`GET /`):
-
    - Health check endpoint
    - Returns: `{"message": "MeetingBaas Bot API is running"}`
 
 2. Run Bots (`POST /run-bots`):
-
    ```json
    {
      "meeting_url": "https://meet.google.com/xxx-yyyy-zzz",
-     "personas": ["interviewer"],
-     "meeting_baas_api_key": "your-api-key",
-     "bot_image": "https://example.com/avatar.jpg",
-     "entry_message": "Hello, I'm here to help!"
+     "personas": ["optional_predefined_persona"],
+     "prompt": "You are a helpful assistant who loves cats...",
+     "meeting_baas_api_key": "your-api-key"
    }
    ```
+   - Supports both pre-defined personas and dynamic `prompt`-based persona extraction.
+   - Required fields: `meeting_url` and `meeting_baas_api_key`.
+   - Returns: MeetingBaas bot ID and internal client ID.
 
-   - Required fields: `meeting_url` and `meeting_baas_api_key`
-   - The WebSocket URL is determined automatically (see WebSocket URL Resolution below)
-   - Returns: MeetingBaas bot ID and client ID for WebSocket connections
+3. Bot Summary (`GET /bots/{bot_id}/summary`):
+   - Returns a real-time summary of the session: transcriptions, notes, and metadata.
 
-3. WebSocket endpoint (`/ws/{client_id}`):
-   - Real-time communication channel for audio streaming
-   - Binary audio data and control messages
-4. Pipecat WebSocket endpoint (`/pipecat/{client_id}`):
-   - Connection point for Pipecat services
-   - Bidirectional conversion between raw audio and Protobuf frames
+4. WebSocket endpoints:
+   - `/ws/{client_id}`: Standard client communication.
+   - `/pipecat/{client_id}`: Pipecat process communication channel.
 
 ### WebSocket URL Resolution
 
@@ -134,7 +131,7 @@ You do not need a Replicat or UTFS API key to run the project if you're not usin
 
 ### Persona Structure
 
-Each persona is defined in the `@personas` directory with:
+Each persona is defined in the `config/personas` directory with:
 
 - A README.md defining their personality
 - Space for additional markdown files to expand knowledge and behaviour
@@ -142,10 +139,10 @@ Each persona is defined in the `@personas` directory with:
 ### Example Persona Structure
 
 ```
-@personas/
-└── quantum_physicist/
+config/personas/
+└── baas_onboarder/
     ├── README.md
-    └── (additional beVhavior files)
+    └── Rules.md
 ```
 
 ## Prerequisites
@@ -232,7 +229,7 @@ There are two ways to run the server:
 
 ```bash
 # Standard mode
-poetry run uvicorn app:app --reload --host 0.0.0.0 --port ${PORT}
+poetry run uvicorn app.main:app --reload --host 0.0.0.0 --port ${PORT}
 
 # Local development mode with ngrok auto-configuration
 poetry run python app/main.py --local-dev
@@ -279,7 +276,7 @@ The local development mode simplifies WebSocket setup by:
 6. Start the server:
 
    ```bash
-   poetry run uvicorn app:app --reload --host 0.0.0.0 --port 7014
+   poetry run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
    ```
 
 ### Creating Bots via API
@@ -339,14 +336,24 @@ The persona architecture is designed to support:
 - Scrapping the websites given by the user to MD for the bot knowledge base
 - Containerizing this nicely
 
+### Docker Deployment
+
+The project includes a `docker-compose.yml` for easy deployment:
+
+```bash
+docker-compose up --build
+```
+
+This will start the FastAPI server and an ngrok sidecar for local development.
+
 ## Troubleshooting
 
 - Verify Poetry environment is activated
 - Check Ngrok connection status
-- Validate environment variables
+- Validate environment variables in `.env`
 - Ensure unique Ngrok URLs for multiple agents
 
-For more detailed information about specific personas or deployment options, check the respective documentation in the `@personas` directory.
+For more detailed information about specific personas or deployment options, check the respective documentation in the `config/personas` directory.
 
 ## Troubleshooting WebSocket Connections
 

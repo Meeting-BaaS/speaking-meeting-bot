@@ -7,7 +7,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Dict, Optional
 
-from meetingbaas_pipecat.utils.logger import logger
+from app.utils.pipecat_logger import logger
 
 from app.services.session_manager import BotSession
 

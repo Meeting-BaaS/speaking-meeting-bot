@@ -7,6 +7,4 @@ def get_application():
 
     return create_app()
 
-
-# Only create the app when directly accessed, not on import
-app = get_application()
+# App initialization is handled in app.main

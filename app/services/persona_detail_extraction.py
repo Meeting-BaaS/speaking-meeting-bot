@@ -1,4 +1,4 @@
-import openai
+import aiohttp
 import json
 import os
 from typing import Any, Dict, Optional
@@ -25,47 +25,54 @@ Extract the information in the following JSON format. If a field cannot be deter
 
 JSON Output:'''
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        logger.error("OPENAI_API_KEY environment variable not set.")
-        return None
+        logger.error("GEMINI_API_KEY environment variable not set. Falling back to default extraction.")
+        # If no key, return a default extraction
+        return {
+            "name": "Meeting Bot",
+            "gender": "female",
+            "description": prompt_text[:200],
+            "characteristics": []
+        }
 
     try:
-        # Use async client
-        client = openai.AsyncOpenAI(api_key=api_key)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json"}
+        }
 
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": prompt},
-            ],
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    logger.error(f"Gemini API returned {response.status}: {text}")
+                    return None
+                    
+                data = await response.json()
+                content = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                
+                if content:
+                    extracted_data = json.loads(content)
+                    
+                    # Apply default values and handle nulls/empty strings
+                    extracted_data["name"] = extracted_data.get("name") or "Bot"
+                    extracted_data["gender"] = extracted_data.get("gender") or "male"
+                    extracted_data['description'] = extracted_data.get("description") or prompt_text
 
-        content = response.choices[0].message.content
-        if content:
-            extracted_data = json.loads(content)
-            
-            # Apply default values and handle nulls/empty strings
-            extracted_data["name"] = extracted_data.get("name") or "Bot"
-            extracted_data["gender"] = extracted_data.get("gender") or "male"
-
-            extracted_data['description'] = extracted_data.get("description") or prompt_text
-
-            # Ensure characteristics is a list, default to empty list if null or not list
-            characteristics = extracted_data.get("characteristics")
-            extracted_data["characteristics"] = characteristics if isinstance(characteristics, list) else []
-            
-            return extracted_data
-        else:
-            logger.warning("LLM returned empty content for persona details extraction.")
-            return None
+                    # Ensure characteristics is a list
+                    characteristics = extracted_data.get("characteristics")
+                    extracted_data["characteristics"] = characteristics if isinstance(characteristics, list) else []
+                    
+                    return extracted_data
+                else:
+                    logger.warning("LLM returned empty content for persona details extraction.")
+                    return None
 
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse JSON from LLM response: {e}")
-        return None
-    except openai.AuthenticationError as e:
-        logger.error(f"OpenAI Authentication Error: {e}. Please check your API key.")
         return None
     except Exception as e:
         logger.error(f"Error during LLM persona details extraction: {e}")
