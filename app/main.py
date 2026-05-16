@@ -9,6 +9,10 @@ from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 load_dotenv()
 
+# Prevent "duplicate file name frames.proto" crashes when running Pipecat in-process
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
+
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi

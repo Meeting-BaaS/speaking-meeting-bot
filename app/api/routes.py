@@ -19,8 +19,7 @@ from app.models.models import (
 )
 from app.services.image_service import image_service
 from config.persona_utils import persona_manager
-from app.core.connection import MEETING_DETAILS, PIPECAT_PROCESSES, registry
-from app.core.process import start_pipecat_process, terminate_process_gracefully
+from app.core.connection import MEETING_DETAILS, registry
 from app.core.router import router as message_router
 
 # Import from the app module (will be defined in __init__.py)
@@ -288,15 +287,17 @@ async def join_meeting(request: BotRequest, client_request: Request):
 
     # Create bot directly through MeetingBaas API
     # Use persona display name from resolved_persona_data for MeetingBaas API call
-    # Use the websocket_url as the webhook_url (same base URL, different endpoint)
-    webhook_url = f"{websocket_url}/webhook"
+    # Use the websocket_url as the base for the webhook_url but with http/https
+    base_http_url = websocket_url.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
+    webhook_url = f"{base_http_url}/webhook"
+    # Change #1: Separate input and output WebSocket URLs
     meetingbaas_bot_id = create_meeting_bot(
         meeting_url=request.meeting_url,
         websocket_url=websocket_url,
         bot_id=bot_client_id,
-        persona_name=resolved_persona_data.get("name", persona_name_for_logging),  # Use resolved display name
+        persona_name=resolved_persona_data.get("name", persona_name_for_logging),
         api_key=api_key,
-        bot_image=bot_image_str,  # Use the pre-stringified value
+        bot_image=bot_image_str,
         entry_message=final_entry_message,
         extra=request.extra,
         streaming_audio_frequency=streaming_audio_frequency,
@@ -304,17 +305,23 @@ async def join_meeting(request: BotRequest, client_request: Request):
     )
 
     if meetingbaas_bot_id:
-        # Update the meetingbaas_bot_id in MEETING_DETAILS
-        # Convert tuple to list to allow assignment
         details = list(MEETING_DETAILS[bot_client_id])
         details[2] = meetingbaas_bot_id
         MEETING_DETAILS[bot_client_id] = tuple(details)
 
-        # Log the client_id for internal reference
-        logger.info(f"Bot created with MeetingBaas bot_id: {meetingbaas_bot_id}")
-        logger.info(f"Internal client_id for WebSocket connections: {bot_client_id}")
+        logger.info(
+            "bot_created",
+            extra={
+                "client_id": bot_client_id,
+                "bot_id": meetingbaas_bot_id,
+                "session_id": bot_client_id,
+                "websocket_state": websocket_url,
+                "session_state": "created",
+            }
+        )
 
-        # Ensure the session is stored in SessionManager for transcriptions
+        # Store session in SessionManager (pipeline is started by the orchestrator
+        # when MeetingBaas connects via WebSocket). (Change #11/#16)
         session_manager.store_session(
             client_id=bot_client_id,
             bot_id=meetingbaas_bot_id,
@@ -323,31 +330,10 @@ async def join_meeting(request: BotRequest, client_request: Request):
             client_name="Frontend User"
         )
 
-        # Start the Pipecat process as a subprocess
-        # The Pipecat process should connect to our LOCAL WebSocket server, not the external one
-        import os
-        local_port = os.getenv("PORT", "8000")
-        pipecat_websocket_url = f"ws://localhost:{local_port}/pipecat/{bot_client_id}"
-        process = start_pipecat_process(
-            client_id=bot_client_id,
-            websocket_url=pipecat_websocket_url,  # Use internal URL, not external
-            meeting_url=request.meeting_url,
-            persona_data=resolved_persona_data,
-            streaming_audio_frequency=streaming_audio_frequency,
-            enable_tools=request.enable_tools,
-            api_key=api_key,
-            meetingbaas_bot_id=meetingbaas_bot_id,
-        )
-
-        # Store the process for later termination
-        PIPECAT_PROCESSES[bot_client_id] = process
-
-        # Return only the bot_id in the response
         return JoinResponse(bot_id=meetingbaas_bot_id)
     else:
-        # Clean up MEETING_DETAILS if bot creation failed
         if bot_client_id in MEETING_DETAILS:
-             MEETING_DETAILS.pop(bot_client_id)
+            MEETING_DETAILS.pop(bot_client_id)
 
         return JSONResponse(
             content={
@@ -430,12 +416,9 @@ async def leave_bot(
     else:
         logger.warning("No MeetingBaas bot ID or API key found, skipping API call")
 
-    # 2. Close WebSocket connections if they exist
+    # 2. Close WebSocket connections
     if client_id:
-        # Mark the client as closing to prevent further messages
         message_router.mark_closing(client_id)
-
-        # Close Pipecat WebSocket first
         if client_id in registry.pipecat_connections:
             try:
                 await registry.disconnect(client_id, is_pipecat=True)
@@ -443,9 +426,7 @@ async def leave_bot(
             except Exception as e:
                 success = False
                 logger.error(f"Error closing Pipecat WebSocket: {e}")
-
-        # Then close client WebSocket if it exists
-        if client_id in registry.active_connections:
+        if registry.get_clients(client_id):
             try:
                 await registry.disconnect(client_id, is_pipecat=False)
                 logger.info(f"Closed client WebSocket for client {client_id}")
@@ -453,39 +434,25 @@ async def leave_bot(
                 success = False
                 logger.error(f"Error closing client WebSocket: {e}")
 
-        # Add a small delay to allow for clean disconnection
         await asyncio.sleep(0.5)
 
-    # 3. Terminate the Pipecat process after WebSockets are closed
-    if client_id and client_id in PIPECAT_PROCESSES:
-        process = PIPECAT_PROCESSES[client_id]
-        if process and process.poll() is None:  # If process is still running
-            try:
-                if terminate_process_gracefully(process, timeout=3.0):
-                    logger.info(
-                        f"Gracefully terminated Pipecat process for client {client_id}"
-                    )
-                else:
-                    logger.warning(
-                        f"Had to forcefully kill Pipecat process for client {client_id}"
-                    )
-            except Exception as e:
-                success = False
-                logger.error(f"Error terminating Pipecat process: {e}")
+    # 3. Stop orchestrator session (Change #15 + #11: ordered async cleanup)
+    if client_id:
+        try:
+            from app.runtime import orchestrator
+            await orchestrator.stop_session(client_id)
+            logger.info(f"Orchestrator stopped session for client {client_id}")
+        except Exception as e:
+            logger.error(f"Error stopping orchestrator session: {e}")
 
-        # Remove from our storage
-        PIPECAT_PROCESSES.pop(client_id, None)
-
-        # Clean up meeting details
         if client_id in MEETING_DETAILS:
             MEETING_DETAILS.pop(client_id, None)
 
-        # Release ngrok URL if in local dev mode
         if LOCAL_DEV_MODE and client_id:
             release_ngrok_url(client_id)
             log_ngrok_status()
     else:
-        logger.warning(f"No Pipecat process found for client {client_id}")
+        logger.warning(f"No client ID found for bot {meetingbaas_bot_id} — skipping local cleanup")
 
     return {
         "message": "Bot removal request processed",
@@ -594,9 +561,13 @@ async def get_bot_summary(bot_id: str):
             "meeting_url": session.meeting_url,
             "persona_name": persona_name,
             "mode": session.mode,
+            "state": session.state.value,
             "notes": session.notes,
             "extracted_needs": session.extracted_needs,
             "transcriptions": session.transcriptions,
+            "audio_frames_received": session.audio_frames_received,
+            "last_audio_frame_at": session.last_audio_frame_at.isoformat() if session.last_audio_frame_at else None,
+            "last_handshake_at": session.last_handshake_at.isoformat() if session.last_handshake_at else None,
             "created_at": session.created_at.isoformat(),
             "engaged_at": session.engaged_at.isoformat() if session.engaged_at else None,
             "ended_at": session.ended_at.isoformat() if session.ended_at else None,
@@ -611,9 +582,13 @@ async def get_bot_summary(bot_id: str):
                 "meeting_url": details[0],
                 "persona_name": details[1],
                 "mode": "active",
+                "state": "created",
                 "notes": [],
                 "extracted_needs": [],
                 "transcriptions": [],
+                "audio_frames_received": 0,
+                "last_audio_frame_at": None,
+                "last_handshake_at": None,
             }
 
     raise HTTPException(
@@ -669,5 +644,4 @@ async def meetingbaas_webhook(request: Request):
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Error processing webhook: {e}")
-        return {"status": "error", "message": str(e)}
         return {"status": "error", "message": str(e)}

@@ -119,13 +119,20 @@ def create_meeting_bot(
     if bot_image is not None:
         bot_image = str(bot_image)  # Ensure bot_image is a string
 
-    # Create the WebSocket path for streaming
-    websocket_with_path = f"{websocket_url}/ws/{bot_id}"
+    # MeetingBaaS support in this codebase is built around a single
+    # bidirectional websocket. The legacy `/ws/{client_id}` route is still the
+    # only path that both the docs and the working sales flow agree on.
+    #
+    # Using separate `/ws/input` and `/ws/output` URLs caused MeetingBaaS to
+    # connect successfully but never deliver inbound audio frames and never play
+    # bot audio back into the meeting. Keep both streaming directions on the
+    # same socket so READY, media, and outbound audio all share one channel.
+    bidirectional_websocket = f"{websocket_url}/ws/{bot_id}"
 
     # Create streaming config
     streaming = Streaming(
-        input=websocket_with_path,
-        output=websocket_with_path,
+        input=bidirectional_websocket,
+        output=bidirectional_websocket,
         audio_frequency=streaming_audio_frequency,
     )
 
@@ -136,6 +143,7 @@ def create_meeting_bot(
         reserved=False,
         deduplication_key=f"{persona_name}-BaaS-{bot_id}",
         streaming=streaming,
+        speech_to_text=SpeechToText(provider="Default"),
         bot_image=bot_image,
         entry_message=entry_message,
         extra=extra,
@@ -157,9 +165,12 @@ def create_meeting_bot(
             "reserved": False,
             "deduplication_key": f"{persona_name}-BaaS-{bot_id}",
             "streaming": {
-                "input": websocket_with_path,
-                "output": websocket_with_path,
+                "input": bidirectional_websocket,
+                "output": bidirectional_websocket,
                 "audio_frequency": streaming_audio_frequency,
+            },
+            "speech_to_text": {
+                "provider": "Default",
             },
         }
 

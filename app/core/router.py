@@ -4,6 +4,7 @@ from app.core.connection import registry
 from app.core.converter import converter
 from app.utils.pipecat_logger import logger
 from app.services.session_manager import session_manager
+from app.services.debug_recorder import recorder
 
 
 class MessageRouter:
@@ -26,7 +27,7 @@ class MessageRouter:
             self.logger.debug(f"Skipping send to closing client {client_id}")
             return
 
-        client = self.registry.get_client(client_id)
+        client = self.registry.get_output_client(client_id)
         if client:
             try:
                 await client.send_bytes(message)
@@ -40,8 +41,7 @@ class MessageRouter:
             self.logger.debug(f"Skipping send_text to closing client {client_id}")
             return
 
-        client = self.registry.get_client(client_id)
-        if client:
+        for client in self.registry.get_clients(client_id):
             try:
                 await client.send_text(message)
                 self.logger.debug(
@@ -52,7 +52,7 @@ class MessageRouter:
 
     async def broadcast(self, message: str):
         """Broadcast text message to all clients."""
-        for client_id, connection in self.registry.active_connections.items():
+        for client_id, connection in self.registry.iter_unique_clients():
             if client_id not in self.closing_clients:
                 try:
                     await connection.send_text(message)
@@ -71,13 +71,15 @@ class MessageRouter:
         pipecat = self.registry.get_pipecat(client_id)
         if pipecat:
             try:
-                serialized_frame = self.converter.raw_to_protobuf(message)
+                # Change #17: Record incoming audio for debug replay
+                recorder.write_audio("input", client_id, message)
+
+                serialized_frame = await self.converter.raw_to_protobuf(message)
                 await pipecat.send_bytes(serialized_frame)
                 self.logger.debug(
                     f"Forwarded audio frame ({len(message)} bytes) to Pipecat for client {client_id}"
                 )
             except Exception as e:
-                # Check for connection closed errors specifically
                 if "close" in str(e).lower() or "closed" in str(e).lower():
                     self.logger.debug(
                         f"Connection closed when sending to Pipecat for client {client_id}: {e}"
@@ -94,32 +96,36 @@ class MessageRouter:
             )
             return
 
-        client = self.registry.get_client(client_id)
+        client = self.registry.get_output_client(client_id)
         if client:
             try:
-                audio_data, transcription = self.converter.protobuf_to_raw(message)
+                audio_data, transcription = await self.converter.protobuf_to_raw(message)
                 
                 if transcription and transcription.get("text"):
-                    # Add live transcription to session manager
                     session_manager.add_transcription(
                         client_id=client_id,
                         speaker=transcription.get("user_id", "Speaker"),
                         text=transcription["text"]
                     )
+                    # Change #17: Record transcript for debug replay
+                    recorder.write_event("transcript", client_id, {
+                        "speaker": transcription.get("user_id", "Speaker"),
+                        "text": transcription["text"],
+                    })
                     self.logger.info(f"Recorded live transcription for {client_id}: {transcription['text']}")
 
                 if audio_data:
+                    # Change #17: Record TTS audio for debug replay
+                    recorder.write_audio("tts", client_id, audio_data)
                     await client.send_bytes(audio_data)
                     self.logger.info(
                         f"Forwarded audio ({len(audio_data)} bytes) from Pipecat to MeetingBaaS client {client_id}"
                     )
                 elif not audio_data and not transcription:
-                    self.logger.warning(
-                        f"Extracted data was None, trying raw bytes fallback."
+                    self.logger.debug(
+                        f"Ignoring non-audio/non-transcription Pipecat frame for {client_id} ({len(message)} bytes)"
                     )
-                    if len(message) > 100:
-                        await client.send_bytes(message)
-                        self.logger.info(f"Forwarded raw bytes ({len(message)}) as fallback")
+
             except Exception as e:
                 # Check for connection closed errors specifically
                 if "close" in str(e).lower() or "closed" in str(e).lower():

@@ -259,6 +259,9 @@
       <div class="panel-body">
         <div class="info-row"><span class="info-key">Bot ID</span><span class="info-val" id="info-bot-id">—</span></div>
         <div class="info-row"><span class="info-key">Mode</span><span class="info-val" id="info-mode">—</span></div>
+        <div class="info-row"><span class="info-key">State</span><span class="info-val" id="info-state">—</span></div>
+        <div class="info-row"><span class="info-key">Audio Frames</span><span class="info-val" id="info-audio-frames">0</span></div>
+        <div class="info-row"><span class="info-key">Last Audio</span><span class="info-val" id="info-last-audio">—</span></div>
         <div class="info-row"><span class="info-key">Started</span><span class="info-val" id="info-started">—</span></div>
         <hr class="divider" />
         <div class="section-label">Actions</div>
@@ -399,6 +402,9 @@
       state.botId = data.bot_id;
       setStatus(true);
       document.getElementById('info-bot-id').textContent = state.botId.slice(0, 16) + '…';
+      document.getElementById('info-state').textContent = data.state || '—';
+      document.getElementById('info-audio-frames').textContent = String(data.audio_frames_received ?? 0);
+      document.getElementById('info-last-audio').textContent = formatTime(data.last_audio_frame_at);
       document.getElementById('info-started').textContent = new Date().toLocaleTimeString();
       toast('Bot joined meeting ✓', 'success');
 
@@ -428,6 +434,9 @@
       clearInterval(state.summaryInterval);
       document.getElementById('info-bot-id').textContent = '—';
       document.getElementById('info-mode').textContent = '—';
+      document.getElementById('info-state').textContent = '—';
+      document.getElementById('info-audio-frames').textContent = '0';
+      document.getElementById('info-last-audio').textContent = '—';
       document.getElementById('info-started').textContent = '—';
     }
   }
@@ -445,11 +454,18 @@
       badge.textContent = data.mode || 'unknown';
       badge.className = `summary-badge badge-${data.mode || 'passive'}`;
       document.getElementById('info-mode').textContent = data.mode || '—';
+      document.getElementById('info-state').textContent = data.state || '—';
+      document.getElementById('info-audio-frames').textContent = String(data.audio_frames_received ?? 0);
+      document.getElementById('info-last-audio').textContent = formatTime(data.last_audio_frame_at);
 
       // Update transcription
       if (data.transcriptions && data.transcriptions.length > 0) {
         clearTranscript();
         data.transcriptions.forEach(t => addTranscript(t.speaker, t.text, t.speaker === 'Bot'));
+      } else if ((data.audio_frames_received || 0) > 0) {
+        document.getElementById('live-badge').textContent = '● Audio seen, no transcript';
+      } else if (data.state === 'pipecat_connected' || data.state === 'ready') {
+        document.getElementById('live-badge').textContent = '● Connected, no media';
       }
 
       // Build summary text

@@ -163,9 +163,9 @@ async def test_connection_registry_connect_client():
     registry = ConnectionRegistry()
     ws = AsyncMock()
     ws.accept = AsyncMock()
-    await registry.connect(ws, "client-1", is_pipecat=False)
+    await registry.connect(ws, "client-1", is_pipecat=False, channel="output")
     ws.accept.assert_called_once()
-    assert registry.get_client("client-1") is ws
+    assert registry.get_output_client("client-1") is ws
 
 
 @pytest.mark.asyncio
@@ -185,6 +185,23 @@ async def test_connection_registry_disconnect():
     ws = AsyncMock()
     ws.accept = AsyncMock()
     ws.close = AsyncMock()
-    await registry.connect(ws, "client-2", is_pipecat=False)
-    await registry.disconnect("client-2", is_pipecat=False)
+    await registry.connect(ws, "client-2", is_pipecat=False, channel="output")
+    await registry.disconnect("client-2", is_pipecat=False, channel="output")
     assert registry.get_client("client-2") is None
+
+
+@pytest.mark.asyncio
+async def test_connection_registry_separates_input_and_output():
+    from app.core.connection import ConnectionRegistry
+    registry = ConnectionRegistry()
+    ws_in = AsyncMock()
+    ws_in.accept = AsyncMock()
+    ws_out = AsyncMock()
+    ws_out.accept = AsyncMock()
+
+    await registry.connect(ws_in, "client-3", channel="input")
+    await registry.connect(ws_out, "client-3", channel="output")
+
+    assert registry.get_input_client("client-3") is ws_in
+    assert registry.get_output_client("client-3") is ws_out
+    assert registry.get_clients("client-3") == [ws_in, ws_out]

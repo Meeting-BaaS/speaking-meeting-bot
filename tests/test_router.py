@@ -14,15 +14,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 @pytest.fixture
 def mock_registry():
     registry = MagicMock()
-    registry.active_connections = {}
+    registry.get_clients = MagicMock(return_value=[])
+    registry.iter_unique_clients = MagicMock(return_value=[])
     return registry
 
 
 @pytest.fixture
 def mock_converter():
     converter = MagicMock()
-    converter.raw_to_protobuf = MagicMock(return_value=b"protobuf_frame")
-    converter.protobuf_to_raw = MagicMock(return_value=b"raw_audio")
+    converter.raw_to_protobuf = AsyncMock(return_value=b"protobuf_frame")
+    converter.protobuf_to_raw = AsyncMock(return_value=(b"raw_audio", None))
     return converter
 
 
@@ -49,7 +50,7 @@ def test_mark_closing(router):
 async def test_send_binary_skips_closing(router):
     router.mark_closing("client-1")
     mock_ws = AsyncMock()
-    router.registry.get_client = MagicMock(return_value=mock_ws)
+    router.registry.get_output_client = MagicMock(return_value=mock_ws)
     await router.send_binary(b"data", "client-1")
     mock_ws.send_bytes.assert_not_called()
 
@@ -57,14 +58,14 @@ async def test_send_binary_skips_closing(router):
 @pytest.mark.asyncio
 async def test_send_binary_sends_to_client(router):
     mock_ws = AsyncMock()
-    router.registry.get_client = MagicMock(return_value=mock_ws)
+    router.registry.get_output_client = MagicMock(return_value=mock_ws)
     await router.send_binary(b"audio_data", "client-2")
     mock_ws.send_bytes.assert_called_once_with(b"audio_data")
 
 
 @pytest.mark.asyncio
 async def test_send_binary_no_client(router):
-    router.registry.get_client = MagicMock(return_value=None)
+    router.registry.get_output_client = MagicMock(return_value=None)
     # Should not raise, just silently skip
     await router.send_binary(b"data", "no-client")
 
@@ -76,7 +77,7 @@ async def test_send_binary_no_client(router):
 @pytest.mark.asyncio
 async def test_send_text_sends_to_client(router):
     mock_ws = AsyncMock()
-    router.registry.get_client = MagicMock(return_value=mock_ws)
+    router.registry.get_clients = MagicMock(return_value=[mock_ws])
     await router.send_text("hello", "client-3")
     mock_ws.send_text.assert_called_once_with("hello")
 
@@ -85,7 +86,7 @@ async def test_send_text_sends_to_client(router):
 async def test_send_text_skips_closing(router):
     router.mark_closing("client-4")
     mock_ws = AsyncMock()
-    router.registry.get_client = MagicMock(return_value=mock_ws)
+    router.registry.get_clients = MagicMock(return_value=[mock_ws])
     await router.send_text("hello", "client-4")
     mock_ws.send_text.assert_not_called()
 
@@ -98,7 +99,7 @@ async def test_send_text_skips_closing(router):
 async def test_broadcast(router):
     ws1 = AsyncMock()
     ws2 = AsyncMock()
-    router.registry.active_connections = {"c1": ws1, "c2": ws2}
+    router.registry.iter_unique_clients = MagicMock(return_value=[("c1", ws1), ("c2", ws2)])
     await router.broadcast("system message")
     ws1.send_text.assert_called_once_with("system message")
     ws2.send_text.assert_called_once_with("system message")
@@ -108,7 +109,7 @@ async def test_broadcast(router):
 async def test_broadcast_skips_closing(router):
     ws1 = AsyncMock()
     ws2 = AsyncMock()
-    router.registry.active_connections = {"c1": ws1, "c2": ws2}
+    router.registry.iter_unique_clients = MagicMock(return_value=[("c1", ws1), ("c2", ws2)])
     router.mark_closing("c1")
     await router.broadcast("msg")
     ws1.send_text.assert_not_called()
@@ -144,7 +145,7 @@ async def test_send_to_pipecat_skips_closing(router):
 @pytest.mark.asyncio
 async def test_send_from_pipecat_converts_and_sends(router, mock_converter):
     mock_client_ws = AsyncMock()
-    router.registry.get_client = MagicMock(return_value=mock_client_ws)
+    router.registry.get_output_client = MagicMock(return_value=mock_client_ws)
     await router.send_from_pipecat(b"proto_frame", "client-7")
     mock_converter.protobuf_to_raw.assert_called_once_with(b"proto_frame")
     mock_client_ws.send_bytes.assert_called_once_with(b"raw_audio")
@@ -154,7 +155,7 @@ async def test_send_from_pipecat_converts_and_sends(router, mock_converter):
 async def test_send_from_pipecat_skips_closing(router):
     router.mark_closing("client-8")
     mock_ws = AsyncMock()
-    router.registry.get_client = MagicMock(return_value=mock_ws)
+    router.registry.get_output_client = MagicMock(return_value=mock_ws)
     await router.send_from_pipecat(b"data", "client-8")
     mock_ws.send_bytes.assert_not_called()
 
@@ -162,9 +163,9 @@ async def test_send_from_pipecat_skips_closing(router):
 @pytest.mark.asyncio
 async def test_send_from_pipecat_none_audio_falls_back(router, mock_converter):
     """When protobuf_to_raw returns None, fall back to forwarding raw bytes if large enough."""
-    mock_converter.protobuf_to_raw = MagicMock(return_value=None)
+    mock_converter.protobuf_to_raw = AsyncMock(return_value=(None, None))
     mock_ws = AsyncMock()
-    router.registry.get_client = MagicMock(return_value=mock_ws)
+    router.registry.get_output_client = MagicMock(return_value=mock_ws)
     large_payload = b"x" * 200
     await router.send_from_pipecat(large_payload, "client-9")
     mock_ws.send_bytes.assert_called_once_with(large_payload)
