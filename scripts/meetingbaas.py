@@ -30,6 +30,7 @@ from pipecat.transports.websocket.client import (
 )
 
 from config.persona_utils import PersonaManager
+from utils.runtime import get_state_dir
 from config.prompts import DEFAULT_SYSTEM_PROMPT
 from meetingbaas_pipecat.utils.logger import configure_logger
 import sys
@@ -37,9 +38,9 @@ import logging
 import json
 
 # Global transcript storage - will be saved to file for webhook to read
-TRANSCRIPT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "transcripts")
+TRANSCRIPT_DIR = os.path.join(get_state_dir(), "transcripts")
 # Directory for ready signals from webhook
-READY_SIGNALS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ready_signals")
+READY_SIGNALS_DIR = os.path.join(get_state_dir(), "ready_signals")
 
 
 from pipecat.services.llm_service import FunctionCallParams
@@ -141,7 +142,7 @@ async def save_call_summary(params: FunctionCallParams):
     qualified = arguments.get("qualified", "unknown")
 
     # Create call_summaries directory if it doesn't exist
-    summaries_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "call_summaries")
+    summaries_dir = os.path.join(get_state_dir(), "call_summaries")
     os.makedirs(summaries_dir, exist_ok=True)
 
     # Generate filename with timestamp

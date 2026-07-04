@@ -12,6 +12,20 @@ if TYPE_CHECKING:
 DEFAULT_PORT = 7014
 
 
+def get_state_dir() -> str:
+    """Writable directory for runtime artifacts (transcripts, ready signals,
+    call summaries, temp images).
+
+    Defaults to the repo root, which is writable when running from a checkout.
+    Set SPEAKING_BOT_STATE_DIR when the source lives in the read-only
+    /nix/store (flake-pinned deployment) — every runtime write must land
+    outside the store.
+    """
+    return os.getenv("SPEAKING_BOT_STATE_DIR") or os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))
+    )
+
+
 def get_server_port(default: int = DEFAULT_PORT) -> int:
     """Return the configured server port, falling back to the default."""
     try:

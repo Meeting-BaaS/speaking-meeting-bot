@@ -36,7 +36,7 @@ from utils.ngrok import (
     release_ngrok_url,
     update_ngrok_client_id,
 )
-from utils.runtime import build_public_base_url, get_internal_pipecat_ws_url
+from utils.runtime import build_public_base_url, get_internal_pipecat_ws_url, get_state_dir
 from config.prompts import PERSONA_INTERACTION_INSTRUCTIONS
 
 # Import the new persona detail extraction service
@@ -562,7 +562,7 @@ async def generate_persona_image(request: PersonaImageRequest) -> PersonaImageRe
 
 
 # Directory for signaling between webhook and Pipecat process
-READY_SIGNALS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ready_signals")
+READY_SIGNALS_DIR = os.path.join(get_state_dir(), "ready_signals")
 
 
 @router.post(
@@ -642,7 +642,7 @@ async def meetingbaas_webhook(request: Request):
 
             # Try to find the transcript file
             # First try with the MeetingBaaS bot_id, then look for any matching internal client_id
-            transcript_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "transcripts")
+            transcript_dir = os.path.join(get_state_dir(), "transcripts")
             transcript_file = None
 
             if bot_id and os.path.exists(os.path.join(transcript_dir, f"{bot_id}.json")):
@@ -683,7 +683,7 @@ async def generate_summary_from_transcript(transcript_file: str, bot_id: str = N
     """
     try:
         # Check if summary already exists for this bot_id
-        summaries_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "call_summaries")
+        summaries_dir = os.path.join(get_state_dir(), "call_summaries")
         os.makedirs(summaries_dir, exist_ok=True)
 
         if bot_id:
