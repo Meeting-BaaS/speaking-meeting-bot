@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -11,13 +13,41 @@ from core.router import router as message_router
 from meetingbaas_pipecat.utils.logger import logger
 from utils.floor import floor_key, write_floor
 from utils.ngrok import LOCAL_DEV_MODE, log_ngrok_status, release_ngrok_url
-from utils.runtime import get_internal_pipecat_ws_url
+from utils.runtime import get_internal_pipecat_ws_url, get_state_dir
 
 websocket_router = APIRouter()
 
 # Last floor holder written per meeting key — avoids rewriting the floor file
 # on every speaker-state update (MeetingBaas sends them continuously).
 _last_floor_speaker: dict = {}
+
+# Meeting keys whose bots already got their ready signal (see below).
+_ready_signaled: set = set()
+
+
+def _signal_ready_from_roster(meeting_url: str, key: str) -> None:
+    """Write ready-signal files for every bot in this meeting, once.
+
+    The bot-specific callback_config only delivers bot.completed/bot.failed —
+    the in_call_recording status webhook exists only on account-level SVIX
+    webhooks. So the reliable in-band readiness signal is the participant
+    roster: MeetingBaas only streams it once the bot is actually admitted
+    into the call (a lobbied bot can't see the roster). On the first roster
+    message for a meeting, release every one of our bots' entry messages.
+    """
+    if key in _ready_signaled:
+        return
+    _ready_signaled.add(key)
+    ready_dir = os.path.join(get_state_dir(), "ready_signals")
+    os.makedirs(ready_dir, exist_ok=True)
+    for client_id, details in MEETING_DETAILS.items():
+        if len(details) > 0 and floor_key(details[0]) == key:
+            try:
+                with open(os.path.join(ready_dir, f"{client_id}.ready"), "w") as f:
+                    f.write(datetime.now().isoformat())
+                logger.info(f"Roster seen for meeting {key} — ready signal for {client_id}")
+            except OSError as e:
+                logger.warning(f"Could not write ready signal for {client_id}: {e}")
 
 
 def _update_floor_from_speaker_state(meeting_url: str, text_data: str) -> None:
@@ -37,6 +67,11 @@ def _update_floor_from_speaker_state(meeting_url: str, text_data: str) -> None:
         return
 
     key = floor_key(meeting_url)
+
+    # A roster message means the bot is admitted and in the call — release
+    # the entry messages for this meeting's bots.
+    _signal_ready_from_roster(meeting_url, key)
+
     our_names = {
         details[1]
         for details in MEETING_DETAILS.values()

@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
-from pipecat.frames.frames import LLMMessagesAppendFrame, TextFrame
+from pipecat.frames.frames import LLMMessagesAppendFrame, TextFrame, TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -574,36 +574,51 @@ async def main(
 
     # Bot should speak its introduction and then drive the conversation
     async def start_conversation():
-        # Wait for ready signal from webhook (in_call_recording event)
+        # Wait for the ready signal. The API writes it on the first participant
+        # roster message for the meeting — MeetingBaas only streams the roster
+        # once the bot is admitted into the call, so this fires however late
+        # the host lets the bot out of the lobby. (The per-bot callback_config
+        # only delivers bot.completed/bot.failed; in_call_recording exists only
+        # on account-level SVIX webhooks — hence the roster heuristic.)
         ready_file = os.path.join(READY_SIGNALS_DIR, f"{bot_id}.ready")
-        max_wait_seconds = 60  # Maximum time to wait for ready signal
+        max_wait_seconds = 900  # generous: hosts can leave bots in the lobby a while
         poll_interval = 0.5  # Check every 500ms
         waited = 0
+        ready = False
 
-        log_and_flush(logging.INFO, f"[BOT] Waiting for ready signal from webhook (in_call_recording)...")
+        log_and_flush(logging.INFO, f"[BOT] Waiting for ready signal (admission roster)...")
         log_and_flush(logging.INFO, f"[BOT] Looking for ready file: {ready_file}")
 
         while waited < max_wait_seconds:
             if os.path.exists(ready_file):
-                log_and_flush(logging.INFO, f"[BOT] Ready signal received! Bot is in call and recording.")
-                # Clean up the ready file
+                log_and_flush(logging.INFO, f"[BOT] Ready signal received! Bot is in the call.")
+                ready = True
                 try:
                     os.remove(ready_file)
-                except:
+                except OSError:
                     pass
+                break
+            # Someone talking to the bot is also proof of being in the call —
+            # stop waiting, the conversation-started guard below will skip the
+            # greeting.
+            if any(m.get("role") in ("user", "assistant") for m in context.messages):
+                log_and_flush(logging.INFO, "[BOT] Conversation activity before ready signal — stopping wait")
                 break
             await asyncio.sleep(poll_interval)
             waited += poll_interval
 
-        if waited >= max_wait_seconds:
-            log_and_flush(logging.WARNING, f"[BOT] Timeout waiting for ready signal, proceeding anyway...")
+        if not ready and waited >= max_wait_seconds:
+            # Never admitted: stay silent. Speaking "anyway" used to blast the
+            # greeting into the Teams lobby where nobody could hear it.
+            log_and_flush(logging.WARNING, "[BOT] No admission signal — skipping entry message, staying reactive")
+            return
 
         # Small additional delay to ensure audio pipeline is stable
         await asyncio.sleep(1)
 
-        # If someone already started talking (the ready signal arrived late or
-        # timed out mid-conversation), skip the greeting entirely — a delayed
-        # entry message reads as the bot randomly re-introducing itself.
+        # If someone already started talking (late admission mid-conversation),
+        # skip the greeting — a delayed entry message reads as the bot randomly
+        # re-introducing itself.
         conversation_started = any(
             m.get("role") in ("user", "assistant") for m in context.messages
         )
@@ -611,14 +626,14 @@ async def main(
         if conversation_started:
             log_and_flush(logging.INFO, "[BOT] Conversation already started — skipping entry message")
         elif persona_entry_message:
-            log_and_flush(logging.INFO, f"[BOT] Prompting LLM to speak entry message")
-            # Add a system instruction to say exactly the entry message
-            speak_prompt = {
-                "role": "user",
-                "content": f"[SYSTEM: Say exactly the following to start the conversation, word for word, do not add anything else]: {persona_entry_message}"
-            }
-            await task.queue_frames([LLMMessagesAppendFrame(messages=[speak_prompt], run_llm=True)])
-            log_and_flush(logging.INFO, "[BOT] LLM prompted to speak entry message")
+            # Speak the entry VERBATIM via TTS — instructing the LLM to "say
+            # exactly" proved unreliable (gpt-4.1 riffs on it). Record it in
+            # the context afterwards so the LLM knows what it already said.
+            log_and_flush(logging.INFO, "[BOT] Speaking entry message verbatim via TTS")
+            await task.queue_frames([TTSSpeakFrame(persona_entry_message)])
+            context.messages.append(
+                {"role": "assistant", "content": persona_entry_message}
+            )
         else:
             # No entry message - prompt LLM to introduce itself
             log_and_flush(logging.INFO, f"[BOT] No entry message, prompting LLM to introduce")
