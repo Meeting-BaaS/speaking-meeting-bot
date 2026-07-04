@@ -54,6 +54,15 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             meeting_details[4] if len(meeting_details) > 4 else "16khz"
         )
 
+        # Full resolved persona dict from routes.py (index 5). Required for
+        # dynamic prompt-derived personas, which exist only in memory; fall
+        # back to a name-only dict for entries stored before this field.
+        persona_data = (
+            meeting_details[5]
+            if len(meeting_details) > 5 and isinstance(meeting_details[5], dict)
+            else {"name": persona_name}
+        )
+
         logger.info(
             f"Retrieved meeting details for {internal_client_id}: {meeting_url}, {persona_name}, {meetingbaas_bot_id}, {enable_tools}, {streaming_audio_frequency}"
         )
@@ -71,7 +80,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 client_id=internal_client_id,
                 websocket_url=pipecat_websocket_url,
                 meeting_url=meeting_url,
-                persona_data={"name": persona_name},
+                persona_data=persona_data,
                 streaming_audio_frequency=streaming_audio_frequency,
                 enable_tools=enable_tools,
                 api_key="",

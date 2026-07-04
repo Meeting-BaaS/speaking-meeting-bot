@@ -180,6 +180,7 @@ async def main(
     streaming_audio_frequency: str = "24khz",
     websocket_url: str = "",
     enable_tools: bool = True,
+    persona_data: dict = None,
 ):
     """
     Run the MeetingBaas bot with specified configurations
@@ -192,6 +193,10 @@ async def main(
         streaming_audio_frequency: Audio frequency for streaming (16khz or 24khz)
         websocket_url: Full WebSocket URL to connect to, including any path
         enable_tools: Whether to enable function tools like weather and time
+        persona_data: Full resolved persona dict from the parent process. When it
+            carries a prompt (always the case for dynamic prompt-derived
+            personas, which never exist on disk), it is used directly instead of
+            re-resolving the persona from config/personas.
     """
     # Set TaskManager event loop FIRST, before any other pipecat operations
     from pipecat.utils.asyncio.task_manager import TaskManager, TaskManagerParams
@@ -259,13 +264,20 @@ async def main(
     async def on_connection_error(transport, error):
         log_and_flush(logging.ERROR, f"[WEBSOCKET] Connection error: {error}")
 
-    persona_manager = PersonaManager()
-    log_and_flush(logging.INFO, f"[PERSONA] Available personas: {list(persona_manager.personas.keys())}")
-    log_and_flush(logging.INFO, f"[PERSONA] Looking for persona: '{persona_name}'")
-    persona = persona_manager.get_persona(persona_name)
-    if not persona:
-        log_and_flush(logging.ERROR, f"[ERROR] Persona '{persona_name}' not found")
-        return
+    # Prefer the persona handed over by the parent process: dynamic
+    # prompt-derived personas live only in the API process's memory, so a
+    # disk lookup would KeyError and leave the bot mute in the meeting.
+    if persona_data and persona_data.get("prompt"):
+        persona = persona_data
+        log_and_flush(logging.INFO, f"[PERSONA] Using persona data passed from parent process: '{persona.get('name', persona_name)}'")
+    else:
+        persona_manager = PersonaManager()
+        log_and_flush(logging.INFO, f"[PERSONA] Available personas: {list(persona_manager.personas.keys())}")
+        log_and_flush(logging.INFO, f"[PERSONA] Looking for persona: '{persona_name}'")
+        persona = persona_manager.get_persona(persona_name)
+        if not persona:
+            log_and_flush(logging.ERROR, f"[ERROR] Persona '{persona_name}' not found")
+            return
     log_and_flush(logging.INFO, f"[PERSONA] Loaded persona: {persona_name}")
     log_and_flush(logging.INFO, f"[PERSONA] Entry message: {persona.get('entry_message', 'NONE')[:100]}...")
 
@@ -574,7 +586,9 @@ def cli() -> None:
     persona_name = args.persona_name
     print(f"[STARTUP] Using persona name from args: {persona_name}")
 
-    # If persona-data-json is provided, we can extract the folder name from the path as a fallback
+    # Parse the full persona payload from the parent process; main() uses it
+    # directly when it carries a prompt (dynamic personas are never on disk).
+    persona_data = None
     if args.persona_data_json:
         try:
             import json
@@ -586,6 +600,7 @@ def cli() -> None:
                 print(f"[STARTUP] Extracted persona name from path: {persona_name}")
         except Exception as e:
             print(f"Error parsing persona data JSON: {e}")
+            persona_data = None
 
     # Run the bot
     asyncio.run(
@@ -597,6 +612,7 @@ def cli() -> None:
             streaming_audio_frequency=args.streaming_audio_frequency,
             websocket_url=args.websocket_url,
             enable_tools=args.enable_tools,
+            persona_data=persona_data,
         )
     )
 

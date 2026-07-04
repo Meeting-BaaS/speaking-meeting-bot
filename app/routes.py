@@ -215,13 +215,19 @@ async def join_meeting(request: BotRequest, client_request: Request):
     logger.info(f"  Voice ID: {resolved_persona_data.get('cartesia_voice_id')}")
     logger.info(f"  Is Temporary: {resolved_persona_data.get('is_temporary')}")
 
-    # Store all relevant details in MEETING_DETAILS dictionary
+    # Store all relevant details in MEETING_DETAILS dictionary.
+    # Index 5 carries the FULL resolved persona dict (prompt, voice, image…):
+    # the Pipecat child is spawned later from app/websockets.py when MeetingBaas
+    # connects, and dynamic (prompt-derived) personas exist only in this dict —
+    # they are never written to config/personas, so the child cannot re-resolve
+    # them from disk.
     MEETING_DETAILS[bot_client_id] = (
         request.meeting_url,
         resolved_persona_data.get("name", persona_name_for_logging),  # Use display name from resolved data
         None,  # meetingbaas_bot_id, will be set after creation
         request.enable_tools,
-        streaming_audio_frequency
+        streaming_audio_frequency,
+        resolved_persona_data,
     )
 
     # Get image URL: Prioritize request.bot_image > persona_data.image > generate_image (if custom prompt and details derived)
@@ -723,7 +729,7 @@ Please provide:
 Format your response as JSON with these keys: prospect_name, company_name, summary, qualified, next_steps"""
 
         response = client.chat.completions.create(
-            model="gpt-4-turbo-preview",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that analyzes sales call transcripts. Always respond with valid JSON."},
                 {"role": "user", "content": summary_prompt}
