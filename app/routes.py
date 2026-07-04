@@ -28,7 +28,14 @@ from core.router import router as message_router
 
 # Import from the app module (will be defined in __init__.py)
 from meetingbaas_pipecat.utils.logger import logger
-from scripts.meetingbaas_api import MeetingBaasError, create_meeting_bot, leave_meeting_bot
+import aiohttp
+
+from scripts.meetingbaas_api import (
+    MEETING_BAAS_API_URL,
+    MeetingBaasError,
+    create_meeting_bot,
+    leave_meeting_bot,
+)
 from utils.ngrok import (
     LOCAL_DEV_MODE,
     determine_websocket_url,
@@ -370,6 +377,15 @@ async def join_meeting(request: BotRequest, client_request: Request):
         # Store the process for later termination
         PIPECAT_PROCESSES[bot_client_id] = process
 
+        # Poll the bot's lifecycle status until it is actually in the call and
+        # write the ready signal then. Complements the roster heuristic in
+        # app/websockets.py: per-bot callbacks only fire on completion/failure,
+        # so GET /v2/bots/{id}/status is the API-only way to see
+        # in_waiting_room → in_call_recording transitions.
+        asyncio.create_task(
+            _poll_bot_admission(meetingbaas_bot_id, bot_client_id, api_key)
+        )
+
         # Return only the bot_id in the response
         return JoinResponse(bot_id=meetingbaas_bot_id)
     else:
@@ -589,6 +605,81 @@ async def generate_persona_image(request: PersonaImageRequest) -> PersonaImageRe
 
 # Directory for signaling between webhook and Pipecat process
 READY_SIGNALS_DIR = os.path.join(get_state_dir(), "ready_signals")
+
+# Bot lifecycle codes from GET /v2/bots/{id}/status that mean "in the call"
+# (release the entry message) vs "over" (stop polling).
+_IN_CALL_STATUSES = {
+    "in_call_recording",
+    "in_call_not_recording",
+    "recording_paused",
+    "recording_resumed",
+}
+_TERMINAL_STATUSES = {
+    "completed",
+    "failed",
+    "call_ended",
+    "recording_succeeded",
+    "recording_failed",
+    "transcribing",
+    "transcription_failed",
+    "awaiting_reconciliation",
+}
+
+
+async def _poll_bot_admission(
+    meetingbaas_bot_id: str, client_id: str, api_key: str, max_wait_secs: int = 900
+) -> None:
+    """Poll the bot's status until it's in the call, then write its ready file.
+
+    Per-bot callbacks only deliver completion/failure, and the status-change
+    webhook stream requires account-level SVIX configuration — polling
+    GET /v2/bots/{id}/status is the pure-API way to know when a lobbied bot
+    is actually admitted. Also logs lifecycle transitions (in_waiting_room …)
+    for observability.
+    """
+    url = f"{MEETING_BAAS_API_URL}/v2/bots/{meetingbaas_bot_id}/status"
+    headers = {"x-meeting-baas-api-key": api_key}
+    last_status = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            for _ in range(max_wait_secs // 2):
+                try:
+                    async with session.get(
+                        url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
+                    ) as resp:
+                        if resp.status == 200:
+                            body = await resp.json()
+                            bot_status = body.get("data", {}).get("status")
+                            if bot_status != last_status:
+                                logger.info(
+                                    f"Bot {meetingbaas_bot_id} lifecycle: {bot_status}"
+                                )
+                                last_status = bot_status
+                            if bot_status in _IN_CALL_STATUSES:
+                                os.makedirs(READY_SIGNALS_DIR, exist_ok=True)
+                                ready_file = os.path.join(
+                                    READY_SIGNALS_DIR, f"{client_id}.ready"
+                                )
+                                with open(ready_file, "w") as f:
+                                    f.write(datetime.now().isoformat())
+                                logger.info(
+                                    f"Bot {meetingbaas_bot_id} admitted — ready signal written for {client_id}"
+                                )
+                                return
+                            if bot_status in _TERMINAL_STATUSES:
+                                logger.info(
+                                    f"Bot {meetingbaas_bot_id} reached terminal status "
+                                    f"'{bot_status}' before admission — stopping poll"
+                                )
+                                return
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    logger.debug(f"Status poll error for {meetingbaas_bot_id}: {e}")
+                await asyncio.sleep(2)
+        logger.warning(
+            f"Bot {meetingbaas_bot_id} not admitted within {max_wait_secs}s — poll ended"
+        )
+    except Exception as e:
+        logger.error(f"Status poller crashed for {meetingbaas_bot_id}: {e}")
 
 
 @router.post(
