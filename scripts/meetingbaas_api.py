@@ -14,6 +14,15 @@ MEETING_BAAS_API_URL = os.getenv("MEETING_BAAS_API_URL", "https://api.meetingbaa
 logger = logging.getLogger("meetingbaas-api")
 
 
+class MeetingBaasError(Exception):
+    """MeetingBaas API rejected a request; carries the upstream status + message."""
+
+    def __init__(self, status_code: int, message: str):
+        self.status_code = status_code
+        self.message = message
+        super().__init__(f"MeetingBaas API error {status_code}: {message}")
+
+
 class RecordingMode(str, Enum):
     """Available recording modes for the MeetingBaas API"""
 
@@ -257,17 +266,24 @@ def create_meeting_bot(
             bot_id = data.get("data", {}).get("bot_id")
             if not bot_id:
                 logger.error(f"201 response missing bot_id: {data}")
-                return None
+                raise MeetingBaasError(502, "MeetingBaas returned 201 without a bot_id")
             logger.info(f"Bot created with ID: {bot_id}")
             return bot_id
-        else:
-            logger.error(
-                f"Failed to create bot: {response.status_code} - {response.text}"
-            )
-            return None
-    except Exception as e:
+
+        # Surface the upstream rejection verbatim (e.g. 409 bot-already-exists,
+        # 401 bad key) instead of collapsing everything into a generic failure.
+        logger.error(f"Failed to create bot: {response.status_code} - {response.text}")
+        try:
+            body = response.json()
+            message = body.get("message") or body.get("error") or response.text
+        except ValueError:
+            message = response.text
+        raise MeetingBaasError(response.status_code, message)
+    except MeetingBaasError:
+        raise
+    except requests.RequestException as e:
         logger.error(f"Error creating bot: {str(e)}")
-        return None
+        raise MeetingBaasError(502, f"Could not reach the MeetingBaas API: {e}")
 
 
 def leave_meeting_bot(bot_id: str, api_key: str) -> bool:

@@ -28,7 +28,7 @@ from core.router import router as message_router
 
 # Import from the app module (will be defined in __init__.py)
 from meetingbaas_pipecat.utils.logger import logger
-from scripts.meetingbaas_api import create_meeting_bot, leave_meeting_bot
+from scripts.meetingbaas_api import MeetingBaasError, create_meeting_bot, leave_meeting_bot
 from utils.ngrok import (
     LOCAL_DEV_MODE,
     determine_websocket_url,
@@ -302,6 +302,13 @@ async def join_meeting(request: BotRequest, client_request: Request):
     # to the persona's on-disk message or a generic default.
     resolved_persona_data["entry_message"] = final_entry_message
 
+    # Same channel for per-request turn-taking tuning: the child applies these
+    # over its VAD_* env defaults.
+    if request.turn_config:
+        resolved_persona_data["turn_config"] = request.turn_config.model_dump(
+            exclude_none=True
+        )
+
     # Create bot directly through MeetingBaas API
     # Use persona display name from resolved_persona_data for MeetingBaas API call
     # Use the websocket_url as the webhook_url (same base URL, different endpoint)
@@ -309,18 +316,31 @@ async def join_meeting(request: BotRequest, client_request: Request):
         client_request, configured_base_url=os.getenv("BASE_URL")
     )
     webhook_url = f"{public_base_url}/webhook"
-    meetingbaas_bot_id = create_meeting_bot(
-        meeting_url=request.meeting_url,
-        websocket_url=websocket_url,
-        bot_id=bot_client_id,
-        persona_name=resolved_persona_data.get("name", persona_name_for_logging),  # Use resolved display name
-        api_key=api_key,
-        bot_image=bot_image_str,  # Use the pre-stringified value
-        entry_message=final_entry_message,
-        extra=request.extra,
-        streaming_audio_frequency=streaming_audio_frequency,
-        webhook_url=webhook_url,
-    )
+    try:
+        meetingbaas_bot_id = create_meeting_bot(
+            meeting_url=request.meeting_url,
+            websocket_url=websocket_url,
+            bot_id=bot_client_id,
+            persona_name=resolved_persona_data.get("name", persona_name_for_logging),  # Use resolved display name
+            api_key=api_key,
+            bot_image=bot_image_str,  # Use the pre-stringified value
+            entry_message=final_entry_message,
+            extra=request.extra,
+            streaming_audio_frequency=streaming_audio_frequency,
+            webhook_url=webhook_url,
+        )
+    except MeetingBaasError as e:
+        # Surface the upstream rejection (409 bot-already-exists, 401 bad key, …)
+        # instead of a generic 500 the caller can't act on.
+        MEETING_DETAILS.pop(bot_client_id, None)
+        return JSONResponse(
+            content={
+                "message": f"MeetingBaas API rejected the bot: {e.message}",
+                "status": "error",
+                "upstream_status": e.status_code,
+            },
+            status_code=e.status_code if 400 <= e.status_code < 600 else 502,
+        )
 
     if meetingbaas_bot_id:
         # Update the meetingbaas_bot_id in MEETING_DETAILS

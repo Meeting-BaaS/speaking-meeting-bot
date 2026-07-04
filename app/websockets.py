@@ -1,6 +1,7 @@
 """WebSocket routes for the Speaking Meeting Bot API."""
 
 import asyncio
+import json
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -8,10 +9,56 @@ from core.connection import MEETING_DETAILS, PIPECAT_PROCESSES, registry
 from core.process import start_pipecat_process, terminate_process_gracefully
 from core.router import router as message_router
 from meetingbaas_pipecat.utils.logger import logger
+from utils.floor import floor_key, write_floor
 from utils.ngrok import LOCAL_DEV_MODE, log_ngrok_status, release_ngrok_url
 from utils.runtime import get_internal_pipecat_ws_url
 
 websocket_router = APIRouter()
+
+# Last floor holder written per meeting key — avoids rewriting the floor file
+# on every speaker-state update (MeetingBaas sends them continuously).
+_last_floor_speaker: dict = {}
+
+
+def _update_floor_from_speaker_state(meeting_url: str, text_data: str) -> None:
+    """Track which of OUR bots is speaking in this meeting.
+
+    MeetingBaas sends participant state as a JSON list of
+    {"name", "id", "timestamp", "isSpeaking"}. We match speaking participants
+    against the display names of our own bots in the same meeting (from
+    MEETING_DETAILS) and record the result in the per-meeting floor file that
+    the Pipecat children poll (see utils/floor.py).
+    """
+    try:
+        payload = json.loads(text_data)
+    except ValueError:
+        return
+    if not isinstance(payload, list):
+        return
+
+    key = floor_key(meeting_url)
+    our_names = {
+        details[1]
+        for details in MEETING_DETAILS.values()
+        if len(details) > 1 and floor_key(details[0]) == key
+    }
+
+    speaker = None
+    for participant in payload:
+        if not isinstance(participant, dict) or not participant.get("isSpeaking"):
+            continue
+        if participant.get("name") in our_names:
+            speaker = participant["name"]
+            break
+
+    # Refresh the file whenever one of ours speaks (keeps the staleness
+    # timestamp alive); write the release only on change.
+    if speaker is not None or _last_floor_speaker.get(key) is not None:
+        try:
+            write_floor(meeting_url, speaker)
+        except OSError as e:
+            logger.warning(f"Could not write floor file for {key}: {e}")
+        _last_floor_speaker[key] = speaker
 
 
 def find_client_id_by_meetingbaas_bot_id(meetingbaas_bot_id: str) -> str | None:
@@ -108,9 +155,11 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 await message_router.send_to_pipecat(audio_data, internal_client_id)
             elif "text" in message:
                 text_data = message["text"]
-                logger.info(
+                logger.debug(
                     f"Received text message from client {client_id}: {text_data[:100]}..."
                 )
+                # Speaker-state updates drive the bot-vs-bot floor control
+                _update_floor_from_speaker_state(meeting_url, text_data)
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for client {client_id}")
     except Exception as e:

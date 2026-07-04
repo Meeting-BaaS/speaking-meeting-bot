@@ -32,15 +32,26 @@ class ImageService:
         if self.replicate_key.startswith("sk_live_"):
             self.replicate_key = self.replicate_key.replace("sk_live_", "")
         os.environ["REPLICATE_API_TOKEN"] = self.replicate_key
-        logger.info("Initialized Replicate client and UTFSUploader for image generation")
-    
+        # Once generation fails with an auth error, stop trying for the life of
+        # the process: every bot creation was firing two doomed Replicate calls
+        # (latency + ERROR spam) when the key was missing or expired.
+        self.disabled = not self.replicate_key
+        if self.disabled:
+            logger.warning("REPLICATE_KEY not set — persona image generation disabled")
+        else:
+            logger.info("Initialized Replicate client and UTFSUploader for image generation")
+
     async def generate_persona_image(
         self,
         name: str,
         prompt: str,
         style: str = "realistic",
         size: tuple[int, int] = (512, 512)
-        ) -> str:
+        ) -> Optional[str]:
+
+        if self.disabled:
+            logger.debug("Image generation disabled — skipping")
+            return None
 
         try:
             # Add style to prompt
@@ -97,7 +108,15 @@ class ImageService:
 
             return file_url
         
-        except Exception as e:       
+        except Exception as e:
+            # Auth failures won't heal without a new key — disable for the rest
+            # of the process so later bot creations skip generation instantly.
+            if "authentication token" in str(e).lower() or "unauthenticated" in str(e).lower():
+                self.disabled = True
+                logger.warning(
+                    "Replicate rejected the API token — disabling persona image "
+                    "generation until restart"
+                )
             logger.error(f"Failed to generate image: {str(e)}")
             raise ValueError(f"Failed to generate image: {str(e)}") from e
 

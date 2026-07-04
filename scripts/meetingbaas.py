@@ -29,7 +29,11 @@ from pipecat.transports.websocket.client import (
     WebsocketClientTransport,
 )
 
+from pipecat.frames.frames import SystemFrame
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+
 from config.persona_utils import PersonaManager
+from utils.floor import floor_blocked_by_sibling
 from utils.runtime import get_state_dir
 from config.prompts import DEFAULT_SYSTEM_PROMPT
 from meetingbaas_pipecat.utils.logger import configure_logger
@@ -171,6 +175,68 @@ async def save_call_summary(params: FunctionCallParams):
 
     log_and_flush(logging.INFO, f"[SUMMARY] Saved call summary to {filepath}")
     await params.result_callback(f"Great, I've saved the summary of our call. Thank you so much for your time today, {prospect_name}!")
+
+
+class FloorGate(FrameProcessor):
+    """Holds LLM→TTS frames while a sibling bot is speaking in the meeting.
+
+    Sits between the LLM and TTS in the pipeline. Content frames are buffered
+    while the per-meeting floor file (written by the API process from
+    MeetingBaas speaker-state events) names another one of OUR bots as the
+    current speaker. System frames always pass straight through. A hold
+    timeout guarantees frames are never stuck (e.g. floor writer died), and a
+    small random jitter before release de-synchronizes two bots grabbing a
+    freed floor in the same instant.
+    """
+
+    POLL_SECS = 0.2
+    MAX_HOLD_SECS = 20.0
+
+    def __init__(self, meeting_url: str, my_name: str, **kwargs):
+        super().__init__(**kwargs)
+        self._meeting_url = meeting_url
+        self._my_name = my_name
+        self._buffer = []
+        self._flush_task = None
+
+    def _blocked(self) -> bool:
+        try:
+            return floor_blocked_by_sibling(self._meeting_url, self._my_name)
+        except Exception:
+            return False  # never let floor bookkeeping kill the pipeline
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+
+        if direction != FrameDirection.DOWNSTREAM or isinstance(frame, SystemFrame):
+            await self.push_frame(frame, direction)
+            return
+
+        # Preserve ordering: once anything is buffered, everything queues
+        # behind it until the flush task drains.
+        if self._buffer or self._blocked():
+            self._buffer.append((frame, direction))
+            if self._flush_task is None or self._flush_task.done():
+                self._flush_task = asyncio.create_task(self._flush_when_free())
+            return
+
+        await self.push_frame(frame, direction)
+
+    async def _flush_when_free(self):
+        import random
+
+        waited = 0.0
+        while self._blocked() and waited < self.MAX_HOLD_SECS:
+            await asyncio.sleep(self.POLL_SECS)
+            waited += self.POLL_SECS
+        if waited > 0:
+            # Collision-avoidance jitter when the floor just freed up
+            await asyncio.sleep(random.uniform(0.05, 0.5))
+        if waited >= self.MAX_HOLD_SECS:
+            log_and_flush(logging.WARNING, "[FLOOR] Hold timeout — releasing buffered frames")
+        while self._buffer:
+            frame, direction = self._buffer.pop(0)
+            await self.push_frame(frame, direction)
 
 
 async def main(
@@ -428,24 +494,34 @@ async def main(
         context = LLMContext(messages)
 
     # Create the context aggregator pair with VAD on the user aggregator
-    # Turn-taking knobs, env-tunable per deployment (no code edit needed):
-    #   VAD_START_SECS — sustained speech required before a turn/interruption
+    # Turn-taking knobs. Precedence: per-request turn_config (rides in the
+    # persona dict from the API) > VAD_* env vars > defaults.
+    #   start_secs — sustained speech required before a turn/interruption
     #     registers. Raise for bot-vs-bot meetings so TTS tails and breaths
     #     don't trigger mutual barge-in.
-    #   VAD_STOP_SECS — silence required before the bot considers the speaker
+    #   stop_secs — silence required before the bot considers the speaker
     #     done and replies. 0.1 (the old hardcode) replied to half-sentences;
     #     pipecat's default is 0.8.
+    turn_config = (persona.get("turn_config") or {}) if persona else {}
+
+    def _vad_param(key: str, env: str, default: str) -> float:
+        value = turn_config.get(key)
+        return float(value) if value is not None else float(os.getenv(env, default))
+
+    vad_params = VADParams(
+        confidence=_vad_param("confidence", "VAD_CONFIDENCE", "0.5"),
+        start_secs=_vad_param("start_secs", "VAD_START_SECS", "0.25"),
+        stop_secs=_vad_param("stop_secs", "VAD_STOP_SECS", "0.8"),
+        min_volume=_vad_param("min_volume", "VAD_MIN_VOLUME", "0.6"),
+    )
+    log_and_flush(logging.INFO, f"[VAD] Params: {vad_params}")
+
     aggregator_pair = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(
                 sample_rate=16000,
-                params=VADParams(
-                    confidence=float(os.getenv("VAD_CONFIDENCE", "0.5")),
-                    start_secs=float(os.getenv("VAD_START_SECS", "0.25")),
-                    stop_secs=float(os.getenv("VAD_STOP_SECS", "0.8")),
-                    min_volume=float(os.getenv("VAD_MIN_VOLUME", "0.6")),
-                ),
+                params=vad_params,
             ),
         ),
     )
@@ -454,11 +530,19 @@ async def main(
     user_aggregator = aggregator_pair.user()
     assistant_aggregator = aggregator_pair.assistant()
 
+    # Floor gate: when several of our bots share a meeting, hold this bot's
+    # reply while a sibling is speaking (see FloorGate / utils/floor.py).
+    floor_gate = FloorGate(
+        meeting_url=meeting_url,
+        my_name=(persona.get("name") if persona else None) or persona_name,
+    )
+
     pipeline = Pipeline([
         transport.input(),   # Add transport input to receive audio/data
         stt,
         user_aggregator,
         llm,
+        floor_gate,
         tts,
         assistant_aggregator,
         transport.output(),  # Add transport output to send audio/data
