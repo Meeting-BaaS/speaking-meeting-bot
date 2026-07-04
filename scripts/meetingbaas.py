@@ -427,16 +427,23 @@ async def main(
         context = LLMContext(messages)
 
     # Create the context aggregator pair with VAD on the user aggregator
+    # Turn-taking knobs, env-tunable per deployment (no code edit needed):
+    #   VAD_START_SECS — sustained speech required before a turn/interruption
+    #     registers. Raise for bot-vs-bot meetings so TTS tails and breaths
+    #     don't trigger mutual barge-in.
+    #   VAD_STOP_SECS — silence required before the bot considers the speaker
+    #     done and replies. 0.1 (the old hardcode) replied to half-sentences;
+    #     pipecat's default is 0.8.
     aggregator_pair = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(
                 sample_rate=16000,
                 params=VADParams(
-                    confidence=0.5,
-                    start_secs=0.25,
-                    stop_secs=0.1,
-                    min_volume=0.6,
+                    confidence=float(os.getenv("VAD_CONFIDENCE", "0.5")),
+                    start_secs=float(os.getenv("VAD_START_SECS", "0.25")),
+                    stop_secs=float(os.getenv("VAD_STOP_SECS", "0.8")),
+                    min_volume=float(os.getenv("VAD_MIN_VOLUME", "0.6")),
                 ),
             ),
         ),
@@ -456,7 +463,12 @@ async def main(
         transport.output(),  # Add transport output to send audio/data
     ])
 
-    task = PipelineTask(pipeline, params=PipelineParams(), check_dangling_tasks=True)
+    # Metrics log per-service TTFB (STT/LLM/TTS) — grep journal for "TTFB".
+    task = PipelineTask(
+        pipeline,
+        params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+        check_dangling_tasks=True,
+    )
     runner = PipelineRunner()
 
     # Task to periodically save the transcript
