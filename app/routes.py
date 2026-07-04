@@ -296,6 +296,12 @@ async def join_meeting(request: BotRequest, client_request: Request):
         # For temporary personas without a specified entry_message, provide a dynamic default
         final_entry_message = f"Hello, I'm {persona_name_for_logging}, ready to assist you throughout this session."
 
+    # The Pipecat child reads the entry message from the persona dict it gets
+    # handed (core/process.py doesn't pass --entry-message), so the resolved
+    # request-level message must live there — otherwise the child falls back
+    # to the persona's on-disk message or a generic default.
+    resolved_persona_data["entry_message"] = final_entry_message
+
     # Create bot directly through MeetingBaas API
     # Use persona display name from resolved_persona_data for MeetingBaas API call
     # Use the websocket_url as the webhook_url (same base URL, different endpoint)

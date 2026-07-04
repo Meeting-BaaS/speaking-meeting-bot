@@ -176,7 +176,7 @@ async def save_call_summary(params: FunctionCallParams):
 async def main(
     meeting_url: str = "",
     persona_name: str = "Meeting Bot",
-    entry_message: str = "Hello, I am the meeting bot",
+    entry_message: str = "",
     bot_image: str = "",
     streaming_audio_frequency: str = "24khz",
     websocket_url: str = "",
@@ -517,8 +517,16 @@ async def main(
         # Small additional delay to ensure audio pipeline is stable
         await asyncio.sleep(1)
 
-        # Speak the entry message by prompting the LLM
-        if persona_entry_message:
+        # If someone already started talking (the ready signal arrived late or
+        # timed out mid-conversation), skip the greeting entirely — a delayed
+        # entry message reads as the bot randomly re-introducing itself.
+        conversation_started = any(
+            m.get("role") in ("user", "assistant") for m in context.messages
+        )
+
+        if conversation_started:
+            log_and_flush(logging.INFO, "[BOT] Conversation already started — skipping entry message")
+        elif persona_entry_message:
             log_and_flush(logging.INFO, f"[BOT] Prompting LLM to speak entry message")
             # Add a system instruction to say exactly the entry message
             speak_prompt = {
@@ -570,8 +578,8 @@ def cli() -> None:
     )
     parser.add_argument(
         "--entry-message",
-        default="Hello, I am the meeting bot",
-        help="Message to send when joining",
+        default="",
+        help="Message to send when joining (empty = use the persona's entry message)",
     )
     parser.add_argument("--bot-image", default="", help="URL for bot avatar")
     parser.add_argument(

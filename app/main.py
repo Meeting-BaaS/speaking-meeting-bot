@@ -28,8 +28,13 @@ pipecat_ws_logger.setLevel(logging.WARNING)
 
 async def api_key_middleware(request: Request, call_next):
     """Middleware to check for MeetingBaas API key in headers."""
-    # Skip API key check for docs and openapi endpoints
-    if request.url.path in ["/docs", "/openapi.json", "/redoc", "/health", "/ready", "/"]:
+    # Skip API key check for docs and openapi endpoints.
+    # /webhook is exempt too: MeetingBaas status callbacks (in_call_recording,
+    # call_ended, …) don't carry our API key, and the handler only matches the
+    # payload's bot_id against bots we launched ourselves. Blocking it meant
+    # the ready signal never arrived and every bot sat mute through the full
+    # 60s ready-wait timeout before speaking its entry message.
+    if request.url.path in ["/docs", "/openapi.json", "/redoc", "/health", "/ready", "/", "/webhook"]:
         return await call_next(request)
 
     api_key = request.headers.get("x-meeting-baas-api-key")
