@@ -1,16 +1,69 @@
 """Connection management for WebSocket clients and Pipecat processes."""
 
+import json
+import os
 import subprocess
 from typing import Dict, List, Optional, Tuple
 
 from fastapi import WebSocket
 
 from meetingbaas_pipecat.utils.logger import logger
+from utils.runtime import get_state_dir
+
+
+class PersistentMeetingDetails(dict):
+    """MEETING_DETAILS backed by one JSON file per bot in the state dir.
+
+    The API process used to keep meeting details only in memory, so any
+    restart orphaned every live bot: MeetingBaas' websocket reconnect found
+    no entry and was closed with 1008. Entries are tuples (JSON lists on
+    disk); the persona dict at index 5 is JSON-safe by construction.
+    Best-effort persistence — a failed write never breaks the request path.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._dir = os.path.join(get_state_dir(), "meeting_details")
+        os.makedirs(self._dir, exist_ok=True)
+        for fname in os.listdir(self._dir):
+            if not fname.endswith(".json"):
+                continue
+            path = os.path.join(self._dir, fname)
+            try:
+                with open(path) as f:
+                    super().__setitem__(fname[:-5], tuple(json.load(f)))
+            except Exception as e:
+                logger.warning(f"Dropping unreadable meeting details {fname}: {e}")
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        if self:
+            logger.info(f"Rehydrated meeting details for {len(self)} bot(s) from disk")
+
+    def _path(self, client_id: str) -> str:
+        return os.path.join(self._dir, f"{client_id}.json")
+
+    def __setitem__(self, client_id, details):
+        super().__setitem__(client_id, details)
+        try:
+            with open(self._path(client_id), "w") as f:
+                json.dump(list(details), f)
+        except Exception as e:
+            logger.warning(f"Could not persist meeting details for {client_id}: {e}")
+
+    def pop(self, client_id, *default):
+        try:
+            os.remove(self._path(client_id))
+        except OSError:
+            pass
+        return super().pop(client_id, *default)
+
 
 # Global dictionary to store meeting details for each client
 MEETING_DETAILS: Dict[
     str, Tuple[str, str, Optional[str], bool, str]
-] = {}  # client_id -> (meeting_url, persona_name, meetingbaas_bot_id, enable_tools, streaming_audio_frequency)
+] = PersistentMeetingDetails()  # client_id -> (meeting_url, persona_name, meetingbaas_bot_id, enable_tools, streaming_audio_frequency, persona_data)
 
 # Global dictionary to store Pipecat processes
 PIPECAT_PROCESSES: Dict[str, subprocess.Popen] = {}  # client_id -> process

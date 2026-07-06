@@ -8,16 +8,13 @@ readme = "README.md"
 packages = [{include = "meetingbaas_pipecat"}]
 
 [tool.poetry.scripts]
-bot = "meetingbaas_pipecat.bot.bot:start"
-proxy = "meetingbaas_pipecat.proxy.proxy:start"
-meetingbaas = "scripts.meetingbaas:main"
-parallel = "scripts.parallel:main"
-api = "api:start_server"
+meetingbaas = "scripts.meetingbaas:cli"
+api = "app.main:start_server"
 
 [tool.poetry.dependencies]
 python = "^3.11"
 python-dotenv = "^1.0.1"
-pipecat-ai = {extras = ["cartesia", "daily", "deepgram", "openai", "silero", "websocket"], version = "^0.0.69"}
+pipecat-ai = {extras = ["cartesia", "daily", "deepgram", "openai", "silero", "websocket"], version = "^1.0.0"}
 ruff = "^0.7.3"
 pytz = "^2024.2"
 aiohttp = "^3.10.10"
@@ -26,7 +23,7 @@ loguru = "^0.7.2"
 replicate = "^0.22.0"
 fastapi = ">=0.115.0,<0.116.0"
 uvicorn = "^0.27.1"
-websockets = ">=13.1,<14.0"
+websockets = ">=14.0,<15.0"
 pyyaml = "^6.0"
 requests = "^2.31.0"
 daily = "^0.2.1"

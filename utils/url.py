@@ -16,3 +16,20 @@ def convert_http_to_ws_url(url: str) -> str:
     elif url.startswith("https://"):
         return "wss://" + url[8:]
     return url  # Already a WS URL or other format
+
+
+def convert_ws_to_http_url(url: str) -> str:
+    """
+    Convert WS(S) URL to HTTP(S) URL.
+
+    Args:
+        url: WebSocket URL to convert
+
+    Returns:
+        HTTP URL (http:// or https://)
+    """
+    if url.startswith("ws://"):
+        return "http://" + url[5:]
+    elif url.startswith("wss://"):
+        return "https://" + url[6:]
+    return url

@@ -1,11 +1,14 @@
 """API routes for the Speaking Meeting Bot application."""
 
 import asyncio
+import json
+import os
 import uuid
 from datetime import datetime
-from io import BytesIO
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 import random
+
+import openai
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -25,7 +28,14 @@ from core.router import router as message_router
 
 # Import from the app module (will be defined in __init__.py)
 from meetingbaas_pipecat.utils.logger import logger
-from scripts.meetingbaas_api import create_meeting_bot, leave_meeting_bot
+import aiohttp
+
+from scripts.meetingbaas_api import (
+    MEETING_BAAS_API_URL,
+    MeetingBaasError,
+    create_meeting_bot,
+    leave_meeting_bot,
+)
 from utils.ngrok import (
     LOCAL_DEV_MODE,
     determine_websocket_url,
@@ -33,6 +43,7 @@ from utils.ngrok import (
     release_ngrok_url,
     update_ngrok_client_id,
 )
+from utils.runtime import build_public_base_url, get_internal_pipecat_ws_url, get_state_dir
 from config.prompts import PERSONA_INTERACTION_INSTRUCTIONS
 
 # Import the new persona detail extraction service
@@ -78,7 +89,9 @@ async def join_meeting(request: BotRequest, client_request: Request):
         logger.info("🔍 Running in standard mode")
 
     # Determine WebSocket URL (works in all cases now)
-    websocket_url, temp_client_id = determine_websocket_url(None, client_request)
+    websocket_url, temp_client_id = determine_websocket_url(
+        request.websocket_url, client_request
+    )
 
     logger.info(f"Starting bot for meeting {request.meeting_url}")
     logger.info(f"WebSocket URL: {websocket_url}")
@@ -209,13 +222,19 @@ async def join_meeting(request: BotRequest, client_request: Request):
     logger.info(f"  Voice ID: {resolved_persona_data.get('cartesia_voice_id')}")
     logger.info(f"  Is Temporary: {resolved_persona_data.get('is_temporary')}")
 
-    # Store all relevant details in MEETING_DETAILS dictionary
+    # Store all relevant details in MEETING_DETAILS dictionary.
+    # Index 5 carries the FULL resolved persona dict (prompt, voice, image…):
+    # the Pipecat child is spawned later from app/websockets.py when MeetingBaas
+    # connects, and dynamic (prompt-derived) personas exist only in this dict —
+    # they are never written to config/personas, so the child cannot re-resolve
+    # them from disk.
     MEETING_DETAILS[bot_client_id] = (
         request.meeting_url,
         resolved_persona_data.get("name", persona_name_for_logging),  # Use display name from resolved data
         None,  # meetingbaas_bot_id, will be set after creation
         request.enable_tools,
-        streaming_audio_frequency
+        streaming_audio_frequency,
+        resolved_persona_data,
     )
 
     # Get image URL: Prioritize request.bot_image > persona_data.image > generate_image (if custom prompt and details derived)
@@ -284,22 +303,51 @@ async def join_meeting(request: BotRequest, client_request: Request):
         # For temporary personas without a specified entry_message, provide a dynamic default
         final_entry_message = f"Hello, I'm {persona_name_for_logging}, ready to assist you throughout this session."
 
+    # The Pipecat child reads the entry message from the persona dict it gets
+    # handed (core/process.py doesn't pass --entry-message), so the resolved
+    # request-level message must live there — otherwise the child falls back
+    # to the persona's on-disk message or a generic default.
+    resolved_persona_data["entry_message"] = final_entry_message
+
+    # Same channel for per-request turn-taking tuning: the child applies these
+    # over its VAD_* env defaults.
+    if request.turn_config:
+        resolved_persona_data["turn_config"] = request.turn_config.model_dump(
+            exclude_none=True
+        )
+
     # Create bot directly through MeetingBaas API
     # Use persona display name from resolved_persona_data for MeetingBaas API call
     # Use the websocket_url as the webhook_url (same base URL, different endpoint)
-    webhook_url = f"{websocket_url}/webhook"
-    meetingbaas_bot_id = create_meeting_bot(
-        meeting_url=request.meeting_url,
-        websocket_url=websocket_url,
-        bot_id=bot_client_id,
-        persona_name=resolved_persona_data.get("name", persona_name_for_logging),  # Use resolved display name
-        api_key=api_key,
-        bot_image=bot_image_str,  # Use the pre-stringified value
-        entry_message=final_entry_message,
-        extra=request.extra,
-        streaming_audio_frequency=streaming_audio_frequency,
-        webhook_url=webhook_url,
+    public_base_url = build_public_base_url(
+        client_request, configured_base_url=os.getenv("BASE_URL")
     )
+    webhook_url = f"{public_base_url}/webhook"
+    try:
+        meetingbaas_bot_id = create_meeting_bot(
+            meeting_url=request.meeting_url,
+            websocket_url=websocket_url,
+            bot_id=bot_client_id,
+            persona_name=resolved_persona_data.get("name", persona_name_for_logging),  # Use resolved display name
+            api_key=api_key,
+            bot_image=bot_image_str,  # Use the pre-stringified value
+            entry_message=final_entry_message,
+            extra=request.extra,
+            streaming_audio_frequency=streaming_audio_frequency,
+            webhook_url=webhook_url,
+        )
+    except MeetingBaasError as e:
+        # Surface the upstream rejection (409 bot-already-exists, 401 bad key, …)
+        # instead of a generic 500 the caller can't act on.
+        MEETING_DETAILS.pop(bot_client_id, None)
+        return JSONResponse(
+            content={
+                "message": f"MeetingBaas API rejected the bot: {e.message}",
+                "status": "error",
+                "upstream_status": e.status_code,
+            },
+            status_code=e.status_code if 400 <= e.status_code < 600 else 502,
+        )
 
     if meetingbaas_bot_id:
         # Update the meetingbaas_bot_id in MEETING_DETAILS
@@ -314,7 +362,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
 
         # Start the Pipecat process as a subprocess
         # The Pipecat process should connect to our LOCAL WebSocket server, not the external one
-        pipecat_websocket_url = f"ws://localhost:7014/pipecat/{bot_client_id}"
+        pipecat_websocket_url = get_internal_pipecat_ws_url(bot_client_id)
         process = start_pipecat_process(
             client_id=bot_client_id,
             websocket_url=pipecat_websocket_url,  # Use internal URL, not external
@@ -328,6 +376,15 @@ async def join_meeting(request: BotRequest, client_request: Request):
 
         # Store the process for later termination
         PIPECAT_PROCESSES[bot_client_id] = process
+
+        # Poll the bot's lifecycle status until it is actually in the call and
+        # write the ready signal then. Complements the roster heuristic in
+        # app/websockets.py: per-bot callbacks only fire on completion/failure,
+        # so GET /v2/bots/{id}/status is the API-only way to see
+        # in_waiting_room → in_call_recording transitions.
+        asyncio.create_task(
+            _poll_bot_admission(meetingbaas_bot_id, bot_client_id, api_key)
+        )
 
         # Return only the bot_id in the response
         return JoinResponse(bot_id=meetingbaas_bot_id)
@@ -546,6 +603,85 @@ async def generate_persona_image(request: PersonaImageRequest) -> PersonaImageRe
         raise HTTPException(status_code=status_code, detail=str(e))
 
 
+# Directory for signaling between webhook and Pipecat process
+READY_SIGNALS_DIR = os.path.join(get_state_dir(), "ready_signals")
+
+# Bot lifecycle codes from GET /v2/bots/{id}/status that mean "in the call"
+# (release the entry message) vs "over" (stop polling).
+_IN_CALL_STATUSES = {
+    "in_call_recording",
+    "in_call_not_recording",
+    "recording_paused",
+    "recording_resumed",
+}
+_TERMINAL_STATUSES = {
+    "completed",
+    "failed",
+    "call_ended",
+    "recording_succeeded",
+    "recording_failed",
+    "transcribing",
+    "transcription_failed",
+    "awaiting_reconciliation",
+}
+
+
+async def _poll_bot_admission(
+    meetingbaas_bot_id: str, client_id: str, api_key: str, max_wait_secs: int = 900
+) -> None:
+    """Poll the bot's status until it's in the call, then write its ready file.
+
+    Per-bot callbacks only deliver completion/failure, and the status-change
+    webhook stream requires account-level SVIX configuration — polling
+    GET /v2/bots/{id}/status is the pure-API way to know when a lobbied bot
+    is actually admitted. Also logs lifecycle transitions (in_waiting_room …)
+    for observability.
+    """
+    url = f"{MEETING_BAAS_API_URL}/v2/bots/{meetingbaas_bot_id}/status"
+    headers = {"x-meeting-baas-api-key": api_key}
+    last_status = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            for _ in range(max_wait_secs // 2):
+                try:
+                    async with session.get(
+                        url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
+                    ) as resp:
+                        if resp.status == 200:
+                            body = await resp.json()
+                            bot_status = body.get("data", {}).get("status")
+                            if bot_status != last_status:
+                                logger.info(
+                                    f"Bot {meetingbaas_bot_id} lifecycle: {bot_status}"
+                                )
+                                last_status = bot_status
+                            if bot_status in _IN_CALL_STATUSES:
+                                os.makedirs(READY_SIGNALS_DIR, exist_ok=True)
+                                ready_file = os.path.join(
+                                    READY_SIGNALS_DIR, f"{client_id}.ready"
+                                )
+                                with open(ready_file, "w") as f:
+                                    f.write(datetime.now().isoformat())
+                                logger.info(
+                                    f"Bot {meetingbaas_bot_id} admitted — ready signal written for {client_id}"
+                                )
+                                return
+                            if bot_status in _TERMINAL_STATUSES:
+                                logger.info(
+                                    f"Bot {meetingbaas_bot_id} reached terminal status "
+                                    f"'{bot_status}' before admission — stopping poll"
+                                )
+                                return
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    logger.debug(f"Status poll error for {meetingbaas_bot_id}: {e}")
+                await asyncio.sleep(2)
+        logger.warning(
+            f"Bot {meetingbaas_bot_id} not admitted within {max_wait_secs}s — poll ended"
+        )
+    except Exception as e:
+        logger.error(f"Status poller crashed for {meetingbaas_bot_id}: {e}")
+
+
 @router.post(
     "/webhook",
     tags=["webhook"],
@@ -555,12 +691,226 @@ async def meetingbaas_webhook(request: Request):
     """
     Webhook endpoint for MeetingBaas callbacks.
 
-    Receives events like bot_joined, bot_left, transcription, etc.
+    Receives events like bot_joined, bot_left, call_ended, transcription, etc.
+    - On 'in_call_recording': signals Pipecat to start speaking
+    - On call end: generates a summary from the transcript
     """
     try:
         body = await request.json()
         logger.info(f"Received MeetingBaas webhook: {body}")
+
+        # Extract event info - MeetingBaaS uses nested structure:
+        # {'event': 'bot.status_change', 'data': {'bot_id': '...', 'status': {'code': 'in_call_recording'}}}
+        event_type = body.get("event") or body.get("type") or ""
+        data = body.get("data", {})
+        bot_id = body.get("bot_id") or body.get("botId") or data.get("bot_id")
+
+        # The actual status code is nested in data.status.code for status_change events
+        status_code = ""
+        if isinstance(data.get("status"), dict):
+            status_code = data["status"].get("code", "")
+
+        # Combine event type and status code for checking
+        event_type_lower = str(event_type).lower()
+        status_code_lower = str(status_code).lower()
+
+        logger.info(f"Webhook event: {event_type}, status_code: {status_code}, bot_id: {bot_id}")
+
+        # Check for "in_call_not_recording" or "in_call_recording" - bot can speak as soon as it's in the call
+        ready_events = ["in_call_not_recording", "in_call_recording", "recording_started", "bot_ready"]
+
+        # Check both event_type and status_code for ready events
+        is_ready_event = (
+            any(ready in event_type_lower for ready in ready_events) or
+            any(ready in status_code_lower for ready in ready_events)
+        )
+
+        if is_ready_event:
+            logger.info(f"Bot {bot_id} is ready (in_call_recording) - signaling Pipecat to start speaking")
+
+            # Find the internal client_id for this bot
+            internal_client_id = None
+            for internal_id, details in MEETING_DETAILS.items():
+                if len(details) > 2 and details[2] == bot_id:
+                    internal_client_id = internal_id
+                    break
+
+            if internal_client_id:
+                # Write ready signal file
+                os.makedirs(READY_SIGNALS_DIR, exist_ok=True)
+                ready_file = os.path.join(READY_SIGNALS_DIR, f"{internal_client_id}.ready")
+                with open(ready_file, "w") as f:
+                    f.write(datetime.now().isoformat())
+                logger.info(f"Created ready signal for client {internal_client_id}")
+            else:
+                logger.warning(f"Could not find internal client_id for bot {bot_id}")
+
+        # Check for call ended events
+        end_events = ["call_ended", "bot_left", "meeting_ended", "complete"]
+
+        # Check both event_type and status_code for end events
+        is_end_event = (
+            any(end in event_type_lower for end in end_events) or
+            any(end in status_code_lower for end in end_events)
+        )
+
+        if is_end_event:
+            logger.info(f"Call ended event detected for bot {bot_id}, generating summary...")
+
+            # Try to find the transcript file
+            # First try with the MeetingBaaS bot_id, then look for any matching internal client_id
+            transcript_dir = os.path.join(get_state_dir(), "transcripts")
+            transcript_file = None
+
+            if bot_id and os.path.exists(os.path.join(transcript_dir, f"{bot_id}.json")):
+                transcript_file = os.path.join(transcript_dir, f"{bot_id}.json")
+            else:
+                # Try to find by looking up internal client_id from MEETING_DETAILS
+                for internal_id, details in MEETING_DETAILS.items():
+                    if len(details) > 2 and details[2] == bot_id:
+                        potential_file = os.path.join(transcript_dir, f"{internal_id}.json")
+                        if os.path.exists(potential_file):
+                            transcript_file = potential_file
+                            break
+
+                # If still not found, try to find any recent transcript
+                if not transcript_file and os.path.exists(transcript_dir):
+                    files = sorted(os.listdir(transcript_dir), key=lambda x: os.path.getmtime(os.path.join(transcript_dir, x)), reverse=True)
+                    for f in files:
+                        if f.endswith('.json'):
+                            transcript_file = os.path.join(transcript_dir, f)
+                            break
+
+            if transcript_file and os.path.exists(transcript_file):
+                await generate_summary_from_transcript(transcript_file, bot_id)
+            else:
+                logger.warning(f"No transcript file found for bot {bot_id}")
+
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Error processing webhook: {e}")
         return {"status": "error", "message": str(e)}
+
+
+async def generate_summary_from_transcript(transcript_file: str, bot_id: str = None):
+    """Generate a call summary from a transcript file using OpenAI.
+
+    Uses bot_id in filename to prevent duplicate summaries when multiple
+    call_ended webhooks are received for the same bot.
+    """
+    try:
+        # Check if summary already exists for this bot_id
+        summaries_dir = os.path.join(get_state_dir(), "call_summaries")
+        os.makedirs(summaries_dir, exist_ok=True)
+
+        if bot_id:
+            # Check if a summary file for this bot_id already exists
+            existing_summary = os.path.join(summaries_dir, f"{bot_id}.md")
+            if os.path.exists(existing_summary):
+                logger.info(f"[WEBHOOK] Summary already exists for bot {bot_id}, skipping generation")
+                return
+
+        with open(transcript_file, "r") as f:
+            transcript_data = json.load(f)
+
+        messages = transcript_data.get("messages", [])
+        persona_name = transcript_data.get("persona_name", "Bot")
+
+        if not messages or len(messages) < 2:
+            logger.info("Not enough messages in transcript to generate summary")
+            return
+
+        # Format the conversation for the summary prompt
+        conversation_text = ""
+        for msg in messages:
+            role = "Bot" if msg["role"] == "assistant" else "Prospect"
+            content = msg.get("content", "")
+            if content:
+                conversation_text += f"{role}: {content}\n"
+
+        # Generate summary using OpenAI
+        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+        summary_prompt = f"""You are analyzing a sales discovery call transcript. Please extract the following information and provide a structured summary:
+
+TRANSCRIPT:
+{conversation_text}
+
+Please provide:
+1. Prospect Name (if mentioned)
+2. Company Name (if mentioned)
+3. Summary of the conversation (key points discussed, pain points, current situation, goals)
+4. Qualification Status (yes/no/maybe - based on whether they seem like a good fit)
+5. Recommended Next Steps
+
+Format your response as JSON with these keys: prospect_name, company_name, summary, qualified, next_steps"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that analyzes sales call transcripts. Always respond with valid JSON."},
+                {"role": "user", "content": summary_prompt}
+            ],
+            temperature=0.3,
+        )
+
+        summary_text = response.choices[0].message.content
+
+        # Try to parse as JSON, otherwise use as-is
+        try:
+            # Clean up the response if it has markdown code blocks
+            if "```json" in summary_text:
+                summary_text = summary_text.split("```json")[1].split("```")[0]
+            elif "```" in summary_text:
+                summary_text = summary_text.split("```")[1].split("```")[0]
+
+            summary_data = json.loads(summary_text)
+        except json.JSONDecodeError:
+            summary_data = {
+                "prospect_name": "Unknown",
+                "company_name": "Unknown",
+                "summary": summary_text,
+                "qualified": "unknown",
+                "next_steps": "Review transcript manually"
+            }
+
+        # Save the summary - use bot_id in filename to prevent duplicates
+        # summaries_dir already created at top of function
+        if bot_id:
+            filename = f"{bot_id}.md"
+        else:
+            # Fallback to timestamp + prospect name if no bot_id
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            prospect_name = summary_data.get("prospect_name", "Unknown")
+            safe_name = "".join(c if c.isalnum() else "_" for c in prospect_name)
+            filename = f"{timestamp}_{safe_name}.md"
+        filepath = os.path.join(summaries_dir, filename)
+
+        content = f"""# Discovery Call Summary (Auto-Generated)
+
+**Date:** {datetime.now().strftime("%Y-%m-%d %H:%M")}
+**Prospect:** {summary_data.get("prospect_name", "Unknown")}
+**Company:** {summary_data.get("company_name", "Unknown")}
+**Qualified:** {summary_data.get("qualified", "Unknown")}
+**Bot Persona:** {persona_name}
+
+## Summary
+{summary_data.get("summary", "No summary available")}
+
+## Next Steps
+{summary_data.get("next_steps", "No next steps identified")}
+
+---
+*This summary was auto-generated from the call transcript when the meeting ended.*
+"""
+
+        with open(filepath, "w") as f:
+            f.write(content)
+
+        logger.info(f"[WEBHOOK] Generated call summary: {filepath}")
+
+        # Optionally, clean up the transcript file
+        # os.remove(transcript_file)
+
+    except Exception as e:
+        logger.error(f"[WEBHOOK] Error generating summary from transcript: {e}")

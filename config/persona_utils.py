@@ -40,8 +40,26 @@ class PersonaManager:
         # Get name from first line (# Title)
         name = sections[0].split("\n", 1)[0].replace("# ", "").strip()
 
-        # Get prompt (first paragraph after title)
-        prompt = sections[0].split("\n\n", 1)[1].strip()
+        # Get prompt - include ALL content sections except Metadata, Characteristics, and Voice
+        # These sections contain the personality, instructions, and knowledge
+        prompt_parts = []
+
+        # First section (after title) - the main description
+        if "\n\n" in sections[0]:
+            first_part = sections[0].split("\n\n", 1)[1].strip()
+            if first_part:
+                prompt_parts.append(first_part)
+
+        # Process remaining sections - include everything except metadata-like sections
+        skip_sections = ["metadata", "characteristics", "voice"]
+        for section in sections[1:]:
+            section_title = section.split("\n", 1)[0].strip().lower()
+            if section_title not in skip_sections:
+                # Include section with its header restored
+                prompt_parts.append("## " + section)
+
+        # Combine all parts into the full prompt
+        prompt = "\n\n".join(prompt_parts)
 
         # Parse metadata section
         metadata = {
