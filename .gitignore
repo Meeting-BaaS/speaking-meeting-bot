@@ -167,3 +167,6 @@ cython_debug/
 transcripts/*
 ready_signals/*
 call_summaries/*
+
+# local secrets, never commit
+.env_clean
