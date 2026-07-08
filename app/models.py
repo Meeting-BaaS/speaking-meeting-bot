@@ -106,29 +106,61 @@ class PromptDataSource(BaseModel):
         return self
 
 
+MCPTransport = Literal["stdio", "http", "streamable_http", "sse"]
+
+
 class MCPServerConfig(BaseModel):
-    """MCP server metadata passed through to the bot context."""
+    """MCP server metadata and optional live connection details."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=120)
+    enabled: bool = Field(
+        True,
+        description="Whether this server may be used. Disabled servers are documented but not connected.",
+    )
     url: Optional[str] = Field(
         None,
-        description="Remote MCP server URL if available",
+        description="Remote MCP server URL. Required for http, streamable_http, and sse transports.",
+    )
+    headers: Optional[Dict[str, str]] = Field(
+        None,
+        description="Optional HTTP headers for remote MCP servers. Use only when a server requires them.",
     )
     command: Optional[str] = Field(
         None,
-        description="Local MCP command name if this is a command-backed server",
+        min_length=1,
+        max_length=500,
+        description="Local MCP command to run. Required for stdio transport.",
     )
-    transport: Optional[str] = Field(
+    args: Optional[List[str]] = Field(
         None,
-        max_length=60,
-        description="Transport hint, e.g. sse, streamable_http, stdio",
+        max_length=100,
+        description="Arguments passed to the stdio MCP command.",
+    )
+    env: Optional[Dict[str, str]] = Field(
+        None,
+        description="Environment variables passed to the stdio MCP command. Use only when required.",
+    )
+    transport: Optional[MCPTransport] = Field(
+        None,
+        description="MCP transport. Omit for metadata-only servers that cannot execute tools.",
     )
     tools: Optional[List[str]] = Field(
         None,
         max_length=50,
         description="Known tool names exposed by this MCP server",
+    )
+    tool_allowlist: Optional[List[str]] = Field(
+        None,
+        max_length=50,
+        description="Optional allowlist of MCP tool names this bot may call from this server.",
+    )
+    timeout_seconds: Optional[float] = Field(
+        None,
+        ge=0.1,
+        le=300.0,
+        description="Optional per-server connection/tool timeout in seconds.",
     )
     instructions: Optional[str] = Field(
         None,
@@ -136,16 +168,51 @@ class MCPServerConfig(BaseModel):
         description="Operator instructions or constraints for this MCP server",
     )
 
+    @field_validator("url")
+    @classmethod
+    def validate_mcp_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        normalized = value.strip()
+        if not normalized.startswith(("http://", "https://")):
+            raise ValueError("mcp server url must start with http:// or https://")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_connection_details(self):
+        if self.transport == "stdio":
+            if not self.command:
+                raise ValueError("command is required when MCP transport is stdio")
+            if self.url or self.headers:
+                raise ValueError(
+                    "url and headers are not allowed when MCP transport is stdio"
+                )
+        elif self.transport in {"http", "streamable_http", "sse"}:
+            if not self.url:
+                raise ValueError(
+                    f"url is required when MCP transport is {self.transport}"
+                )
+            if self.command or self.args or self.env:
+                raise ValueError(
+                    "command, args, and env are not allowed for remote MCP transports"
+                )
+        else:
+            if self.url or self.headers or self.command or self.args or self.env:
+                raise ValueError(
+                    "transport is required when MCP connection details are supplied"
+                )
+        return self
+
 
 class MCPConfig(BaseModel):
-    """MCP metadata for this bot request."""
+    """MCP server metadata and optional live connection details."""
 
     model_config = ConfigDict(extra="forbid")
 
     servers: List[MCPServerConfig] = Field(
         default_factory=list,
         max_length=10,
-        description="MCP servers/tools to pass into the bot context",
+        description="MCP servers to document and optionally connect for tool calls",
     )
     instructions: Optional[str] = Field(
         None,
@@ -185,6 +252,7 @@ class BotRequest(BaseModel):
                             "url": "https://mcp.example.com",
                             "transport": "streamable_http",
                             "tools": ["get_account", "list_recent_calls"],
+                            "tool_allowlist": ["get_account", "list_recent_calls"],
                         }
                     ]
                 },
@@ -230,7 +298,7 @@ class BotRequest(BaseModel):
     )
     mcp: Optional[MCPConfig] = Field(
         None,
-        description="MCP server/tool metadata to pass into the bot context",
+        description="MCP server/tool metadata and optional live connection details",
     )
     speech_speed: Optional[float] = Field(
         None,

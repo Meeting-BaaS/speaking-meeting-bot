@@ -2,6 +2,8 @@ import asyncio
 import os
 import argparse
 import inspect
+import json as jsonlib
+from dataclasses import dataclass
 from datetime import datetime
 
 import aiohttp
@@ -10,7 +12,7 @@ from dotenv import load_dotenv
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
-from pipecat.frames.frames import LLMMessagesAppendFrame, TextFrame, TTSSpeakFrame
+from pipecat.frames.frames import LLMMessagesAppendFrame, TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -22,6 +24,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.llm_service import FunctionCallParams
 
 # from pipecat.services.gladia.stt import GladiaSTTService
 from pipecat.services.openai.llm import OpenAILLMService
@@ -35,6 +38,12 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from config.persona_utils import PersonaManager
 from utils.floor import floor_blocked_by_sibling
+from utils.mcp_client import (
+    HttpMcpClient,
+    McpClientError,
+    StdioMcpClient,
+    build_mcp_tool_name,
+)
 from utils.runtime import get_state_dir
 from config.prompts import DEFAULT_SYSTEM_PROMPT
 from meetingbaas_pipecat.utils.logger import configure_logger
@@ -46,9 +55,6 @@ import json
 TRANSCRIPT_DIR = os.path.join(get_state_dir(), "transcripts")
 # Directory for ready signals from webhook
 READY_SIGNALS_DIR = os.path.join(get_state_dir(), "ready_signals")
-
-
-from pipecat.services.llm_service import FunctionCallParams
 
 load_dotenv(override=True)
 
@@ -158,7 +164,7 @@ def build_mcp_context_prompt(mcp_config) -> str:
 
     lines = [
         "\n\nExternal MCP context has been provided for this session.",
-        "MCP tool execution is not implemented in this runner, so do not claim you called these tools. Use this metadata only as context about data/tools that may be available upstream.",
+        "Live MCP tools may be available as callable functions when the server config is connectable. Only say you used a tool after receiving a tool result.",
     ]
     if mcp_config.get("instructions"):
         lines.append(f"MCP instructions: {str(mcp_config['instructions'])[:500]}")
@@ -209,6 +215,173 @@ def build_mcp_context_prompt(mcp_config) -> str:
                 lines.append(f"- {str(tool)[:180]}")
 
     return "\n".join(lines)
+
+
+def _schema_from_mcp_tool(tool: dict) -> tuple[dict, list[str]]:
+    schema = tool.get("inputSchema") or tool.get("input_schema") or {}
+    if not isinstance(schema, dict):
+        return {}, []
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = schema.get("required") if isinstance(schema.get("required"), list) else []
+    return properties, required
+
+
+def _tool_result_to_text(result) -> str:
+    if result is None:
+        return "MCP tool returned no result."
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        content = result.get("content")
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if not isinstance(item, dict):
+                    parts.append(str(item))
+                    continue
+                if item.get("type") == "text" and item.get("text") is not None:
+                    parts.append(str(item["text"]))
+                elif item.get("type") == "json" and item.get("json") is not None:
+                    parts.append(jsonlib.dumps(item["json"], ensure_ascii=False))
+                elif item.get("type") == "data" and item.get("data") is not None:
+                    parts.append(jsonlib.dumps(item["data"], ensure_ascii=False))
+                elif item.get("type") == "resource" and item.get("resource"):
+                    parts.append(jsonlib.dumps(item["resource"], ensure_ascii=False))
+                else:
+                    parts.append(jsonlib.dumps(item, ensure_ascii=False))
+            if parts:
+                return "\n".join(parts)
+        if "structuredContent" in result:
+            return jsonlib.dumps(result["structuredContent"], ensure_ascii=False)
+    return jsonlib.dumps(result, ensure_ascii=False, default=str)
+
+
+@dataclass
+class LiveMCPTool:
+    function_name: str
+    server_name: str
+    tool_name: str
+    client: object
+    schema: dict
+
+
+class LiveMCPManager:
+    """Owns live MCP clients and maps Pipecat function names to MCP tools."""
+
+    def __init__(self, mcp_config: dict | None):
+        self._mcp_config = mcp_config or {}
+        self._clients = []
+        self._tools: dict[str, LiveMCPTool] = {}
+
+    async def connect(self) -> list[dict]:
+        discovered = []
+        for server in self._mcp_config.get("servers") or []:
+            if not isinstance(server, dict) or server.get("enabled") is False:
+                continue
+            if not server.get("transport"):
+                continue
+
+            client = self._build_client(server)
+            server_name = str(server.get("name") or "mcp")
+            try:
+                await client.initialize()
+                self._clients.append(client)
+                tool_allowlist = set(server.get("tool_allowlist") or [])
+                for tool in await client.list_tools():
+                    tool_name = str(tool.get("name") or "")
+                    if not tool_name:
+                        continue
+                    if tool_allowlist and tool_name not in tool_allowlist:
+                        continue
+                    function_name = build_mcp_tool_name(server_name, tool_name)
+                    tool_ref = LiveMCPTool(
+                        function_name=function_name,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        client=client,
+                        schema=tool,
+                    )
+                    self._tools[function_name] = tool_ref
+                    discovered.append(
+                        {
+                            **tool,
+                            "server_name": server_name,
+                            "function_name": function_name,
+                        }
+                    )
+            except Exception as exc:
+                await client.close()
+                if server.get("required"):
+                    raise
+                log_and_flush(
+                    logging.WARNING,
+                    f"[MCP] Could not connect server {server_name}: {exc}",
+                )
+        return discovered
+
+    def _build_client(self, server: dict):
+        transport = str(server.get("transport") or "").lower()
+        timeout = float(server.get("timeout_seconds") or 12)
+        if transport == "stdio":
+            command = [server["command"], *(server.get("args") or [])]
+            return StdioMcpClient(command=command, env=server.get("env"))
+        if transport in {"http", "streamable_http", "streamable-http", "sse"}:
+            return HttpMcpClient(
+                url=server["url"],
+                headers=server.get("headers"),
+                timeout_seconds=timeout,
+            )
+        raise McpClientError(f"Unsupported MCP transport: {transport}")
+
+    async def call_tool_by_function_name(self, function_name: str, arguments: dict):
+        tool_ref = self._tools.get(function_name)
+        if not tool_ref:
+            raise McpClientError(f"Unknown MCP function: {function_name}")
+        return await tool_ref.client.call_tool(tool_ref.tool_name, arguments or {})
+
+    async def close(self):
+        await asyncio.gather(
+            *(client.close() for client in self._clients),
+            return_exceptions=True,
+        )
+
+
+async def setup_mcp_tools(llm, tool_schemas: list, mcp_config: dict | None):
+    """Connect configured MCP servers and register their tools with Pipecat."""
+    if not mcp_config:
+        return None
+
+    manager = LiveMCPManager(mcp_config)
+    discovered = await manager.connect()
+    if not discovered:
+        log_and_flush(logging.INFO, "[MCP] No live MCP tools discovered")
+        return manager
+
+    for tool_ref in discovered:
+        function_name = tool_ref["function_name"]
+        properties, required = _schema_from_mcp_tool(tool_ref)
+
+        async def call_mcp_tool(params, name=function_name):
+            try:
+                result = await manager.call_tool_by_function_name(name, params.arguments)
+                await params.result_callback(_tool_result_to_text(result))
+            except Exception as exc:
+                log_and_flush(logging.ERROR, f"[MCP] Tool {name} failed: {exc}")
+                await params.result_callback(f"MCP tool {name} failed: {exc}")
+
+        llm.register_function(function_name, call_mcp_tool)
+        tool_schemas.append(
+            FunctionSchema(
+                name=function_name,
+                description=tool_ref.get("description")
+                or f"Call MCP tool {tool_ref['name']} on {tool_ref['server_name']}",
+                properties=properties,
+                required=required,
+            )
+        )
+
+    log_and_flush(logging.INFO, f"[MCP] Registered {len(discovered)} live MCP tool(s)")
+    return manager
 
 
 def save_transcript(bot_id: str, persona_name: str, messages: list):
@@ -522,6 +695,7 @@ async def main(
     )
     log_and_flush(logging.INFO, "[LLM] OpenAI LLM initialized with model=gpt-4.1")
 
+    mcp_manager = None
     if enable_tools:
         log_and_flush(logging.INFO, "[TOOLS] Registering function tools")
         llm.register_function("get_weather", get_weather)
@@ -587,8 +761,11 @@ async def main(
             required=["prospect_name", "company_name", "summary", "next_steps", "qualified"],
         )
 
+        tool_schemas = [weather_function, time_function, save_call_summary_function]
+        mcp_manager = await setup_mcp_tools(llm, tool_schemas, persona.get("mcp"))
+
         # Create tools schema
-        tools = ToolsSchema(standard_tools=[weather_function, time_function, save_call_summary_function])
+        tools = ToolsSchema(standard_tools=tool_schemas)
     else:
         log_and_flush(logging.INFO, "[TOOLS] Function tools are disabled")
         tools = None
@@ -740,12 +917,12 @@ async def main(
         waited = 0
         ready = False
 
-        log_and_flush(logging.INFO, f"[BOT] Waiting for ready signal (admission roster)...")
+        log_and_flush(logging.INFO, "[BOT] Waiting for ready signal (admission roster)...")
         log_and_flush(logging.INFO, f"[BOT] Looking for ready file: {ready_file}")
 
         while waited < max_wait_seconds:
             if os.path.exists(ready_file):
-                log_and_flush(logging.INFO, f"[BOT] Ready signal received! Bot is in the call.")
+                log_and_flush(logging.INFO, "[BOT] Ready signal received! Bot is in the call.")
                 ready = True
                 try:
                     os.remove(ready_file)
@@ -790,7 +967,7 @@ async def main(
             )
         else:
             # No entry message - prompt LLM to introduce itself
-            log_and_flush(logging.INFO, f"[BOT] No entry message, prompting LLM to introduce")
+            log_and_flush(logging.INFO, "[BOT] No entry message, prompting LLM to introduce")
             initial_prompt = {"role": "user", "content": "Please introduce yourself and start the conversation."}
             await task.queue_frames([LLMMessagesAppendFrame(messages=[initial_prompt], run_llm=True)])
             log_and_flush(logging.INFO, "[BOT] LLM prompted to introduce itself")
@@ -819,6 +996,12 @@ async def main(
             log_and_flush(logging.INFO, "[TRANSCRIPT] Final transcript saved on shutdown")
         except Exception as e:
             log_and_flush(logging.ERROR, f"[TRANSCRIPT] Error saving final transcript: {e}")
+        if mcp_manager:
+            try:
+                await mcp_manager.close()
+                log_and_flush(logging.INFO, "[MCP] Closed MCP connections")
+            except Exception as e:
+                log_and_flush(logging.WARNING, f"[MCP] Error closing MCP connections: {e}")
 
 
 def cli() -> None:
@@ -851,6 +1034,10 @@ def cli() -> None:
     )
     parser.add_argument("--client-id", help="Internal client ID for the bot")
     parser.add_argument("--persona-data-json", help="Persona data as JSON string")
+    parser.add_argument(
+        "--persona-data-file",
+        help="Path to persona data JSON payload. Preferred for MCP secrets.",
+    )
     parser.add_argument("--api-key", help="API key for authentication")
     parser.add_argument("--meetingbaas-bot-id", help="MeetingBaas bot ID")
 
@@ -863,13 +1050,25 @@ def cli() -> None:
     # Parse the full persona payload from the parent process; main() uses it
     # directly when it carries a prompt (dynamic personas are never on disk).
     persona_data = None
-    if args.persona_data_json:
+    if args.persona_data_file:
         try:
-            import json
+            with open(args.persona_data_file, "r") as f:
+                persona_data = json.load(f)
+            try:
+                os.remove(args.persona_data_file)
+            except OSError:
+                pass
+            if persona_name == "Meeting Bot" and persona_data.get("path"):
+                persona_name = os.path.basename(persona_data["path"])
+                print(f"[STARTUP] Extracted persona name from path: {persona_name}")
+        except Exception as e:
+            print(f"Error parsing persona data file: {e}")
+            persona_data = None
+    elif args.persona_data_json:
+        try:
             persona_data = json.loads(args.persona_data_json)
             # If persona_name is still the default, try to get folder name from path
             if persona_name == "Meeting Bot" and persona_data.get("path"):
-                import os
                 persona_name = os.path.basename(persona_data["path"])
                 print(f"[STARTUP] Extracted persona name from path: {persona_name}")
         except Exception as e:

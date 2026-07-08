@@ -299,11 +299,22 @@ curl -X POST http://localhost:${PORT}/bots \
   }'
 ```
 
-You can attach external prompt context and MCP metadata per bot. External
+You can attach external prompt context and MCP servers per bot. External
 context is loaded before the Pipecat process starts and capped by
 `prompt_data_token_limit` using an approximate token budget. URL sources block
 localhost and private-network targets by default; set
 `PROMPT_DATA_ALLOW_PRIVATE_URLS=true` only in trusted deployments.
+
+MCP servers are live-query capable only when their config is connectable. A
+`stdio` server requires `transport`, `command`, and optional `args`/`env`.
+Remote `http`, `streamable_http`, and `sse` servers require `transport`, `url`,
+and optional `headers`. Remote MCP URLs also block localhost and
+private-network targets by default; set `MCP_ALLOW_PRIVATE_URLS=true` only in
+trusted deployments. If `transport` is omitted, the server is treated as
+metadata-only and MCP tools are not executed. Secrets are not required in the
+request, but `env` and `headers` are available for deployments that need them.
+Use `tool_allowlist` to constrain which server tools the bot may call, and set
+`enabled: false` to document a server without connecting to it.
 
 ```bash
 curl -X POST http://localhost:${PORT}/bots \
@@ -326,13 +337,32 @@ curl -X POST http://localhost:${PORT}/bots \
       }
     ],
     "mcp": {
-      "instructions": "Use CRM context when relevant.",
+      "instructions": "Use Google Drive and CRM context only when relevant.",
       "servers": [
         {
-          "name": "crm",
-          "url": "https://mcp.example.com",
+          "name": "google-drive",
+          "enabled": true,
+          "transport": "stdio",
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-gdrive"],
+          "env": {
+            "GDRIVE_CREDENTIALS_PATH": "/run/secrets/gdrive-credentials.json"
+          },
+          "tool_allowlist": ["search", "read_file"],
+          "timeout_seconds": 20,
+          "instructions": "Search only meeting-relevant folders."
+        },
+        {
+          "name": "remote-crm",
+          "enabled": true,
           "transport": "streamable_http",
-          "tools": ["get_account", "list_recent_calls"]
+          "url": "https://mcp.example.com/mcp",
+          "headers": {
+            "Authorization": "Bearer optional-token"
+          },
+          "tools": ["get_account", "list_recent_calls"],
+          "tool_allowlist": ["get_account", "list_recent_calls"],
+          "timeout_seconds": 15
         }
       ]
     },

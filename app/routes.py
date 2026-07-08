@@ -11,7 +11,7 @@ import random
 import openai
 
 from fastapi import APIRouter, HTTPException, Request, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 
 from app.models import (
     BotRequest,
@@ -49,7 +49,6 @@ from utils.ngrok import (
     update_ngrok_client_id,
 )
 from utils.runtime import build_public_base_url, get_internal_pipecat_ws_url, get_state_dir
-from config.prompts import PERSONA_INTERACTION_INSTRUCTIONS
 
 # Import the new persona detail extraction service
 from app.services.persona_detail_extraction import extract_persona_details_from_prompt
@@ -125,7 +124,6 @@ async def join_meeting(request: BotRequest, client_request: Request):
         log_ngrok_status()
 
     # --- Streamlined Persona and Prompt Resolution Logic ---
-    final_prompt: str = ""
     resolved_persona_data: Dict[str, Any] = {}
     persona_name_for_logging: str = "Unknown"
 
@@ -148,7 +146,6 @@ async def join_meeting(request: BotRequest, client_request: Request):
                 "is_temporary": True # Mark as temporary persona
             }
             persona_name_for_logging = resolved_persona_data["name"]
-            final_prompt = request.prompt + PERSONA_INTERACTION_INSTRUCTIONS
             logger.info(f"Dynamically created persona '{persona_name_for_logging}' from prompt.")
         else:
             # Fallback if prompt details extraction fails or returns unexpected type
@@ -156,7 +153,6 @@ async def join_meeting(request: BotRequest, client_request: Request):
             resolved_persona_data = persona_manager.get_persona("baas_onboarder")
             resolved_persona_data["is_temporary"] = False # Ensure fallback is not marked temporary
             persona_name_for_logging = resolved_persona_data.get("name", "baas_onboarder")
-            final_prompt = resolved_persona_data["prompt"] + PERSONA_INTERACTION_INSTRUCTIONS
 
     else: # Case 2: No custom prompt, use pre-defined persona
         resolved_persona_name: str
@@ -181,14 +177,12 @@ async def join_meeting(request: BotRequest, client_request: Request):
             resolved_persona_data = persona_manager.get_persona(resolved_persona_name)
             resolved_persona_data["is_temporary"] = False # Mark as not temporary
             persona_name_for_logging = resolved_persona_data.get("name", resolved_persona_name)
-            final_prompt = resolved_persona_data["prompt"] + PERSONA_INTERACTION_INSTRUCTIONS
             logger.info(f"Using pre-defined persona '{persona_name_for_logging}'.")
         except KeyError as e:
             logger.error(f"Resolved persona '{resolved_persona_name}' not found: {e}. Falling back to baas_onboarder.")
             resolved_persona_data = persona_manager.get_persona("baas_onboarder")
             resolved_persona_data["is_temporary"] = False # Ensure fallback is not marked temporary
             persona_name_for_logging = resolved_persona_data.get("name", "baas_onboarder")
-            final_prompt = resolved_persona_data["prompt"] + PERSONA_INTERACTION_INSTRUCTIONS
             logger.info(f"Using fallback persona '{persona_name_for_logging}'.")
 
     # Populate image if not present
@@ -208,7 +202,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
                     resolved_persona_data["image"] = generated_image
                     logger.info(f"Generated image URL for '{persona_name_for_logging}': {generated_image}")
                 else:
-                    logger.warning(f"Image generation returned no URL.")
+                    logger.warning("Image generation returned no URL.")
                     resolved_persona_data["image"] = None # Ensure no invalid image data is stored
             except Exception as e:
                 logger.error(f"Failed to generate image for '{persona_name_for_logging}': {e}")
@@ -221,7 +215,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
         resolved_persona_data["cartesia_voice_id"] = cartesia_voice_id
         logger.info(f"Resolved Cartesia voice ID for '{persona_name_for_logging}': {cartesia_voice_id}")
 
-    logger.info(f"Final resolved persona data for Pipecat process:")
+    logger.info("Final resolved persona data for Pipecat process:")
     logger.info(f"  Name: {resolved_persona_data.get('name')}")
     logger.info(f"  Image: {resolved_persona_data.get('image')}")
     logger.info(f"  Voice ID: {resolved_persona_data.get('cartesia_voice_id')}")
@@ -319,7 +313,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
                     bot_image = generated_image_url
                     logger.info(f"Generated image: {bot_image}")
                 else:
-                    logger.error(f"Failed to generate image from prompt derived details: No URL returned.")
+                    logger.error("Failed to generate image from prompt derived details: No URL returned.")
                     bot_image = None
             except Exception as e:
                 logger.error(f"Failed to generate image from prompt derived details: {e}")

@@ -9,6 +9,7 @@ import json
 import threading
 
 from meetingbaas_pipecat.utils.logger import logger
+from utils.runtime import get_state_dir
 
 PIPECAT_PROCESSES: Dict[str, subprocess.Popen] = {}
 
@@ -44,8 +45,16 @@ def start_pipecat_process(
     """
     logger.info(f"Starting Pipecat process for client {client_id}")
 
-    # Convert persona_data to JSON string
-    persona_data_json = json.dumps(persona_data)
+    payload_dir = os.path.join(get_state_dir(), "persona_payloads")
+    os.makedirs(payload_dir, exist_ok=True)
+    persona_data_path = os.path.join(payload_dir, f"{client_id}.json")
+    payload_fd = os.open(
+        persona_data_path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    with os.fdopen(payload_fd, "w") as f:
+        json.dump(persona_data, f)
     if (persona_data or {}).get("mcp"):
         logger.info(f"Passing MCP metadata to Pipecat process for client {client_id}")
 
@@ -78,8 +87,8 @@ def start_pipecat_process(
         meeting_url,
         "--persona-name",
         persona_folder_name,
-        "--persona-data-json",
-        persona_data_json,
+        "--persona-data-file",
+        persona_data_path,
         "--streaming-audio-frequency",
         streaming_audio_frequency,
     ]
@@ -148,6 +157,6 @@ def terminate_process_gracefully(
         # Try one last time with kill
         try:
             process.kill()
-        except:
+        except Exception:
             pass
         return False
