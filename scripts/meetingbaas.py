@@ -1,6 +1,7 @@
 import asyncio
 import os
 import argparse
+import inspect
 from datetime import datetime
 
 import aiohttp
@@ -66,6 +67,148 @@ def log_and_flush(level, msg):
     logger.log(level, msg)
     for h in logger.handlers:
         h.flush()
+
+
+def _coerce_float(value, default=None):
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def resolve_tts_speed(persona: dict | None) -> float:
+    """Resolve TTS speed with request data taking precedence over env defaults."""
+    persona = persona or {}
+    speech_config = persona.get("speech") or persona.get("tts") or {}
+    persona_speed = None
+    if isinstance(speech_config, dict):
+        persona_speed = (
+            speech_config.get("speed")
+            or speech_config.get("tts_speed")
+            or speech_config.get("speech_speed")
+        )
+    persona_speed = (
+        persona_speed
+        or persona.get("tts_speed")
+        or persona.get("speech_speed")
+        or persona.get("speed")
+    )
+    speed = _coerce_float(persona_speed)
+    if speed is None:
+        speed = _coerce_float(
+            os.getenv("CARTESIA_TTS_SPEED")
+            or os.getenv("TTS_SPEED")
+            or os.getenv("SPEECH_SPEED"),
+            1.2,
+        )
+    return min(max(speed, 0.6), 1.5)
+
+
+def build_cartesia_tts_kwargs(
+    *,
+    api_key: str | None,
+    voice_id: str | None,
+    sample_rate: int,
+    speed: float,
+) -> dict:
+    """Build Cartesia kwargs across Pipecat versions without breaking startup."""
+    kwargs = {
+        "api_key": api_key,
+        "voice_id": voice_id,
+        "sample_rate": sample_rate,
+    }
+    try:
+        signature = inspect.signature(CartesiaTTSService.__init__)
+    except (TypeError, ValueError):
+        signature = None
+
+    params = signature.parameters if signature else {}
+    if "speed" in params:
+        kwargs["speed"] = speed
+        return kwargs
+
+    if "params" not in params or not hasattr(CartesiaTTSService, "InputParams"):
+        return kwargs
+
+    try:
+        kwargs["params"] = CartesiaTTSService.InputParams(
+            generation_config={"speed": speed}
+        )
+    except Exception as exc:
+        log_and_flush(
+            logging.WARNING,
+            f"[TTS] Cartesia speed config not supported by this Pipecat version: {exc}",
+        )
+    return kwargs
+
+
+def build_mcp_context_prompt(mcp_config) -> str:
+    """Summarize MCP metadata for the LLM without implying tool execution works."""
+    if not mcp_config:
+        return ""
+
+    if not isinstance(mcp_config, dict):
+        return (
+            "\n\nMCP context was provided for this session, but its metadata was "
+            "not in a structured format. Do not claim you called MCP tools unless "
+            "tool execution is explicitly implemented in this runner."
+        )
+
+    lines = [
+        "\n\nExternal MCP context has been provided for this session.",
+        "MCP tool execution is not implemented in this runner, so do not claim you called these tools. Use this metadata only as context about data/tools that may be available upstream.",
+    ]
+    if mcp_config.get("instructions"):
+        lines.append(f"MCP instructions: {str(mcp_config['instructions'])[:500]}")
+
+    servers = mcp_config.get("servers") or mcp_config.get("server") or []
+    if isinstance(servers, dict):
+        servers = [
+            {"name": name, **value} if isinstance(value, dict) else {"name": name}
+            for name, value in servers.items()
+        ]
+    if isinstance(servers, list) and servers:
+        lines.append("MCP servers:")
+        for server in servers[:8]:
+            if isinstance(server, dict):
+                name = server.get("name") or server.get("id") or server.get("url")
+                if name:
+                    server_line = f"- {name}"
+                    if server.get("transport"):
+                        server_line += f" ({server['transport']})"
+                    if server.get("url"):
+                        server_line += f": {server['url']}"
+                    lines.append(server_line)
+                    tools = server.get("tools") or []
+                    if tools:
+                        lines.append(f"  Tools: {', '.join(str(tool) for tool in tools[:20])}")
+                    if server.get("instructions"):
+                        lines.append(f"  Instructions: {str(server['instructions'])[:300]}")
+            elif server:
+                lines.append(f"- {str(server)[:180]}")
+
+    tools = mcp_config.get("tools") or mcp_config.get("tool") or []
+    if isinstance(tools, dict):
+        tools = [
+            {"name": name, **value} if isinstance(value, dict) else {"name": name}
+            for name, value in tools.items()
+        ]
+    if isinstance(tools, list) and tools:
+        lines.append("MCP tools/data advertised:")
+        for tool in tools[:12]:
+            if isinstance(tool, dict):
+                name = tool.get("name") or tool.get("id") or tool.get("title")
+                description = tool.get("description") or tool.get("summary")
+                if name and description:
+                    lines.append(f"- {name}: {str(description)[:180]}")
+                elif name:
+                    lines.append(f"- {name}")
+            elif tool:
+                lines.append(f"- {str(tool)[:180]}")
+
+    return "\n".join(lines)
 
 
 def save_transcript(bot_id: str, persona_name: str, messages: list):
@@ -358,12 +501,19 @@ async def main(
     voice_id = persona.get("cartesia_voice_id") or os.getenv("CARTESIA_VOICE_ID")
     log_and_flush(logging.INFO, f"[PERSONA] Using voice ID: {voice_id}")
 
-    tts = CartesiaTTSService(
+    tts_speed = resolve_tts_speed(persona)
+    tts_kwargs = build_cartesia_tts_kwargs(
         api_key=os.getenv("CARTESIA_API_KEY"),
         voice_id=voice_id,
         sample_rate=output_sample_rate,
+        speed=tts_speed,
     )
-    log_and_flush(logging.INFO, f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}")
+    tts = CartesiaTTSService(**tts_kwargs)
+    speed_applied = "speed" in tts_kwargs or "params" in tts_kwargs
+    log_and_flush(
+        logging.INFO,
+        f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}, speed={tts_speed}, speed_applied={speed_applied}",
+    )
 
     llm = OpenAILLMService(
         api_key=os.getenv("OPENAI_API_KEY"),
@@ -478,6 +628,10 @@ async def main(
         system_content += "You are a meeting bot. You are in a meeting with a group of people. You are here to help the group. You are not the host of the meeting. You are not the organizer of the meeting. You are not the participant in the meeting. You are the meeting bot."
         system_content += "YOU ARE HELP TO HELP. KEEP IT SHORT. EVERYTHING YOU SAY WILL BE REPEATED BACK TO THE GROUP OUT LOUD so DO NOT add PUNCTUATION OR CAPS. JUST SAY WHAT YOU NEED TO SAY IN A CONCISE MANNER."
 
+    mcp_context = build_mcp_context_prompt(persona.get("mcp"))
+    if mcp_context:
+        system_content += mcp_context
+        log_and_flush(logging.INFO, "[MCP] Added MCP metadata to system context")
 
     # Set up messages
     messages = [

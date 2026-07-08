@@ -21,6 +21,11 @@ from app.models import (
     PersonaImageResponse,
 )
 from app.services.image_service import image_service
+from app.services.prompt_context import (
+    PromptContextError,
+    load_prompt_context,
+    merge_context_blocks,
+)
 from config.persona_utils import persona_manager
 from core.connection import MEETING_DETAILS, PIPECAT_PROCESSES, registry
 from core.process import start_pipecat_process, terminate_process_gracefully
@@ -221,6 +226,38 @@ async def join_meeting(request: BotRequest, client_request: Request):
     logger.info(f"  Image: {resolved_persona_data.get('image')}")
     logger.info(f"  Voice ID: {resolved_persona_data.get('cartesia_voice_id')}")
     logger.info(f"  Is Temporary: {resolved_persona_data.get('is_temporary')}")
+
+    try:
+        prompt_context = await load_prompt_context(
+            request.prompt_data_sources,
+            request.prompt_data_token_limit,
+        )
+    except PromptContextError as e:
+        return JSONResponse(
+            content={"message": e.message, "status": "error"},
+            status_code=e.status_code,
+        )
+
+    if prompt_context.block:
+        resolved_persona_data["additional_content"] = merge_context_blocks(
+            [resolved_persona_data.get("additional_content") or "", prompt_context.block]
+        )
+
+    if prompt_context.sources:
+        resolved_persona_data["prompt_data_sources"] = prompt_context.sources
+        resolved_persona_data["prompt_data_estimated_tokens"] = (
+            prompt_context.estimated_tokens
+        )
+        logger.info(
+            f"Loaded {len(prompt_context.sources)} prompt data source(s), "
+            f"estimated {prompt_context.estimated_tokens} tokens"
+        )
+
+    if request.mcp:
+        resolved_persona_data["mcp"] = request.mcp.model_dump(exclude_none=True)
+
+    if request.speech_speed is not None:
+        resolved_persona_data["speech_speed"] = request.speech_speed
 
     # Store all relevant details in MEETING_DETAILS dictionary.
     # Index 5 carries the FULL resolved persona dict (prompt, voice, image…):

@@ -299,6 +299,50 @@ curl -X POST http://localhost:${PORT}/bots \
   }'
 ```
 
+You can attach external prompt context and MCP metadata per bot. External
+context is loaded before the Pipecat process starts and capped by
+`prompt_data_token_limit` using an approximate token budget. URL sources block
+localhost and private-network targets by default; set
+`PROMPT_DATA_ALLOW_PRIVATE_URLS=true` only in trusted deployments.
+
+```bash
+curl -X POST http://localhost:${PORT}/bots \
+  -H "Content-Type: application/json" \
+  -H "x-meeting-baas-api-key: your-api-key" \
+  -d '{
+    "meeting_url": "https://meet.google.com/xxx-yyyy-zzz",
+    "personas": ["account_executive"],
+    "prompt_data_token_limit": 4000,
+    "prompt_data_sources": [
+      {
+        "name": "CRM account notes",
+        "type": "url",
+        "url": "https://example.com/account-notes.md"
+      },
+      {
+        "name": "Call objective",
+        "type": "text",
+        "text": "Confirm timeline, budget, and integration constraints."
+      }
+    ],
+    "mcp": {
+      "instructions": "Use CRM context when relevant.",
+      "servers": [
+        {
+          "name": "crm",
+          "url": "https://mcp.example.com",
+          "transport": "streamable_http",
+          "tools": ["get_account", "list_recent_calls"]
+        }
+      ]
+    },
+    "speech_speed": 1.25
+  }'
+```
+
+`speech_speed` overrides `CARTESIA_TTS_SPEED`, `TTS_SPEED`, or
+`SPEECH_SPEED`. The Cartesia runner clamps speed to `0.6..1.5`.
+
 You can still manually specify a WebSocket URL if needed:
 
 ```bash

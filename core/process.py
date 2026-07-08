@@ -46,6 +46,8 @@ def start_pipecat_process(
 
     # Convert persona_data to JSON string
     persona_data_json = json.dumps(persona_data)
+    if (persona_data or {}).get("mcp"):
+        logger.info(f"Passing MCP metadata to Pipecat process for client {client_id}")
 
     # Construct the command to run the meetingbaas.py script
     script_path = os.path.join(

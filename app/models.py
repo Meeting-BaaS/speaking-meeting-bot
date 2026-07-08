@@ -1,9 +1,9 @@
 """Data models for the Speaking Meeting Bot API."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def _validate_meeting_url(value: str) -> str:
@@ -49,6 +49,111 @@ class TurnConfig(BaseModel):
     )
 
 
+class PromptDataSource(BaseModel):
+    """External context to append to the bot prompt under a token budget."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        "external_context",
+        min_length=1,
+        max_length=120,
+        description="Human-readable source name shown inside the prompt context block",
+    )
+    type: Literal["text", "url"] = Field(
+        ...,
+        description="Whether to load inline text or fetch an external HTTP(S) URL",
+    )
+    text: Optional[str] = Field(
+        None,
+        description="Inline context. Required when type is text.",
+    )
+    url: Optional[str] = Field(
+        None,
+        description="HTTP(S) URL to fetch. Required when type is url.",
+    )
+    headers: Optional[Dict[str, str]] = Field(
+        None,
+        description="Optional HTTP headers for URL sources. Avoid request-specific secrets unless needed.",
+    )
+    token_limit: Optional[int] = Field(
+        None,
+        ge=1,
+        le=50_000,
+        description="Optional per-source token cap before the request-level cap is applied",
+    )
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        normalized = value.strip()
+        if not normalized.startswith(("http://", "https://")):
+            raise ValueError("prompt data source url must start with http:// or https://")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_source_payload(self):
+        if self.type == "text" and not self.text:
+            raise ValueError("text is required when prompt data source type is text")
+        if self.type == "url" and not self.url:
+            raise ValueError("url is required when prompt data source type is url")
+        if self.type == "text" and self.url:
+            raise ValueError("url is not allowed when prompt data source type is text")
+        if self.type == "url" and self.text:
+            raise ValueError("text is not allowed when prompt data source type is url")
+        return self
+
+
+class MCPServerConfig(BaseModel):
+    """MCP server metadata passed through to the bot context."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=120)
+    url: Optional[str] = Field(
+        None,
+        description="Remote MCP server URL if available",
+    )
+    command: Optional[str] = Field(
+        None,
+        description="Local MCP command name if this is a command-backed server",
+    )
+    transport: Optional[str] = Field(
+        None,
+        max_length=60,
+        description="Transport hint, e.g. sse, streamable_http, stdio",
+    )
+    tools: Optional[List[str]] = Field(
+        None,
+        max_length=50,
+        description="Known tool names exposed by this MCP server",
+    )
+    instructions: Optional[str] = Field(
+        None,
+        max_length=4_000,
+        description="Operator instructions or constraints for this MCP server",
+    )
+
+
+class MCPConfig(BaseModel):
+    """MCP metadata for this bot request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    servers: List[MCPServerConfig] = Field(
+        default_factory=list,
+        max_length=10,
+        description="MCP servers/tools to pass into the bot context",
+    )
+    instructions: Optional[str] = Field(
+        None,
+        max_length=4_000,
+        description="Global MCP usage instructions for the bot",
+    )
+
+
 class BotRequest(BaseModel):
     """Request model for creating a speaking bot in a meeting."""
 
@@ -64,6 +169,25 @@ class BotRequest(BaseModel):
                 "enable_tools": True,
                 "extra": {"company": "ACME Corp", "meeting_purpose": "Weekly sync"},
                 "websocket_url": "wss://bots.example.com",
+                "prompt_data_token_limit": 3000,
+                "prompt_data_sources": [
+                    {
+                        "name": "CRM account notes",
+                        "type": "url",
+                        "url": "https://example.com/account-notes.md",
+                    }
+                ],
+                "speech_speed": 1.15,
+                "mcp": {
+                    "servers": [
+                        {
+                            "name": "crm",
+                            "url": "https://mcp.example.com",
+                            "transport": "streamable_http",
+                            "tools": ["get_account", "list_recent_calls"],
+                        }
+                    ]
+                },
                 "prompt": "You are Meeting Assistant, a concise and professional \
                 AI bot that helps summarize key points and keep the meeting on track. Speak clearly and stay on topic.",
             }
@@ -92,6 +216,27 @@ class BotRequest(BaseModel):
     turn_config: Optional[TurnConfig] = Field(
         None,
         description="Per-bot turn-taking tuning (VAD confidence/start_secs/stop_secs/min_volume)",
+    )
+    prompt_data_sources: Optional[List[PromptDataSource]] = Field(
+        None,
+        max_length=10,
+        description="External text or URL data sources to append to the bot prompt",
+    )
+    prompt_data_token_limit: int = Field(
+        4_000,
+        ge=0,
+        le=50_000,
+        description="Approximate total token cap for loaded prompt_data_sources. 0 disables loading.",
+    )
+    mcp: Optional[MCPConfig] = Field(
+        None,
+        description="MCP server/tool metadata to pass into the bot context",
+    )
+    speech_speed: Optional[float] = Field(
+        None,
+        ge=0.5,
+        le=2.0,
+        description="TTS speaking speed multiplier. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default.",
     )
 
     # NOTE: streaming_audio_frequency is intentionally excluded and handled internally
