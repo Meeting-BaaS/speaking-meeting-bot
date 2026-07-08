@@ -86,7 +86,12 @@ async def _fetch_url_source(source: Any) -> str:
     timeout = aiohttp.ClientTimeout(total=12)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, headers=headers, allow_redirects=True) as resp:
+            async with session.get(url, headers=headers, allow_redirects=False) as resp:
+                if 300 <= resp.status < 400:
+                    raise PromptContextError(
+                        f"Prompt data source '{url}' returned a redirect; redirects are not followed",
+                        status_code=400,
+                    )
                 if resp.status >= 400:
                     raise PromptContextError(
                         f"Prompt data source '{url}' returned HTTP {resp.status}",
@@ -259,8 +264,6 @@ def format_mcp_context(mcp: Any | None) -> str:
         lines.append(f"- Server: {server.get('name', 'unnamed')}")
         if server.get("url"):
             lines.append(f"  URL: {server['url']}")
-        if server.get("command"):
-            lines.append(f"  Command: {server['command']}")
         if server.get("transport"):
             lines.append(f"  Transport: {server['transport']}")
         tools = server.get("tools") or []

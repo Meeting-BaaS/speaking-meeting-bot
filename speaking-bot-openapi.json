@@ -547,57 +547,11 @@
             "title": "Headers",
             "description": "Optional HTTP headers for remote MCP servers. Use only when a server requires them."
           },
-          "command": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 500,
-                "minLength": 1
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Command",
-            "description": "Local MCP command to run. Required for stdio transport."
-          },
-          "args": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array",
-                "maxItems": 100
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Args",
-            "description": "Arguments passed to the stdio MCP command."
-          },
-          "env": {
-            "anyOf": [
-              {
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Env",
-            "description": "Environment variables passed to the stdio MCP command. Use only when required."
-          },
           "transport": {
             "anyOf": [
               {
                 "type": "string",
                 "enum": [
-                  "stdio",
                   "http",
                   "streamable_http",
                   "sse"
@@ -608,7 +562,7 @@
               }
             ],
             "title": "Transport",
-            "description": "MCP transport. Omit for metadata-only servers that cannot execute tools."
+            "description": "Remote MCP transport. Omit for metadata-only servers that cannot execute tools."
           },
           "tools": {
             "anyOf": [

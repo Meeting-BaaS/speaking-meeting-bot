@@ -323,6 +323,8 @@ class LiveMCPManager:
         transport = str(server.get("transport") or "").lower()
         timeout = float(server.get("timeout_seconds") or 12)
         if transport == "stdio":
+            if os.getenv("MCP_ALLOW_STDIO", "").lower() not in {"1", "true", "yes"}:
+                raise McpClientError("stdio MCP transport is disabled")
             command = [server["command"], *(server.get("args") or [])]
             return StdioMcpClient(command=command, env=server.get("env"))
         if transport in {"http", "streamable_http", "streamable-http", "sse"}:

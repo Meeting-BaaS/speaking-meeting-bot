@@ -63,6 +63,16 @@ def _private_mcp_urls_allowed() -> bool:
     return os.getenv("MCP_ALLOW_PRIVATE_URLS", "").lower() in {"1", "true", "yes"}
 
 
+def _allowed_private_mcp_urls() -> set[str]:
+    raw = os.getenv("MCP_ALLOWED_PRIVATE_URLS", "")
+    return {item.strip().rstrip("/") for item in raw.split(",") if item.strip()}
+
+
+def _is_allowed_private_mcp_url(url: str) -> bool:
+    normalized = url.rstrip("/")
+    return normalized in _allowed_private_mcp_urls()
+
+
 def _is_private_ip(value: str) -> bool:
     parsed = ip_address(value)
     return (
@@ -82,6 +92,9 @@ def validate_mcp_http_url(url: str) -> None:
         raise McpClientError(f"Invalid MCP HTTP URL: {url}")
 
     if _private_mcp_urls_allowed():
+        return
+
+    if _is_allowed_private_mcp_url(url):
         return
 
     host = parsed.hostname
@@ -469,9 +482,12 @@ class HttpMcpClient:
                     self.url,
                     json=message,
                     headers=request_headers,
+                    allow_redirects=False,
                 ) as response:
                     if SESSION_HEADER in response.headers:
                         self._session_id = response.headers[SESSION_HEADER]
+                    if 300 <= response.status < 400:
+                        raise McpClientError("MCP HTTP redirects are not followed")
                     if response.status >= 400:
                         safe_headers = sanitize_mapping(request_headers)
                         LOGGER.warning(

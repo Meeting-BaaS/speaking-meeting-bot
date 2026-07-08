@@ -25,20 +25,15 @@ class MCPServerConfigTest(unittest.TestCase):
         if MCPServerConfig is None or ValidationError is None:
             self.skipTest("pydantic is not installed")
 
-    def test_stdio_server_accepts_live_connection_details(self) -> None:
-        config = MCPServerConfig(
-            name="google-drive",
-            enabled=True,
-            transport="stdio",
-            command="npx",
-            args=["-y", "@modelcontextprotocol/server-gdrive"],
-            env={"GDRIVE_CREDENTIALS_PATH": "/run/secrets/gdrive.json"},
-            tool_allowlist=["search", "read_file"],
-            timeout_seconds=20,
-        )
-
-        self.assertEqual(config.command, "npx")
-        self.assertEqual(config.args[0], "-y")
+    def test_stdio_transport_is_not_public_api(self) -> None:
+        with self.assertRaises(ValidationError):
+            MCPServerConfig(
+                name="google-drive",
+                enabled=True,
+                transport="stdio",
+                tool_allowlist=["search", "read_file"],
+                timeout_seconds=20,
+            )
 
     def test_remote_server_accepts_url_headers_and_allowlist(self) -> None:
         config = MCPServerConfig(
@@ -62,9 +57,14 @@ class MCPServerConfigTest(unittest.TestCase):
         self.assertIsNone(config.transport)
         self.assertTrue(config.enabled)
 
-    def test_stdio_requires_command(self) -> None:
+    def test_command_fields_are_rejected(self) -> None:
         with self.assertRaises(ValidationError):
-            MCPServerConfig(name="google-drive", transport="stdio")
+            MCPServerConfig(
+                name="google-drive",
+                transport="streamable_http",
+                url="https://mcp.example.com",
+                command="npx",
+            )
 
     def test_remote_transport_requires_url(self) -> None:
         with self.assertRaises(ValidationError):
@@ -73,16 +73,6 @@ class MCPServerConfigTest(unittest.TestCase):
     def test_connection_details_require_transport(self) -> None:
         with self.assertRaises(ValidationError):
             MCPServerConfig(name="crm", url="https://mcp.example.com")
-
-    def test_rejects_incompatible_transport_fields(self) -> None:
-        with self.assertRaises(ValidationError):
-            MCPServerConfig(
-                name="crm",
-                transport="streamable_http",
-                url="https://mcp.example.com",
-                command="npx",
-            )
-
 
 if __name__ == "__main__":
     unittest.main()

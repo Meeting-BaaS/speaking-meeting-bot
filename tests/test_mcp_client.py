@@ -109,6 +109,19 @@ class McpClientHelpersTest(unittest.TestCase):
         with self.assertRaises(McpClientError):
             validate_mcp_http_url("http://127.0.0.1:3000/mcp")
 
+    def test_validate_mcp_http_url_allows_exact_private_url(self) -> None:
+        original_allowed = os.environ.get("MCP_ALLOWED_PRIVATE_URLS")
+        os.environ["MCP_ALLOWED_PRIVATE_URLS"] = "http://127.0.0.1:8123/mcp"
+        try:
+            validate_mcp_http_url("http://127.0.0.1:8123/mcp")
+            with self.assertRaises(McpClientError):
+                validate_mcp_http_url("http://127.0.0.1:8124/mcp")
+        finally:
+            if original_allowed is None:
+                os.environ.pop("MCP_ALLOWED_PRIVATE_URLS", None)
+            else:
+                os.environ["MCP_ALLOWED_PRIVATE_URLS"] = original_allowed
+
 
 class McpClientTransportTest(unittest.TestCase):
     def test_http_client_preserves_session_id_without_network(self) -> None:
@@ -143,31 +156,33 @@ class McpClientTransportTest(unittest.TestCase):
                 url: str,
                 json: dict[str, object],
                 headers: dict[str, str],
+                allow_redirects: bool,
             ) -> FakeResponse:
+                self.allow_redirects = allow_redirects
                 calls.append(dict(headers))
                 response_headers = {"Mcp-Session-Id": "session-123"} if len(calls) == 1 else {}
                 return FakeResponse(response_headers)
 
         original_aiohttp = mcp_client.aiohttp
-        original_allow_private = os.environ.get("MCP_ALLOW_PRIVATE_URLS")
-        os.environ["MCP_ALLOW_PRIVATE_URLS"] = "true"
+        original_allowed = os.environ.get("MCP_ALLOWED_PRIVATE_URLS")
+        os.environ["MCP_ALLOWED_PRIVATE_URLS"] = "http://127.0.0.1:8123/mcp"
         mcp_client.aiohttp = SimpleNamespace(
             ClientSession=FakeSession,
             ClientTimeout=lambda total: {"total": total},
         )
         try:
             client = HttpMcpClient(
-                "https://mcp.example.test",
+                "http://127.0.0.1:8123/mcp",
                 headers={"Authorization": "Bearer not-logged"},
             )
             asyncio.run(client._post({"jsonrpc": "2.0", "id": 1, "method": "one"}))
             asyncio.run(client._post({"jsonrpc": "2.0", "id": 2, "method": "two"}))
         finally:
             mcp_client.aiohttp = original_aiohttp
-            if original_allow_private is None:
-                os.environ.pop("MCP_ALLOW_PRIVATE_URLS", None)
+            if original_allowed is None:
+                os.environ.pop("MCP_ALLOWED_PRIVATE_URLS", None)
             else:
-                os.environ["MCP_ALLOW_PRIVATE_URLS"] = original_allow_private
+                os.environ["MCP_ALLOWED_PRIVATE_URLS"] = original_allowed
 
         self.assertNotIn("Mcp-Session-Id", calls[0])
         self.assertEqual(calls[1]["Mcp-Session-Id"], "session-123")

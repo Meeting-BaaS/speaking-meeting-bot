@@ -305,16 +305,18 @@ context is loaded before the Pipecat process starts and capped by
 localhost and private-network targets by default; set
 `PROMPT_DATA_ALLOW_PRIVATE_URLS=true` only in trusted deployments.
 
-MCP servers are live-query capable only when their config is connectable. A
-`stdio` server requires `transport`, `command`, and optional `args`/`env`.
-Remote `http`, `streamable_http`, and `sse` servers require `transport`, `url`,
-and optional `headers`. Remote MCP URLs also block localhost and
-private-network targets by default; set `MCP_ALLOW_PRIVATE_URLS=true` only in
-trusted deployments. If `transport` is omitted, the server is treated as
-metadata-only and MCP tools are not executed. Secrets are not required in the
-request, but `env` and `headers` are available for deployments that need them.
-Use `tool_allowlist` to constrain which server tools the bot may call, and set
-`enabled: false` to document a server without connecting to it.
+MCP servers are live-query capable only when their config is connectable.
+`http`, `streamable_http`, and `sse` servers require `transport`, `url`, and
+optional `headers`. Local process `stdio` MCP is intentionally not accepted by
+the public API because it would execute caller-supplied commands. Remote MCP
+URLs also block localhost and private-network targets by default; production
+deployments should use `MCP_ALLOWED_PRIVATE_URLS` with exact `http://host:port/path`
+entries for trusted loopback MCPs instead of the broad
+`MCP_ALLOW_PRIVATE_URLS=true` development bypass. If `transport` is omitted, the
+server is treated as metadata-only and MCP tools are not executed. Secrets are
+not required in the request, but `headers` are available for deployments that
+need them. Use `tool_allowlist` to constrain which server tools the bot may
+call, and set `enabled: false` to document a server without connecting to it.
 
 ```bash
 curl -X POST http://localhost:${PORT}/bots \
@@ -340,17 +342,13 @@ curl -X POST http://localhost:${PORT}/bots \
       "instructions": "Use Google Drive and CRM context only when relevant.",
       "servers": [
         {
-          "name": "google-drive",
+          "name": "drive-docs-work",
           "enabled": true,
-          "transport": "stdio",
-          "command": "npx",
-          "args": ["-y", "@modelcontextprotocol/server-gdrive"],
-          "env": {
-            "GDRIVE_CREDENTIALS_PATH": "/run/secrets/gdrive-credentials.json"
-          },
-          "tool_allowlist": ["search", "read_file"],
+          "transport": "streamable_http",
+          "url": "http://127.0.0.1:8123/mcp",
+          "tool_allowlist": ["search", "read"],
           "timeout_seconds": 20,
-          "instructions": "Search only meeting-relevant folders."
+          "instructions": "Use only meeting-relevant Drive docs."
         },
         {
           "name": "remote-crm",

@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ load_prompt_context = prompt_context.load_prompt_context
 truncate_to_token_limit = prompt_context.truncate_to_token_limit
 PromptContextError = prompt_context.PromptContextError
 _validate_fetch_url = prompt_context._validate_fetch_url
+_fetch_url_source = prompt_context._fetch_url_source
 
 
 class PromptContextTest(unittest.TestCase):
@@ -71,6 +73,64 @@ class PromptContextTest(unittest.TestCase):
     def test_private_prompt_urls_blocked_by_default(self) -> None:
         with self.assertRaises(PromptContextError):
             _validate_fetch_url("http://127.0.0.1:8000/notes.md")
+
+    def test_prompt_url_redirects_are_not_followed(self) -> None:
+        calls = []
+
+        class FakeResponse:
+            status = 302
+            content = SimpleNamespace(read=lambda *_args: b"")
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        class FakeSession:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            def get(self, url, headers, allow_redirects):
+                calls.append(
+                    {
+                        "url": url,
+                        "headers": headers,
+                        "allow_redirects": allow_redirects,
+                    }
+                )
+                return FakeResponse()
+
+        fake_aiohttp = SimpleNamespace(
+            ClientSession=FakeSession,
+            ClientTimeout=lambda total: {"total": total},
+        )
+        original_aiohttp = sys.modules.get("aiohttp")
+        sys.modules["aiohttp"] = fake_aiohttp
+        try:
+            with self.assertRaises(PromptContextError):
+                asyncio.run(
+                    _fetch_url_source(
+                        SimpleNamespace(
+                            type="url",
+                            url="https://example.com/context.txt",
+                            headers=None,
+                        )
+                    )
+                )
+        finally:
+            if original_aiohttp is None:
+                sys.modules.pop("aiohttp", None)
+            else:
+                sys.modules["aiohttp"] = original_aiohttp
+
+        self.assertEqual(calls[0]["allow_redirects"], False)
 
 
 if __name__ == "__main__":

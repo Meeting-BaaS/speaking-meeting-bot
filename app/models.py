@@ -106,7 +106,7 @@ class PromptDataSource(BaseModel):
         return self
 
 
-MCPTransport = Literal["stdio", "http", "streamable_http", "sse"]
+MCPTransport = Literal["http", "streamable_http", "sse"]
 
 
 class MCPServerConfig(BaseModel):
@@ -127,24 +127,9 @@ class MCPServerConfig(BaseModel):
         None,
         description="Optional HTTP headers for remote MCP servers. Use only when a server requires them.",
     )
-    command: Optional[str] = Field(
-        None,
-        min_length=1,
-        max_length=500,
-        description="Local MCP command to run. Required for stdio transport.",
-    )
-    args: Optional[List[str]] = Field(
-        None,
-        max_length=100,
-        description="Arguments passed to the stdio MCP command.",
-    )
-    env: Optional[Dict[str, str]] = Field(
-        None,
-        description="Environment variables passed to the stdio MCP command. Use only when required.",
-    )
     transport: Optional[MCPTransport] = Field(
         None,
-        description="MCP transport. Omit for metadata-only servers that cannot execute tools.",
+        description="Remote MCP transport. Omit for metadata-only servers that cannot execute tools.",
     )
     tools: Optional[List[str]] = Field(
         None,
@@ -180,24 +165,13 @@ class MCPServerConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_connection_details(self):
-        if self.transport == "stdio":
-            if not self.command:
-                raise ValueError("command is required when MCP transport is stdio")
-            if self.url or self.headers:
-                raise ValueError(
-                    "url and headers are not allowed when MCP transport is stdio"
-                )
-        elif self.transport in {"http", "streamable_http", "sse"}:
+        if self.transport in {"http", "streamable_http", "sse"}:
             if not self.url:
                 raise ValueError(
                     f"url is required when MCP transport is {self.transport}"
                 )
-            if self.command or self.args or self.env:
-                raise ValueError(
-                    "command, args, and env are not allowed for remote MCP transports"
-                )
         else:
-            if self.url or self.headers or self.command or self.args or self.env:
+            if self.url or self.headers:
                 raise ValueError(
                     "transport is required when MCP connection details are supplied"
                 )
