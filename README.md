@@ -375,12 +375,16 @@ curl -X POST http://localhost:${PORT}/bots \
 
 This repo contains three OpenAPI files with different roles:
 
-- `openapi.json` is the upstream MeetingBaaS v1 API snapshot.
+- `openapi.json` is this FastAPI service snapshot for generic tooling.
+- `speaking-bot-openapi.json` is the same service snapshot, named explicitly
+  for the speaking-bots MCP sync.
+- `meeting-baas-openapi-v1.json` is the upstream MeetingBaaS v1 API snapshot.
 - `openapi-v2.json` is the upstream MeetingBaaS v2 API snapshot.
-- `speaking-bot-openapi.json` is this FastAPI service snapshot. It includes
-  `/bots`, `/bots/{bot_id}`, `/personas/generate-image`, `/health`, `/ready`,
-  `/webhook`, and the current `BotRequest` fields for `prompt_data_sources`,
-  `prompt_data_token_limit`, `mcp`, and `speech_speed`.
+
+The service snapshots include `/bots`, `/bots/{bot_id}`,
+`/personas/generate-image`, `/health`, `/ready`, `/webhook`, and the current
+`BotRequest` fields for `prompt_data_sources`, `prompt_data_token_limit`, `mcp`,
+and `speech_speed`.
 
 Regenerate the service snapshot after API model changes:
 
@@ -529,7 +533,7 @@ Once the server is running, you can access:
 
 - Interactive API docs: `http://localhost:${PORT}/docs`
 - OpenAPI specification: `http://localhost:${PORT}/openapi.json`
-- Committed service OpenAPI snapshot: `speaking-bot-openapi.json`
+- Committed service OpenAPI snapshots: `openapi.json`, `speaking-bot-openapi.json`
 - Health endpoint: `http://localhost:${PORT}/health`
 - Readiness endpoint: `http://localhost:${PORT}/ready`
 
