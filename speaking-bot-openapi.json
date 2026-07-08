@@ -1,0 +1,935 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Speaking Meeting Bot API",
+    "description": "API for deploying AI-powered speaking agents in video meetings. Combines MeetingBaas for meeting connectivity with Pipecat for voice AI processing.",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/bots": {
+      "post": {
+        "tags": [
+          "bots"
+        ],
+        "summary": "Join Meeting",
+        "description": "Create and deploy a speaking bot in a meeting.\n\nLaunches an AI-powered bot that joins a video meeting through MeetingBaas\nand processes audio using Pipecat's voice AI framework.",
+        "operationId": "join_meeting_bots_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BotRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Bot successfully created and joined the meeting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JoinResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request - Missing required fields or invalid data"
+          },
+          "500": {
+            "description": "Server error - Failed to create bot through MeetingBaas API"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bots/{bot_id}": {
+      "delete": {
+        "tags": [
+          "bots"
+        ],
+        "summary": "Leave Bot",
+        "description": "Remove a bot from a meeting by its ID.\n\nThis will:\n1. Call the MeetingBaas API to make the bot leave\n2. Close WebSocket connections if they exist\n3. Terminate the associated Pipecat process",
+        "operationId": "leave_bot_bots__bot_id__delete",
+        "parameters": [
+          {
+            "name": "bot_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bot Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeaveBotRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Bot successfully removed from meeting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Leave Bot Bots  Bot Id  Delete"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request - Missing required fields or identifiers"
+          },
+          "404": {
+            "description": "Bot not found - No bot with the specified ID"
+          },
+          "500": {
+            "description": "Server error - Failed to remove bot from MeetingBaas API"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/personas/generate-image": {
+      "post": {
+        "tags": [
+          "personas"
+        ],
+        "summary": "Generate Persona Image",
+        "description": "Generate an image for a persona using Replicate.",
+        "operationId": "generate_persona_image_personas_generate_image_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonaImageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Image successfully generated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaImageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request data"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/webhook": {
+      "post": {
+        "tags": [
+          "webhook"
+        ],
+        "summary": "Meetingbaas Webhook",
+        "description": "Webhook endpoint for MeetingBaas callbacks.\n\nReceives events like bot_joined, bot_left, call_ended, transcription, etc.\n- On 'in_call_recording': signals Pipecat to start speaking\n- On call end: generates a summary from the transcript",
+        "operationId": "meetingbaas_webhook_webhook_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Health",
+        "description": "Health check endpoint",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Ready",
+        "description": "Readiness endpoint with externally visible base URL resolution.",
+        "operationId": "ready_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BotRequest": {
+        "properties": {
+          "meeting_url": {
+            "type": "string",
+            "title": "Meeting Url",
+            "description": "URL of the Google Meet, Zoom or Microsoft Teams meeting to join"
+          },
+          "bot_name": {
+            "type": "string",
+            "title": "Bot Name",
+            "description": "Name to display for the bot in the meeting",
+            "default": ""
+          },
+          "personas": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Personas",
+            "description": "List of persona names to use. The first available will be selected."
+          },
+          "bot_image": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bot Image"
+          },
+          "entry_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entry Message"
+          },
+          "extra": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra"
+          },
+          "enable_tools": {
+            "type": "boolean",
+            "title": "Enable Tools",
+            "default": true
+          },
+          "prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt"
+          },
+          "websocket_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Websocket Url",
+            "description": "Optional public WebSocket base URL override, e.g. wss://bot.example.com"
+          },
+          "turn_config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-bot turn-taking tuning (VAD confidence/start_secs/stop_secs/min_volume)"
+          },
+          "prompt_data_sources": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PromptDataSource"
+                },
+                "type": "array",
+                "maxItems": 10
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Data Sources",
+            "description": "External text or URL data sources to append to the bot prompt"
+          },
+          "prompt_data_token_limit": {
+            "type": "integer",
+            "maximum": 50000.0,
+            "minimum": 0.0,
+            "title": "Prompt Data Token Limit",
+            "description": "Approximate total token cap for loaded prompt_data_sources. 0 disables loading.",
+            "default": 4000
+          },
+          "mcp": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MCPConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "MCP server/tool metadata and optional live connection details"
+          },
+          "speech_speed": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 2.0,
+                "minimum": 0.5
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speech Speed",
+            "description": "TTS speaking speed multiplier. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "meeting_url"
+        ],
+        "title": "BotRequest",
+        "description": "Request model for creating a speaking bot in a meeting.",
+        "example": {
+          "bot_image": "https://example.com/bot-avatar.png",
+          "bot_name": "Meeting Assistant",
+          "enable_tools": true,
+          "entry_message": "Hello! I'm here to assist with the meeting.",
+          "extra": {
+            "company": "ACME Corp",
+            "meeting_purpose": "Weekly sync"
+          },
+          "mcp": {
+            "servers": [
+              {
+                "name": "crm",
+                "tool_allowlist": [
+                  "get_account",
+                  "list_recent_calls"
+                ],
+                "tools": [
+                  "get_account",
+                  "list_recent_calls"
+                ],
+                "transport": "streamable_http",
+                "url": "https://mcp.example.com"
+              }
+            ]
+          },
+          "meeting_url": "https://meet.google.com/abc-defg-hij",
+          "personas": [
+            "helpful_assistant",
+            "meeting_facilitator"
+          ],
+          "prompt": "You are Meeting Assistant, a concise and professional                 AI bot that helps summarize key points and keep the meeting on track. Speak clearly and stay on topic.",
+          "prompt_data_sources": [
+            {
+              "name": "CRM account notes",
+              "type": "url",
+              "url": "https://example.com/account-notes.md"
+            }
+          ],
+          "prompt_data_token_limit": 3000,
+          "speech_speed": 1.15,
+          "websocket_url": "wss://bots.example.com"
+        }
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "JoinResponse": {
+        "properties": {
+          "bot_id": {
+            "type": "string",
+            "title": "Bot Id",
+            "description": "The MeetingBaas bot ID used for API operations with MeetingBaas"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bot_id"
+        ],
+        "title": "JoinResponse",
+        "description": "Response model for a bot joining a meeting"
+      },
+      "LeaveBotRequest": {
+        "properties": {
+          "bot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bot Id",
+            "description": "The MeetingBaas bot ID to remove from the meeting. This will also close the WebSocket connection made through Pipecat by this bot."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "LeaveBotRequest",
+        "description": "Request model for making a bot leave a meeting"
+      },
+      "MCPConfig": {
+        "properties": {
+          "servers": {
+            "items": {
+              "$ref": "#/components/schemas/MCPServerConfig"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "title": "Servers",
+            "description": "MCP servers to document and optionally connect for tool calls"
+          },
+          "instructions": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instructions",
+            "description": "Global MCP usage instructions for the bot"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "MCPConfig",
+        "description": "MCP server metadata and optional live connection details."
+      },
+      "MCPServerConfig": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "description": "Whether this server may be used. Disabled servers are documented but not connected.",
+            "default": true
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url",
+            "description": "Remote MCP server URL. Required for http, streamable_http, and sse transports."
+          },
+          "headers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headers",
+            "description": "Optional HTTP headers for remote MCP servers. Use only when a server requires them."
+          },
+          "command": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command",
+            "description": "Local MCP command to run. Required for stdio transport."
+          },
+          "args": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Args",
+            "description": "Arguments passed to the stdio MCP command."
+          },
+          "env": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env",
+            "description": "Environment variables passed to the stdio MCP command. Use only when required."
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "stdio",
+                  "http",
+                  "streamable_http",
+                  "sse"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transport",
+            "description": "MCP transport. Omit for metadata-only servers that cannot execute tools."
+          },
+          "tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tools",
+            "description": "Known tool names exposed by this MCP server"
+          },
+          "tool_allowlist": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Allowlist",
+            "description": "Optional allowlist of MCP tool names this bot may call from this server."
+          },
+          "timeout_seconds": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 300.0,
+                "minimum": 0.1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout Seconds",
+            "description": "Optional per-server connection/tool timeout in seconds."
+          },
+          "instructions": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instructions",
+            "description": "Operator instructions or constraints for this MCP server"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "MCPServerConfig",
+        "description": "MCP server metadata and optional live connection details."
+      },
+      "PersonaImageRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "description"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the persona to generate an image for"
+          },
+          "description": {
+            "type": "string",
+            "description": "Detailed description of the persona's appearance and characteristics"
+          },
+          "gender": {
+            "type": "string",
+            "description": "Gender of the persona (optional)",
+            "enum": [
+              "male",
+              "female",
+              "non-binary"
+            ]
+          },
+          "characteristics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of specific characteristics or features of the persona"
+          }
+        }
+      },
+      "PersonaImageResponse": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the persona"
+          },
+          "image_url": {
+            "type": "string",
+            "description": "URL of the generated image"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Timestamp when the image was generated"
+          }
+        }
+      },
+      "PromptDataSource": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "description": "Human-readable source name shown inside the prompt context block",
+            "default": "external_context"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "url"
+            ],
+            "title": "Type",
+            "description": "Whether to load inline text or fetch an external HTTP(S) URL"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text",
+            "description": "Inline context. Required when type is text."
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url",
+            "description": "HTTP(S) URL to fetch. Required when type is url."
+          },
+          "headers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headers",
+            "description": "Optional HTTP headers for URL sources. Avoid request-specific secrets unless needed."
+          },
+          "token_limit": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 50000.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Limit",
+            "description": "Optional per-source token cap before the request-level cap is applied"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "title": "PromptDataSource",
+        "description": "External context to append to the bot prompt under a token budget."
+      },
+      "TurnConfig": {
+        "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence",
+            "description": "VAD speech confidence threshold"
+          },
+          "start_secs": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 5.0,
+                "minimum": 0.05
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Secs",
+            "description": "Sustained speech (seconds) before a turn registers"
+          },
+          "stop_secs": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 10.0,
+                "minimum": 0.1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Secs",
+            "description": "Silence (seconds) before the bot considers the speaker done and replies"
+          },
+          "min_volume": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Volume",
+            "description": "Minimum input volume for VAD"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "TurnConfig",
+        "description": "Per-bot voice-activity / turn-taking tuning.\n\nAll fields optional; unset fields fall back to the VAD_* env vars, then\npipecat defaults. Human-facing bots want snappy turn-taking (low\nstop_secs); bot-vs-bot meetings want patience (higher stop_secs and\nstart_secs) so the bots stop barging in on each other."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-meeting-baas-api-key",
+        "description": "MeetingBaas API key for authentication"
+      }
+    }
+  },
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ],
+  "servers": [
+    {
+      "url": "https://speaking.meetingbaas.com",
+      "description": "Production server"
+    },
+    {
+      "url": "/",
+      "description": "Local development server"
+    }
+  ]
+}

@@ -373,6 +373,23 @@ curl -X POST http://localhost:${PORT}/bots \
 `speech_speed` overrides `CARTESIA_TTS_SPEED`, `TTS_SPEED`, or
 `SPEECH_SPEED`. The Cartesia runner clamps speed to `0.6..1.5`.
 
+### OpenAPI Snapshots
+
+This repo contains three OpenAPI files with different roles:
+
+- `openapi.json` is the upstream MeetingBaaS v1 API snapshot.
+- `openapi-v2.json` is the upstream MeetingBaaS v2 API snapshot.
+- `speaking-bot-openapi.json` is this FastAPI service snapshot. It includes
+  `/bots`, `/bots/{bot_id}`, `/personas/generate-image`, `/health`, `/ready`,
+  `/webhook`, and the current `BotRequest` fields for `prompt_data_sources`,
+  `prompt_data_token_limit`, `mcp`, and `speech_speed`.
+
+Regenerate the service snapshot after API model changes:
+
+```bash
+poetry run python scripts/export_openapi.py
+```
+
 You can still manually specify a WebSocket URL if needed:
 
 ```bash
@@ -514,6 +531,7 @@ Once the server is running, you can access:
 
 - Interactive API docs: `http://localhost:${PORT}/docs`
 - OpenAPI specification: `http://localhost:${PORT}/openapi.json`
+- Committed service OpenAPI snapshot: `speaking-bot-openapi.json`
 - Health endpoint: `http://localhost:${PORT}/health`
 - Readiness endpoint: `http://localhost:${PORT}/ready`
 
