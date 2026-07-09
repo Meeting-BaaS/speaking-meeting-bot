@@ -27,7 +27,6 @@ parse_sse_json = mcp_client.parse_sse_json
 sanitize_mapping = mcp_client.sanitize_mapping
 split_mcp_runtime_headers = mcp_client.split_mcp_runtime_headers
 validate_mcp_http_url = mcp_client.validate_mcp_http_url
-validate_mcp_response_peer = mcp_client.validate_mcp_response_peer
 McpClientError = mcp_client.McpClientError
 
 
@@ -131,29 +130,15 @@ class McpClientHelpersTest(unittest.TestCase):
 
     def test_validate_mcp_http_url_blocks_localhost(self) -> None:
         with self.assertRaises(McpClientError):
-            validate_mcp_http_url("http://127.0.0.1:3000/mcp")
-
-    def test_validate_mcp_response_peer_blocks_private_ip(self) -> None:
-        class FakeTransport:
-            def get_extra_info(self, name):
-                if name == "peername":
-                    return ("127.0.0.1", 443)
-                return None
-
-        response = SimpleNamespace(
-            _protocol=SimpleNamespace(transport=FakeTransport()),
-        )
-
-        with self.assertRaises(McpClientError):
-            validate_mcp_response_peer("https://mcp.example.com/mcp", response)
+            asyncio.run(validate_mcp_http_url("http://127.0.0.1:3000/mcp"))
 
     def test_validate_mcp_http_url_allows_exact_private_url(self) -> None:
         original_allowed = os.environ.get("MCP_ALLOWED_PRIVATE_URLS")
         os.environ["MCP_ALLOWED_PRIVATE_URLS"] = "http://127.0.0.1:8123/mcp"
         try:
-            validate_mcp_http_url("http://127.0.0.1:8123/mcp")
+            asyncio.run(validate_mcp_http_url("http://127.0.0.1:8123/mcp"))
             with self.assertRaises(McpClientError):
-                validate_mcp_http_url("http://127.0.0.1:8124/mcp")
+                asyncio.run(validate_mcp_http_url("http://127.0.0.1:8124/mcp"))
         finally:
             if original_allowed is None:
                 os.environ.pop("MCP_ALLOWED_PRIVATE_URLS", None)
@@ -282,6 +267,25 @@ while True:
         self.assertEqual(initialized["protocolVersion"], "2024-11-05")
         self.assertEqual(tools[0]["name"], "echo")
         self.assertEqual(result["content"][0]["json"], {"echo": True})
+
+    def test_stdio_client_times_out_when_server_never_responds(self) -> None:
+        server_code = r"""
+import time
+time.sleep(60)
+"""
+
+        async def run_client() -> None:
+            client = StdioMcpClient(
+                [sys.executable, "-c", server_code],
+                timeout_seconds=0.1,
+            )
+            try:
+                await client.initialize()
+            finally:
+                await client.close()
+
+        with self.assertRaises(McpClientError):
+            asyncio.run(run_client())
 
 
 if __name__ == "__main__":

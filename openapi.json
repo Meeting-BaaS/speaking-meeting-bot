@@ -245,7 +245,8 @@
                 "items": {
                   "type": "string"
                 },
-                "type": "array"
+                "type": "array",
+                "maxItems": 10
               },
               {
                 "type": "null"

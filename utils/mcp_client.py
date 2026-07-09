@@ -120,8 +120,8 @@ def _is_private_ip(value: str) -> bool:
     )
 
 
-def validate_mcp_http_url(url: str) -> list[str] | None:
-    """Block obvious SSRF targets unless explicitly allowed."""
+async def validate_mcp_http_url(url: str) -> list[str] | None:
+    """Block SSRF targets and return DNS answers pinned into aiohttp."""
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise McpClientError(f"Invalid MCP HTTP URL: {url}")
@@ -139,7 +139,8 @@ def validate_mcp_http_url(url: str) -> list[str] | None:
 
     try:
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        loop = asyncio.get_running_loop()
+        addresses = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as e:
         raise McpClientError(f"Could not resolve MCP HTTP host '{host}': {e}") from e
 
@@ -169,41 +170,6 @@ def build_pinned_mcp_connector(
         resolver=_PinnedResolver({parsed.hostname: resolved_ips}),
         ttl_dns_cache=0,
     )
-
-
-def _response_peer_ip(response: Any) -> str | None:
-    connection = getattr(response, "connection", None)
-    transport = getattr(connection, "transport", None)
-    if transport is None:
-        protocol = getattr(response, "_protocol", None)
-        transport = getattr(protocol, "transport", None)
-    if transport is None:
-        return None
-
-    peername = transport.get_extra_info("peername")
-    if isinstance(peername, tuple) and peername:
-        return str(peername[0])
-    if isinstance(peername, str):
-        return peername
-    return None
-
-
-def validate_mcp_response_peer(url: str, response: Any) -> None:
-    """Re-check the connected peer to reduce DNS-rebinding exposure."""
-    if _private_mcp_url_bypass_enabled(url):
-        return
-
-    peer_ip = _response_peer_ip(response)
-    if not peer_ip:
-        raise McpClientError(f"MCP HTTP URL peer address could not be verified: {url}")
-
-    try:
-        if _is_private_ip(peer_ip):
-            raise McpClientError(
-                f"MCP HTTP URL connected to private or local address: {peer_ip}"
-            )
-    except ValueError:
-        raise McpClientError(f"MCP HTTP peer address is invalid: {peer_ip}") from None
 
 
 def split_mcp_runtime_headers(mcp_config: Any) -> tuple[dict[str, Any], list[dict[str, str] | None]]:
@@ -451,6 +417,7 @@ class StdioMcpClient:
     cwd: str | None = None
     client_name: str = "speaking-meeting-bot"
     client_version: str = "0.1.0"
+    timeout_seconds: float = 12
     _state: _JsonRpcState = field(default_factory=_JsonRpcState, init=False)
     _process: asyncio.subprocess.Process | None = field(default=None, init=False)
 
@@ -527,13 +494,29 @@ class StdioMcpClient:
         assert self._process and self._process.stdin and self._process.stdout
         message = self._state.request(method, params)
         expected_id = message["id"]
-        self._process.stdin.write(encode_stdio_message(message))
-        await self._process.stdin.drain()
+        try:
+            self._process.stdin.write(encode_stdio_message(message))
+            await asyncio.wait_for(
+                self._process.stdin.drain(),
+                timeout=self.timeout_seconds,
+            )
+            response = await asyncio.wait_for(
+                self._read_matching_response(expected_id),
+                timeout=self.timeout_seconds,
+            )
+        except asyncio.TimeoutError as e:
+            await self.close()
+            raise McpClientError(
+                f"MCP stdio request timed out after {self.timeout_seconds}s: {method}"
+            ) from e
+        return _extract_result(response)
+
+    async def _read_matching_response(self, expected_id: int) -> dict[str, Any]:
+        assert self._process and self._process.stdout
         while True:
             response = await read_stdio_message(self._process.stdout)
             if response.get("id") == expected_id:
-                break
-        return _extract_result(response)
+                return response
 
     async def _notification(
         self,
@@ -543,7 +526,16 @@ class StdioMcpClient:
         await self.start()
         assert self._process and self._process.stdin
         self._process.stdin.write(encode_stdio_message(self._state.notification(method, params)))
-        await self._process.stdin.drain()
+        try:
+            await asyncio.wait_for(
+                self._process.stdin.drain(),
+                timeout=self.timeout_seconds,
+            )
+        except asyncio.TimeoutError as e:
+            await self.close()
+            raise McpClientError(
+                f"MCP stdio notification timed out after {self.timeout_seconds}s: {method}"
+            ) from e
 
 
 @dataclass
@@ -607,7 +599,7 @@ class HttpMcpClient:
 
     async def _post(self, message: Mapping[str, Any]) -> dict[str, Any]:
         aiohttp_module = _get_aiohttp()
-        resolved_ips = validate_mcp_http_url(self.url)
+        resolved_ips = await validate_mcp_http_url(self.url)
         request_headers = {
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
@@ -629,7 +621,6 @@ class HttpMcpClient:
                     headers=request_headers,
                     allow_redirects=False,
                 ) as response:
-                    validate_mcp_response_peer(self.url, response)
                     if SESSION_HEADER in response.headers:
                         self._session_id = response.headers[SESSION_HEADER]
                     if 300 <= response.status < 400:

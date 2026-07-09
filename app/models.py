@@ -1,7 +1,9 @@
 """Data models for the Speaking Meeting Bot API."""
 
 from datetime import datetime
+from ipaddress import ip_address
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -20,6 +22,34 @@ def _validate_meeting_url(value: str) -> str:
         raise ValueError("meeting_url must include a valid host")
 
     return normalized
+
+
+def _is_private_or_local_http_url(value: str) -> bool:
+    parsed = urlparse(value)
+    if parsed.scheme != "http" or not parsed.hostname:
+        return False
+
+    host = parsed.hostname
+    if host == "localhost":
+        return True
+    try:
+        parsed_ip = ip_address(host)
+    except ValueError:
+        return False
+    return (
+        parsed_ip.is_private
+        or parsed_ip.is_loopback
+        or parsed_ip.is_link_local
+        or parsed_ip.is_unspecified
+    )
+
+
+def _validate_header_transport(url: str | None, headers: dict[str, str] | None) -> None:
+    if not url or not headers or not url.startswith("http://"):
+        return
+    if _is_private_or_local_http_url(url):
+        return
+    raise ValueError("headers require https:// unless the URL is private or local")
 
 
 class TurnConfig(BaseModel):
@@ -103,6 +133,7 @@ class PromptDataSource(BaseModel):
             raise ValueError("url is not allowed when prompt data source type is text")
         if self.type == "url" and self.text:
             raise ValueError("text is not allowed when prompt data source type is url")
+        _validate_header_transport(self.url, self.headers)
         return self
 
 
@@ -176,6 +207,7 @@ class MCPServerConfig(BaseModel):
                 raise ValueError(
                     "transport is required when MCP connection details are supplied"
                 )
+        _validate_header_transport(self.url, self.headers)
         return self
 
 
@@ -247,6 +279,7 @@ class BotRequest(BaseModel):
     bot_name: str = Field("", description="Name to display for the bot in the meeting")
     personas: list[str] | None = Field(
         None,
+        max_length=10,
         description="List of persona names to use. The first available will be selected.",
     )
     bot_image: str | None = None

@@ -7,15 +7,37 @@ import time
 from typing import Any, Dict
 import json
 import threading
+from contextlib import suppress
 
 from meetingbaas_pipecat.utils.logger import logger
 from utils.runtime import get_state_dir
 
 PIPECAT_PROCESSES: Dict[str, subprocess.Popen] = {}
+PERSONA_PAYLOAD_TTL_SECONDS = 3600
 
 def stream_output(pipe, prefix):
     for line in iter(pipe.readline, ''):
         print(f"{prefix} {line.strip()}")
+
+
+def sweep_stale_persona_payloads(payload_dir: str, ttl_seconds: int = PERSONA_PAYLOAD_TTL_SECONDS) -> None:
+    """Remove stale persona payload files from failed or abandoned child starts."""
+    cutoff = time.time() - ttl_seconds
+    try:
+        filenames = os.listdir(payload_dir)
+    except OSError:
+        return
+
+    for filename in filenames:
+        if not filename.endswith(".json"):
+            continue
+        path = os.path.join(payload_dir, filename)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass
+
 
 def start_pipecat_process(
     client_id: str,
@@ -49,6 +71,7 @@ def start_pipecat_process(
 
     payload_dir = os.path.join(get_state_dir(), "persona_payloads")
     os.makedirs(payload_dir, exist_ok=True)
+    sweep_stale_persona_payloads(payload_dir)
     persona_data_path = os.path.join(payload_dir, f"{client_id}.json")
     payload_fd = os.open(
         persona_data_path,
@@ -118,10 +141,8 @@ def start_pipecat_process(
             text=True,  # Capture output as text
         )
     except Exception:
-        try:
+        with suppress(OSError):
             os.remove(persona_data_path)
-        except OSError:
-            pass
         raise
 
     # Start threads to print output

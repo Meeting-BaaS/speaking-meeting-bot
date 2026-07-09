@@ -1119,16 +1119,17 @@ def cli() -> None:
         try:
             with open(args.persona_data_file, "r") as f:
                 persona_data = json.load(f)
-            try:
-                os.remove(args.persona_data_file)
-            except OSError:
-                pass
             if persona_name == "Meeting Bot" and persona_data.get("path"):
                 persona_name = os.path.basename(persona_data["path"])
                 print(f"[STARTUP] Extracted persona name from path: {persona_name}")
         except Exception as e:
             print(f"Error parsing persona data file: {e}")
             persona_data = None
+        finally:
+            try:
+                os.remove(args.persona_data_file)
+            except OSError:
+                pass
     elif args.persona_data_json:
         try:
             persona_data = json.loads(args.persona_data_json)

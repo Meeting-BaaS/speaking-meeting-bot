@@ -16,8 +16,10 @@ if ValidationError is not None:
     sys.modules["models"] = models
     spec.loader.exec_module(models)
     MCPServerConfig = models.MCPServerConfig
+    PromptDataSource = models.PromptDataSource
 else:
     MCPServerConfig = None
+    PromptDataSource = None
 
 
 class MCPServerConfigTest(unittest.TestCase):
@@ -73,6 +75,31 @@ class MCPServerConfigTest(unittest.TestCase):
     def test_connection_details_require_transport(self) -> None:
         with self.assertRaises(ValidationError):
             MCPServerConfig(name="crm", url="https://mcp.example.com")
+
+    def test_header_bearing_http_urls_must_be_local_or_private(self) -> None:
+        with self.assertRaises(ValidationError):
+            MCPServerConfig(
+                name="crm",
+                transport="streamable_http",
+                url="http://mcp.example.com/mcp",
+                headers={"Authorization": "Bearer token"},
+            )
+
+        allowed = MCPServerConfig(
+            name="drive",
+            transport="streamable_http",
+            url="http://127.0.0.1:8123/mcp",
+            headers={"Authorization": "Bearer token"},
+        )
+        self.assertEqual(allowed.url, "http://127.0.0.1:8123/mcp")
+
+        with self.assertRaises(ValidationError):
+            PromptDataSource(
+                name="notes",
+                type="url",
+                url="http://example.com/notes.txt",
+                headers={"Authorization": "Bearer token"},
+            )
 
 if __name__ == "__main__":
     unittest.main()

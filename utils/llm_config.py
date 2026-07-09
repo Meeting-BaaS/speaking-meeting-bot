@@ -20,6 +20,15 @@ PROVIDER_KEY_ENVS = {
 }
 
 
+def validate_llm_provider(provider: str) -> None:
+    """Raise ValueError when provider is not supported."""
+    if provider not in SUPPORTED_LLM_PROVIDERS:
+        raise ValueError(
+            f"Unsupported LLM provider {provider!r}. Expected one of: "
+            f"{', '.join(sorted(SUPPORTED_LLM_PROVIDERS))}"
+        )
+
+
 def clean_string(value: Any) -> str | None:
     if value is None:
         return None
@@ -28,7 +37,11 @@ def clean_string(value: Any) -> str | None:
 
 
 def resolve_llm_provider(persona: Mapping[str, Any] | None) -> str:
-    """Resolve LLM provider with request data taking precedence over env."""
+    """Resolve LLM provider with request data taking precedence over env.
+
+    Raises:
+        ValueError: If the resolved provider is not supported.
+    """
     persona = persona or {}
     provider = clean_string(persona.get("llm_provider")) or clean_string(
         os.getenv("LLM_PROVIDER")
@@ -45,16 +58,13 @@ def resolve_llm_provider(persona: Mapping[str, Any] | None) -> str:
         "openai": "openai",
     }
     provider = aliases.get(provider, provider)
-    if provider not in SUPPORTED_LLM_PROVIDERS:
-        raise ValueError(
-            f"Unsupported LLM provider {provider!r}. Expected one of: "
-            f"{', '.join(sorted(SUPPORTED_LLM_PROVIDERS))}"
-        )
+    validate_llm_provider(provider)
     return provider
 
 
 def resolve_llm_model(provider: str, persona: Mapping[str, Any] | None) -> str:
     """Resolve provider model with request > provider env > generic env > default."""
+    validate_llm_provider(provider)
     persona = persona or {}
     request_model = clean_string(persona.get("llm_model"))
     if request_model:
@@ -78,7 +88,11 @@ def resolve_llm_model(provider: str, persona: Mapping[str, Any] | None) -> str:
 
 
 def resolve_openai_api_surface() -> str:
-    """Resolve OpenAI API surface. Responses is preferred for newest models."""
+    """Resolve OpenAI API surface. Responses is preferred for newest models.
+
+    Raises:
+        ValueError: If OPENAI_API_SURFACE is not supported.
+    """
     surface = (clean_string(os.getenv("OPENAI_API_SURFACE")) or "responses").lower()
     surface = surface.replace("-", "_")
     aliases = {
@@ -99,6 +113,7 @@ def resolve_openai_api_surface() -> str:
 
 def missing_llm_provider_credential(provider: str) -> str | None:
     """Return the missing provider key env var, or None when configured."""
+    validate_llm_provider(provider)
     key_env = PROVIDER_KEY_ENVS[provider]
     if clean_string(os.getenv(key_env)):
         return None

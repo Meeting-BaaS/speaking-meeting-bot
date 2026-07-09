@@ -1,5 +1,6 @@
 """Load and format external prompt context under a token budget."""
 
+import asyncio
 import math
 import os
 import socket
@@ -110,7 +111,7 @@ async def _fetch_url_source(source: Any) -> str:
     import aiohttp
 
     url = _get(source, "url")
-    resolved_ips = _validate_fetch_url(url)
+    resolved_ips = await _validate_fetch_url(url)
     headers = _get(source, "headers") or {}
     max_bytes = int(os.getenv("PROMPT_DATA_SOURCE_MAX_BYTES", DEFAULT_SOURCE_MAX_BYTES))
 
@@ -132,7 +133,6 @@ async def _fetch_url_source(source: Any) -> str:
                         f"Prompt data source '{url}' returned HTTP {resp.status}",
                         status_code=502,
                     )
-                _validate_response_peer(url, resp)
                 body = await resp.content.read(max_bytes + 1)
     except PromptContextError:
         raise
@@ -172,23 +172,6 @@ def _build_pinned_connector(
     )
 
 
-def _response_peer_ip(response: Any) -> str | None:
-    connection = getattr(response, "connection", None)
-    transport = getattr(connection, "transport", None)
-    if transport is None:
-        protocol = getattr(response, "_protocol", None)
-        transport = getattr(protocol, "transport", None)
-    if transport is None:
-        return None
-
-    peername = transport.get_extra_info("peername")
-    if isinstance(peername, tuple) and peername:
-        return str(peername[0])
-    if isinstance(peername, str):
-        return peername
-    return None
-
-
 def _is_private_ip(value: str) -> bool:
     parsed = ip_address(value)
     return (
@@ -201,33 +184,8 @@ def _is_private_ip(value: str) -> bool:
     )
 
 
-def _validate_response_peer(url: str, response: Any) -> None:
-    """Re-check the connected peer to reduce DNS-rebinding exposure."""
-    if _private_urls_allowed():
-        return
-
-    peer_ip = _response_peer_ip(response)
-    if not peer_ip:
-        raise PromptContextError(
-            f"Prompt data source '{url}' peer address could not be verified",
-            status_code=502,
-        )
-
-    try:
-        if _is_private_ip(peer_ip):
-            raise PromptContextError(
-                f"Prompt data source '{url}' connected to private or local address",
-                status_code=400,
-            )
-    except ValueError:
-        raise PromptContextError(
-            f"Prompt data source '{url}' connected to an invalid peer address",
-            status_code=400,
-        ) from None
-
-
-def _validate_fetch_url(url: str) -> list[str] | None:
-    """Block obvious SSRF targets unless explicitly allowed."""
+async def _validate_fetch_url(url: str) -> list[str] | None:
+    """Block SSRF targets and return DNS answers pinned into aiohttp."""
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise PromptContextError(
@@ -251,7 +209,8 @@ def _validate_fetch_url(url: str) -> list[str] | None:
 
     try:
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        loop = asyncio.get_running_loop()
+        addresses = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as e:
         raise PromptContextError(
             f"Could not resolve prompt data source host '{host}': {e}",
