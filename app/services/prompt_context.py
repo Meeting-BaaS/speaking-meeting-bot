@@ -185,7 +185,12 @@ def _is_private_ip(value: str) -> bool:
 
 
 async def _validate_fetch_url(url: str) -> list[str] | None:
-    """Block SSRF targets and return DNS answers pinned into aiohttp."""
+    """Block SSRF targets and return DNS answers pinned into aiohttp.
+
+    Raises:
+        PromptContextError: If the URL is invalid, private/local, unresolved,
+            or resolves to a private/local address.
+    """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise PromptContextError(

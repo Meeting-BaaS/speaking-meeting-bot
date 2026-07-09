@@ -63,7 +63,11 @@ def resolve_llm_provider(persona: Mapping[str, Any] | None) -> str:
 
 
 def resolve_llm_model(provider: str, persona: Mapping[str, Any] | None) -> str:
-    """Resolve provider model with request > provider env > generic env > default."""
+    """Resolve provider model with request > provider env > generic env > default.
+
+    Raises:
+        ValueError: If provider is not supported.
+    """
     validate_llm_provider(provider)
     persona = persona or {}
     request_model = clean_string(persona.get("llm_model"))
@@ -112,7 +116,11 @@ def resolve_openai_api_surface() -> str:
 
 
 def missing_llm_provider_credential(provider: str) -> str | None:
-    """Return the missing provider key env var, or None when configured."""
+    """Return the missing provider key env var, or None when configured.
+
+    Raises:
+        ValueError: If provider is not supported.
+    """
     validate_llm_provider(provider)
     key_env = PROVIDER_KEY_ENVS[provider]
     if clean_string(os.getenv(key_env)):

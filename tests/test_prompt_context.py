@@ -111,8 +111,13 @@ class PromptContextTest(unittest.TestCase):
             ClientSession=FakeSession,
             ClientTimeout=lambda total: {"total": total},
         )
+        async def fake_validate_fetch_url(url):
+            return ["93.184.216.34"]
+
         original_aiohttp = sys.modules.get("aiohttp")
         sys.modules["aiohttp"] = fake_aiohttp
+        original_validate_fetch_url = prompt_context._validate_fetch_url
+        prompt_context._validate_fetch_url = fake_validate_fetch_url
         try:
             with self.assertRaises(PromptContextError):
                 asyncio.run(
@@ -129,6 +134,7 @@ class PromptContextTest(unittest.TestCase):
                 sys.modules.pop("aiohttp", None)
             else:
                 sys.modules["aiohttp"] = original_aiohttp
+            prompt_context._validate_fetch_url = original_validate_fetch_url
 
         self.assertEqual(calls[0]["allow_redirects"], False)
 
