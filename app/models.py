@@ -107,6 +107,7 @@ class PromptDataSource(BaseModel):
 
 
 MCPTransport = Literal["http", "streamable_http", "sse"]
+LLMProvider = Literal["openai", "anthropic", "zai"]
 
 
 class MCPServerConfig(BaseModel):
@@ -211,6 +212,8 @@ class BotRequest(BaseModel):
                 "extra": {"company": "ACME Corp", "meeting_purpose": "Weekly sync"},
                 "websocket_url": "wss://bots.example.com",
                 "prompt_data_token_limit": 3000,
+                "llm_provider": "anthropic",
+                "llm_model": "claude-opus-4-8",
                 "prompt_data_sources": [
                     {
                         "name": "CRM account notes",
@@ -273,6 +276,16 @@ class BotRequest(BaseModel):
     mcp: Optional[MCPConfig] = Field(
         None,
         description="MCP server/tool metadata and optional live connection details",
+    )
+    llm_provider: Optional[LLMProvider] = Field(
+        None,
+        description="LLM provider for this bot. Defaults to LLM_PROVIDER, then openai.",
+    )
+    llm_model: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=120,
+        description="Provider model for this bot. Defaults to provider-specific env vars.",
     )
     speech_speed: Optional[float] = Field(
         None,

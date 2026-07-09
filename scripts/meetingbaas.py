@@ -45,6 +45,13 @@ from utils.mcp_client import (
     build_mcp_tool_name,
 )
 from utils.runtime import get_state_dir
+from utils.llm_config import (
+    DEFAULT_ZAI_BASE_URL,
+    clean_string,
+    resolve_llm_model,
+    resolve_llm_provider,
+    resolve_openai_api_surface,
+)
 from config.prompts import DEFAULT_SYSTEM_PROMPT
 from meetingbaas_pipecat.utils.logger import configure_logger
 import sys
@@ -73,6 +80,66 @@ def log_and_flush(level, msg):
     logger.log(level, msg)
     for h in logger.handlers:
         h.flush()
+
+def build_llm_service(persona: dict | None):
+    """Build a Pipecat LLM service for OpenAI, Anthropic, or OpenAI-compatible Z.ai."""
+    provider = resolve_llm_provider(persona)
+    model = resolve_llm_model(provider, persona)
+    api_surface = None
+
+    if provider == "anthropic":
+        api_key = clean_string(os.getenv("ANTHROPIC_API_KEY"))
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic")
+
+        from pipecat.services.anthropic.llm import AnthropicLLMService
+
+        llm = AnthropicLLMService(
+            api_key=api_key,
+            model=model,
+            run_in_parallel=False,
+        )
+    elif provider == "zai":
+        api_key = clean_string(os.getenv("ZAI_API_KEY"))
+        if not api_key:
+            raise RuntimeError("ZAI_API_KEY is required when LLM_PROVIDER=zai")
+
+        base_url = clean_string(os.getenv("ZAI_BASE_URL")) or DEFAULT_ZAI_BASE_URL
+        llm = OpenAILLMService(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            run_in_parallel=False,
+        )
+    else:
+        api_key = clean_string(os.getenv("OPENAI_API_KEY"))
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+
+        api_surface = resolve_openai_api_surface()
+        service_tier = clean_string(os.getenv("OPENAI_SERVICE_TIER"))
+        if api_surface == "responses":
+            from pipecat.services.openai.responses.llm import OpenAIResponsesLLMService
+
+            llm = OpenAIResponsesLLMService(
+                api_key=api_key,
+                service_tier=service_tier,
+                settings=OpenAIResponsesLLMService.Settings(model=model),
+                run_in_parallel=False,
+            )
+        else:
+            llm = OpenAILLMService(
+                api_key=api_key,
+                model=model,
+                service_tier=service_tier,
+                run_in_parallel=False,
+            )
+
+    surface_detail = f", api_surface={api_surface}" if api_surface else ""
+    log_and_flush(
+        logging.INFO, f"[LLM] Initialized provider={provider}, model={model}{surface_detail}"
+    )
+    return llm
 
 
 def _coerce_float(value, default=None):
@@ -690,12 +757,7 @@ async def main(
         f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}, speed={tts_speed}, speed_applied={speed_applied}",
     )
 
-    llm = OpenAILLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        model="gpt-4.1",
-        run_in_parallel=False,
-    )
-    log_and_flush(logging.INFO, "[LLM] OpenAI LLM initialized with model=gpt-4.1")
+    llm = build_llm_service(persona)
 
     mcp_manager = None
     if enable_tools:

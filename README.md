@@ -305,6 +305,16 @@ context is loaded before the Pipecat process starts and capped by
 localhost and private-network targets by default; set
 `PROMPT_DATA_ALLOW_PRIVATE_URLS=true` only in trusted deployments.
 
+You can also select the bot LLM per request with `llm_provider` and
+`llm_model`. Supported providers are `openai`, `anthropic`, and `zai`.
+Provider credentials and base URLs are server-side environment variables only:
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ZAI_API_KEY`, and optional
+`ZAI_BASE_URL`. OpenAI defaults to Pipecat's Responses API service for newest
+models; set `OPENAI_API_SURFACE=chat` to use the older Chat Completions bridge.
+The Z.ai integration uses the OpenAI-compatible Chat Completions bridge;
+Anthropic uses Pipecat's native Claude bridge. The API rejects unconfigured
+providers before creating the upstream MeetingBaaS bot.
+
 MCP servers are live-query capable only when their config is connectable.
 `http`, `streamable_http`, and `sse` servers require `transport`, `url`, and
 optional `headers`. Local process `stdio` MCP is intentionally not accepted by
@@ -325,6 +335,8 @@ curl -X POST http://localhost:${PORT}/bots \
   -d '{
     "meeting_url": "https://meet.google.com/xxx-yyyy-zzz",
     "personas": ["account_executive"],
+    "llm_provider": "anthropic",
+    "llm_model": "claude-opus-4-8",
     "prompt_data_token_limit": 4000,
     "prompt_data_sources": [
       {
@@ -370,6 +382,17 @@ curl -X POST http://localhost:${PORT}/bots \
 
 `speech_speed` overrides `CARTESIA_TTS_SPEED`, `TTS_SPEED`, or
 `SPEECH_SPEED`. The Cartesia runner clamps speed to `0.6..1.5`.
+
+LLM defaults are resolved as request value, then provider-specific env, then
+generic `LLM_MODEL`, then service default:
+
+- OpenAI: `OPENAI_MODEL`, default `gpt-5.5`. `OPENAI_API_SURFACE` defaults to
+  `responses`; set it to `chat` for compatibility with older OpenAI-compatible
+  paths. `OPENAI_SERVICE_TIER` is passed through when set.
+- Anthropic: `ANTHROPIC_MODEL`, default `claude-opus-4-8`. Low-latency example:
+  `claude-haiku-4-5`.
+- Z.ai: `ZAI_MODEL`, default `glm-5.2`; `ZAI_BASE_URL` defaults to
+  `https://api.z.ai/api/paas/v4/`.
 
 ### OpenAPI Snapshots
 

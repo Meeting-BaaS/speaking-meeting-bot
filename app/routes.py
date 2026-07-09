@@ -26,6 +26,10 @@ from app.services.prompt_context import (
     load_prompt_context,
     merge_context_blocks,
 )
+from utils.llm_config import (
+    missing_llm_provider_credential,
+    resolve_llm_provider,
+)
 from config.persona_utils import persona_manager
 from core.connection import MEETING_DETAILS, PIPECAT_PROCESSES, registry
 from core.process import start_pipecat_process, terminate_process_gracefully
@@ -249,6 +253,34 @@ async def join_meeting(request: BotRequest, client_request: Request):
 
     if request.mcp:
         resolved_persona_data["mcp"] = request.mcp.model_dump(exclude_none=True)
+
+    if request.llm_provider:
+        resolved_persona_data["llm_provider"] = request.llm_provider
+
+    if request.llm_model:
+        resolved_persona_data["llm_model"] = request.llm_model
+
+    try:
+        resolved_llm_provider = resolve_llm_provider(resolved_persona_data)
+    except ValueError as e:
+        return JSONResponse(
+            content={"message": str(e), "status": "error"},
+            status_code=503,
+        )
+
+    missing_key_env = missing_llm_provider_credential(resolved_llm_provider)
+    if missing_key_env:
+        status_code = 400 if request.llm_provider else 503
+        return JSONResponse(
+            content={
+                "message": (
+                    f"LLM provider '{resolved_llm_provider}' is not configured "
+                    f"on this server; missing {missing_key_env}"
+                ),
+                "status": "error",
+            },
+            status_code=status_code,
+        )
 
     if request.speech_speed is not None:
         resolved_persona_data["speech_speed"] = request.speech_speed

@@ -14,7 +14,7 @@ api = "app.main:start_server"
 [tool.poetry.dependencies]
 python = "^3.11"
 python-dotenv = "^1.0.1"
-pipecat-ai = {extras = ["cartesia", "daily", "deepgram", "openai", "silero", "websocket"], version = "^1.0.0"}
+pipecat-ai = {extras = ["anthropic", "cartesia", "daily", "deepgram", "openai", "silero", "websocket"], version = "^1.0.0"}
 ruff = "^0.7.3"
 pytz = "^2024.2"
 aiohttp = "^3.10.10"

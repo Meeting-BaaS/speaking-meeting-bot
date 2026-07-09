@@ -362,6 +362,37 @@
             ],
             "description": "MCP server/tool metadata and optional live connection details"
           },
+          "llm_provider": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "openai",
+                  "anthropic",
+                  "zai"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Provider",
+            "description": "LLM provider for this bot. Defaults to LLM_PROVIDER, then openai."
+          },
+          "llm_model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 120,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Model",
+            "description": "Provider model for this bot. Defaults to provider-specific env vars."
+          },
           "speech_speed": {
             "anyOf": [
               {
@@ -393,6 +424,8 @@
             "company": "ACME Corp",
             "meeting_purpose": "Weekly sync"
           },
+          "llm_model": "claude-opus-4-8",
+          "llm_provider": "anthropic",
           "mcp": {
             "servers": [
               {
