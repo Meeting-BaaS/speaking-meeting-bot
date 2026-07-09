@@ -19,6 +19,7 @@ load_prompt_context = prompt_context.load_prompt_context
 truncate_to_token_limit = prompt_context.truncate_to_token_limit
 PromptContextError = prompt_context.PromptContextError
 _validate_fetch_url = prompt_context._validate_fetch_url
+_validate_response_peer = prompt_context._validate_response_peer
 _fetch_url_source = prompt_context._fetch_url_source
 
 
@@ -73,6 +74,20 @@ class PromptContextTest(unittest.TestCase):
     def test_private_prompt_urls_blocked_by_default(self) -> None:
         with self.assertRaises(PromptContextError):
             _validate_fetch_url("http://127.0.0.1:8000/notes.md")
+
+    def test_prompt_response_peer_blocks_private_ip(self) -> None:
+        class FakeTransport:
+            def get_extra_info(self, name):
+                if name == "peername":
+                    return ("127.0.0.1", 443)
+                return None
+
+        response = SimpleNamespace(
+            _protocol=SimpleNamespace(transport=FakeTransport()),
+        )
+
+        with self.assertRaises(PromptContextError):
+            _validate_response_peer("https://example.com/context.txt", response)
 
     def test_prompt_url_redirects_are_not_followed(self) -> None:
         calls = []

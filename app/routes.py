@@ -30,6 +30,7 @@ from utils.llm_config import (
     missing_llm_provider_credential,
     resolve_llm_provider,
 )
+from utils.mcp_client import split_mcp_runtime_headers
 from config.persona_utils import persona_manager
 from core.connection import MEETING_DETAILS, PIPECAT_PROCESSES, registry
 from core.process import start_pipecat_process, terminate_process_gracefully
@@ -251,8 +252,10 @@ async def join_meeting(request: BotRequest, client_request: Request):
             f"estimated {prompt_context.estimated_tokens} tokens"
         )
 
+    mcp_runtime_headers = []
     if request.mcp:
-        resolved_persona_data["mcp"] = request.mcp.model_dump(exclude_none=True)
+        mcp_payload, mcp_runtime_headers = split_mcp_runtime_headers(request.mcp)
+        resolved_persona_data["mcp"] = mcp_payload
 
     if request.llm_provider:
         resolved_persona_data["llm_provider"] = request.llm_provider
@@ -291,6 +294,9 @@ async def join_meeting(request: BotRequest, client_request: Request):
     # connects, and dynamic (prompt-derived) personas exist only in this dict —
     # they are never written to config/personas, so the child cannot re-resolve
     # them from disk.
+    # Index 6 carries MCP headers in memory only. They must not be serialized
+    # into the persona payload file, but websocket fallback spawns still need
+    # them to authenticate to header-protected MCP servers.
     MEETING_DETAILS[bot_client_id] = (
         request.meeting_url,
         resolved_persona_data.get("name", persona_name_for_logging),  # Use display name from resolved data
@@ -298,6 +304,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
         request.enable_tools,
         streaming_audio_frequency,
         resolved_persona_data,
+        mcp_runtime_headers,
     )
 
     # Get image URL: Prioritize request.bot_image > persona_data.image > generate_image (if custom prompt and details derived)
@@ -435,6 +442,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
             enable_tools=request.enable_tools,
             api_key=api_key,
             meetingbaas_bot_id=meetingbaas_bot_id,
+            mcp_runtime_headers=mcp_runtime_headers,
         )
 
         # Store the process for later termination

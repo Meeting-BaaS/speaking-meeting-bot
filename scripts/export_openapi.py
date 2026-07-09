@@ -15,6 +15,7 @@ from app.main import create_app  # noqa: E402
 
 
 def main() -> None:
+    """Generate create_app().openapi(), write all OUTPUTS, and print each path."""
     schema = create_app().openapi()
     serialized = json.dumps(schema, indent=2) + "\n"
     for output in OUTPUTS:

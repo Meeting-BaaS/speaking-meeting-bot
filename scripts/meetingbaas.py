@@ -2,7 +2,7 @@ import asyncio
 import os
 import argparse
 import inspect
-import json as jsonlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -42,6 +42,7 @@ from utils.mcp_client import (
     HttpMcpClient,
     McpClientError,
     StdioMcpClient,
+    apply_mcp_runtime_headers,
     build_mcp_tool_name,
 )
 from utils.runtime import get_state_dir
@@ -56,7 +57,6 @@ from config.prompts import DEFAULT_SYSTEM_PROMPT
 from meetingbaas_pipecat.utils.logger import configure_logger
 import sys
 import logging
-import json
 
 # Global transcript storage - will be saved to file for webhook to read
 TRANSCRIPT_DIR = os.path.join(get_state_dir(), "transcripts")
@@ -309,18 +309,18 @@ def _tool_result_to_text(result) -> str:
                 if item.get("type") == "text" and item.get("text") is not None:
                     parts.append(str(item["text"]))
                 elif item.get("type") == "json" and item.get("json") is not None:
-                    parts.append(jsonlib.dumps(item["json"], ensure_ascii=False))
+                    parts.append(json.dumps(item["json"], ensure_ascii=False))
                 elif item.get("type") == "data" and item.get("data") is not None:
-                    parts.append(jsonlib.dumps(item["data"], ensure_ascii=False))
+                    parts.append(json.dumps(item["data"], ensure_ascii=False))
                 elif item.get("type") == "resource" and item.get("resource"):
-                    parts.append(jsonlib.dumps(item["resource"], ensure_ascii=False))
+                    parts.append(json.dumps(item["resource"], ensure_ascii=False))
                 else:
-                    parts.append(jsonlib.dumps(item, ensure_ascii=False))
+                    parts.append(json.dumps(item, ensure_ascii=False))
             if parts:
                 return "\n".join(parts)
         if "structuredContent" in result:
-            return jsonlib.dumps(result["structuredContent"], ensure_ascii=False)
-    return jsonlib.dumps(result, ensure_ascii=False, default=str)
+            return json.dumps(result["structuredContent"], ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False, default=str)
 
 
 @dataclass
@@ -379,6 +379,7 @@ class LiveMCPManager:
             except Exception as exc:
                 await client.close()
                 if server.get("required"):
+                    await self.close()
                     raise
                 log_and_flush(
                     logging.WARNING,
@@ -1138,6 +1139,15 @@ def cli() -> None:
         except Exception as e:
             print(f"Error parsing persona data JSON: {e}")
             persona_data = None
+
+    if persona_data:
+        runtime_headers_json = os.getenv("MCP_RUNTIME_HEADERS_JSON")
+        if runtime_headers_json:
+            try:
+                runtime_headers = json.loads(runtime_headers_json)
+                apply_mcp_runtime_headers(persona_data.get("mcp"), runtime_headers)
+            except Exception as e:
+                print(f"Error applying MCP runtime headers: {e}")
 
     # Run the bot
     asyncio.run(

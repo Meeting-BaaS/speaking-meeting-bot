@@ -1,7 +1,7 @@
 """Data models for the Speaking Meeting Bot API."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -33,18 +33,18 @@ class TurnConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    confidence: Optional[float] = Field(
+    confidence: float | None = Field(
         None, ge=0.0, le=1.0, description="VAD speech confidence threshold"
     )
-    start_secs: Optional[float] = Field(
+    start_secs: float | None = Field(
         None, ge=0.05, le=5.0,
         description="Sustained speech (seconds) before a turn registers",
     )
-    stop_secs: Optional[float] = Field(
+    stop_secs: float | None = Field(
         None, ge=0.1, le=10.0,
         description="Silence (seconds) before the bot considers the speaker done and replies",
     )
-    min_volume: Optional[float] = Field(
+    min_volume: float | None = Field(
         None, ge=0.0, le=1.0, description="Minimum input volume for VAD"
     )
 
@@ -64,19 +64,19 @@ class PromptDataSource(BaseModel):
         ...,
         description="Whether to load inline text or fetch an external HTTP(S) URL",
     )
-    text: Optional[str] = Field(
+    text: str | None = Field(
         None,
         description="Inline context. Required when type is text.",
     )
-    url: Optional[str] = Field(
+    url: str | None = Field(
         None,
         description="HTTP(S) URL to fetch. Required when type is url.",
     )
-    headers: Optional[Dict[str, str]] = Field(
+    headers: dict[str, str] | None = Field(
         None,
         description="Optional HTTP headers for URL sources. Avoid request-specific secrets unless needed.",
     )
-    token_limit: Optional[int] = Field(
+    token_limit: int | None = Field(
         None,
         ge=1,
         le=50_000,
@@ -85,7 +85,7 @@ class PromptDataSource(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def validate_url(cls, value: Optional[str]) -> Optional[str]:
+    def validate_url(cls, value: str | None) -> str | None:
         if value is None:
             return value
         normalized = value.strip()
@@ -120,35 +120,35 @@ class MCPServerConfig(BaseModel):
         True,
         description="Whether this server may be used. Disabled servers are documented but not connected.",
     )
-    url: Optional[str] = Field(
+    url: str | None = Field(
         None,
         description="Remote MCP server URL. Required for http, streamable_http, and sse transports.",
     )
-    headers: Optional[Dict[str, str]] = Field(
+    headers: dict[str, str] | None = Field(
         None,
         description="Optional HTTP headers for remote MCP servers. Use only when a server requires them.",
     )
-    transport: Optional[MCPTransport] = Field(
+    transport: MCPTransport | None = Field(
         None,
         description="Remote MCP transport. Omit for metadata-only servers that cannot execute tools.",
     )
-    tools: Optional[List[str]] = Field(
+    tools: list[str] | None = Field(
         None,
         max_length=50,
         description="Known tool names exposed by this MCP server",
     )
-    tool_allowlist: Optional[List[str]] = Field(
+    tool_allowlist: list[str] | None = Field(
         None,
         max_length=50,
         description="Optional allowlist of MCP tool names this bot may call from this server.",
     )
-    timeout_seconds: Optional[float] = Field(
+    timeout_seconds: float | None = Field(
         None,
         ge=0.1,
         le=300.0,
         description="Optional per-server connection/tool timeout in seconds.",
     )
-    instructions: Optional[str] = Field(
+    instructions: str | None = Field(
         None,
         max_length=4_000,
         description="Operator instructions or constraints for this MCP server",
@@ -156,7 +156,7 @@ class MCPServerConfig(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def validate_mcp_url(cls, value: Optional[str]) -> Optional[str]:
+    def validate_mcp_url(cls, value: str | None) -> str | None:
         if value is None:
             return value
         normalized = value.strip()
@@ -184,12 +184,12 @@ class MCPConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    servers: List[MCPServerConfig] = Field(
+    servers: list[MCPServerConfig] = Field(
         default_factory=list,
         max_length=10,
         description="MCP servers to document and optionally connect for tool calls",
     )
-    instructions: Optional[str] = Field(
+    instructions: str | None = Field(
         None,
         max_length=4_000,
         description="Global MCP usage instructions for the bot",
@@ -245,24 +245,24 @@ class BotRequest(BaseModel):
         description="URL of the Google Meet, Zoom or Microsoft Teams meeting to join",
     )
     bot_name: str = Field("", description="Name to display for the bot in the meeting")
-    personas: Optional[List[str]] = Field(
+    personas: list[str] | None = Field(
         None,
         description="List of persona names to use. The first available will be selected.",
     )
-    bot_image: Optional[str] = None
-    entry_message: Optional[str] = None
-    extra: Optional[Dict[str, Any]] = None
+    bot_image: str | None = None
+    entry_message: str | None = None
+    extra: dict[str, Any] | None = None
     enable_tools: bool = True
-    prompt: Optional[str] = None
-    websocket_url: Optional[str] = Field(
+    prompt: str | None = None
+    websocket_url: str | None = Field(
         None,
         description="Optional public WebSocket base URL override, e.g. wss://bot.example.com",
     )
-    turn_config: Optional[TurnConfig] = Field(
+    turn_config: TurnConfig | None = Field(
         None,
         description="Per-bot turn-taking tuning (VAD confidence/start_secs/stop_secs/min_volume)",
     )
-    prompt_data_sources: Optional[List[PromptDataSource]] = Field(
+    prompt_data_sources: list[PromptDataSource] | None = Field(
         None,
         max_length=10,
         description="External text or URL data sources to append to the bot prompt",
@@ -273,21 +273,21 @@ class BotRequest(BaseModel):
         le=50_000,
         description="Approximate total token cap for loaded prompt_data_sources. 0 disables loading.",
     )
-    mcp: Optional[MCPConfig] = Field(
+    mcp: MCPConfig | None = Field(
         None,
         description="MCP server/tool metadata and optional live connection details",
     )
-    llm_provider: Optional[LLMProvider] = Field(
+    llm_provider: LLMProvider | None = Field(
         None,
         description="LLM provider for this bot. Defaults to LLM_PROVIDER, then openai.",
     )
-    llm_model: Optional[str] = Field(
+    llm_model: str | None = Field(
         None,
         min_length=1,
         max_length=120,
         description="Provider model for this bot. Defaults to provider-specific env vars.",
     )
-    speech_speed: Optional[float] = Field(
+    speech_speed: float | None = Field(
         None,
         ge=0.5,
         le=2.0,
@@ -303,7 +303,7 @@ class BotRequest(BaseModel):
 
     @field_validator("websocket_url")
     @classmethod
-    def validate_websocket_url(cls, value: Optional[str]) -> Optional[str]:
+    def validate_websocket_url(cls, value: str | None) -> str | None:
         if value is None:
             return value
 
@@ -332,7 +332,7 @@ class LeaveBotRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    bot_id: Optional[str] = Field(
+    bot_id: str | None = Field(
         None,
         description="The MeetingBaas bot ID to remove from the meeting. This will also close the WebSocket connection made through Pipecat by this bot.",
     )
@@ -343,9 +343,9 @@ class PersonaImageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., description="Name of the persona")
-    description: str = Field(None, description="Description of the persona")
-    gender: Optional[str] = Field(None, description="Gender of the persona")
-    characteristics: Optional[List[str]] = Field(None, description="List of characteristics like blue eyes, etc.")
+    description: str | None = Field(None, description="Description of the persona")
+    gender: str | None = Field(None, description="Gender of the persona")
+    characteristics: list[str] | None = Field(None, description="List of characteristics like blue eyes, etc.")
 
 class PersonaImageResponse(BaseModel):
     """Response model for generated persona images."""

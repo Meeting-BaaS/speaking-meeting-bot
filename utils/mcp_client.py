@@ -32,6 +32,37 @@ SECRET_KEY_PARTS = (
 aiohttp: Any | None = None
 
 
+class _PinnedResolver:
+    """aiohttp resolver that only returns pre-validated addresses for one host."""
+
+    def __init__(self, addresses_by_host: dict[str, list[str]]):
+        self._addresses_by_host = addresses_by_host
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: int = socket.AF_INET,
+    ) -> list[dict[str, Any]]:
+        addresses = self._addresses_by_host.get(host)
+        if not addresses:
+            raise OSError(f"Host {host} was not pre-validated")
+        return [
+            {
+                "hostname": host,
+                "host": address,
+                "port": port,
+                "family": socket.AF_INET6 if ":" in address else socket.AF_INET,
+                "proto": 0,
+                "flags": socket.AI_NUMERICHOST,
+            }
+            for address in addresses
+        ]
+
+    async def close(self) -> None:
+        return None
+
+
 class McpClientError(Exception):
     """Raised when an MCP request cannot be completed."""
 
@@ -73,6 +104,10 @@ def _is_allowed_private_mcp_url(url: str) -> bool:
     return normalized in _allowed_private_mcp_urls()
 
 
+def _private_mcp_url_bypass_enabled(url: str) -> bool:
+    return _private_mcp_urls_allowed() or _is_allowed_private_mcp_url(url)
+
+
 def _is_private_ip(value: str) -> bool:
     parsed = ip_address(value)
     return (
@@ -85,36 +120,138 @@ def _is_private_ip(value: str) -> bool:
     )
 
 
-def validate_mcp_http_url(url: str) -> None:
+def validate_mcp_http_url(url: str) -> list[str] | None:
     """Block obvious SSRF targets unless explicitly allowed."""
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise McpClientError(f"Invalid MCP HTTP URL: {url}")
 
-    if _private_mcp_urls_allowed():
-        return
-
-    if _is_allowed_private_mcp_url(url):
-        return
+    if _private_mcp_url_bypass_enabled(url):
+        return None
 
     host = parsed.hostname
     try:
         if _is_private_ip(host):
             raise McpClientError(f"MCP HTTP URL host is private or local: {host}")
-        return
+        return [host]
     except ValueError:
         pass
 
     try:
-        addresses = socket.getaddrinfo(host, None)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as e:
         raise McpClientError(f"Could not resolve MCP HTTP host '{host}': {e}") from e
 
+    resolved_ips = []
     for address in addresses:
-        if _is_private_ip(address[4][0]):
+        resolved_ip = address[4][0]
+        if _is_private_ip(resolved_ip):
             raise McpClientError(
                 f"MCP HTTP URL resolves to private or local address: {host}"
             )
+        if resolved_ip not in resolved_ips:
+            resolved_ips.append(resolved_ip)
+    return resolved_ips
+
+
+def build_pinned_mcp_connector(
+    aiohttp_module: Any,
+    url: str,
+    resolved_ips: list[str] | None,
+) -> Any | None:
+    if not resolved_ips or not hasattr(aiohttp_module, "TCPConnector"):
+        return None
+    parsed = urlparse(url)
+    if not parsed.hostname:
+        return None
+    return aiohttp_module.TCPConnector(
+        resolver=_PinnedResolver({parsed.hostname: resolved_ips}),
+        ttl_dns_cache=0,
+    )
+
+
+def _response_peer_ip(response: Any) -> str | None:
+    connection = getattr(response, "connection", None)
+    transport = getattr(connection, "transport", None)
+    if transport is None:
+        protocol = getattr(response, "_protocol", None)
+        transport = getattr(protocol, "transport", None)
+    if transport is None:
+        return None
+
+    peername = transport.get_extra_info("peername")
+    if isinstance(peername, tuple) and peername:
+        return str(peername[0])
+    if isinstance(peername, str):
+        return peername
+    return None
+
+
+def validate_mcp_response_peer(url: str, response: Any) -> None:
+    """Re-check the connected peer to reduce DNS-rebinding exposure."""
+    if _private_mcp_url_bypass_enabled(url):
+        return
+
+    peer_ip = _response_peer_ip(response)
+    if not peer_ip:
+        raise McpClientError(f"MCP HTTP URL peer address could not be verified: {url}")
+
+    try:
+        if _is_private_ip(peer_ip):
+            raise McpClientError(
+                f"MCP HTTP URL connected to private or local address: {peer_ip}"
+            )
+    except ValueError:
+        raise McpClientError(f"MCP HTTP peer address is invalid: {peer_ip}") from None
+
+
+def split_mcp_runtime_headers(mcp_config: Any) -> tuple[dict[str, Any], list[dict[str, str] | None]]:
+    """Remove per-server headers from persisted MCP config and return them separately."""
+    data = mcp_config.model_dump(exclude_none=True) if hasattr(mcp_config, "model_dump") else mcp_config
+    if not isinstance(data, Mapping):
+        return {}, []
+
+    sanitized: dict[str, Any] = dict(data)
+    servers = sanitized.get("servers") or []
+    if not isinstance(servers, list):
+        return sanitized, []
+
+    runtime_headers: list[dict[str, str] | None] = []
+    sanitized_servers = []
+    for server in servers:
+        if not isinstance(server, Mapping):
+            sanitized_servers.append(server)
+            runtime_headers.append(None)
+            continue
+        server_data = dict(server)
+        headers = server_data.pop("headers", None)
+        runtime_headers.append(dict(headers) if isinstance(headers, Mapping) else None)
+        sanitized_servers.append(server_data)
+
+    sanitized["servers"] = sanitized_servers
+    if not any(runtime_headers):
+        return sanitized, []
+    return sanitized, runtime_headers
+
+
+def apply_mcp_runtime_headers(
+    mcp_config: Any,
+    runtime_headers: Sequence[Mapping[str, str] | None] | None,
+) -> Any:
+    """Re-attach in-memory MCP headers immediately before live connection."""
+    if not runtime_headers or not isinstance(mcp_config, dict):
+        return mcp_config
+
+    servers = mcp_config.get("servers") or []
+    if not isinstance(servers, list):
+        return mcp_config
+
+    for index, headers in enumerate(runtime_headers):
+        if not headers or index >= len(servers) or not isinstance(servers[index], dict):
+            continue
+        servers[index]["headers"] = dict(headers)
+    return mcp_config
 
 
 def encode_stdio_message(message: Mapping[str, Any]) -> bytes:
@@ -389,9 +526,13 @@ class StdioMcpClient:
         await self.start()
         assert self._process and self._process.stdin and self._process.stdout
         message = self._state.request(method, params)
+        expected_id = message["id"]
         self._process.stdin.write(encode_stdio_message(message))
         await self._process.stdin.drain()
-        response = await read_stdio_message(self._process.stdout)
+        while True:
+            response = await read_stdio_message(self._process.stdout)
+            if response.get("id") == expected_id:
+                break
         return _extract_result(response)
 
     async def _notification(
@@ -466,7 +607,7 @@ class HttpMcpClient:
 
     async def _post(self, message: Mapping[str, Any]) -> dict[str, Any]:
         aiohttp_module = _get_aiohttp()
-        validate_mcp_http_url(self.url)
+        resolved_ips = validate_mcp_http_url(self.url)
         request_headers = {
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
@@ -476,14 +617,19 @@ class HttpMcpClient:
             request_headers[SESSION_HEADER] = self._session_id
 
         timeout = aiohttp_module.ClientTimeout(total=self.timeout_seconds)
+        connector = build_pinned_mcp_connector(aiohttp_module, self.url, resolved_ips)
+        session_kwargs: dict[str, Any] = {"timeout": timeout}
+        if connector is not None:
+            session_kwargs["connector"] = connector
         try:
-            async with aiohttp_module.ClientSession(timeout=timeout) as session:
+            async with aiohttp_module.ClientSession(**session_kwargs) as session:
                 async with session.post(
                     self.url,
                     json=message,
                     headers=request_headers,
                     allow_redirects=False,
                 ) as response:
+                    validate_mcp_response_peer(self.url, response)
                     if SESSION_HEADER in response.headers:
                         self._session_id = response.headers[SESSION_HEADER]
                     if 300 <= response.status < 400:

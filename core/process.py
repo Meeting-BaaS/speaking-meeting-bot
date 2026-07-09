@@ -26,6 +26,7 @@ def start_pipecat_process(
     enable_tools: bool,
     api_key: str = "",
     meetingbaas_bot_id: str = "",
+    mcp_runtime_headers: list[dict[str, str] | None] | None = None,
 ) -> subprocess.Popen:
     """
     Start a Pipecat process for a client.
@@ -39,6 +40,7 @@ def start_pipecat_process(
         enable_tools: Whether to enable function calling tools
         api_key: API key for authentication
         meetingbaas_bot_id: ID of the meetingbaas bot
+        mcp_runtime_headers: Per-server MCP headers passed via environment only
 
     Returns:
         The subprocess.Popen object for the started process
@@ -103,14 +105,24 @@ def start_pipecat_process(
     if meetingbaas_bot_id:
         command.extend(["--meetingbaas-bot-id", meetingbaas_bot_id])
 
-    # Start the process
-    process = subprocess.Popen(
-        command,
-        env=os.environ.copy(),  # Copy the current environment
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,  # Capture output as text
-    )
+    child_env = os.environ.copy()
+    if mcp_runtime_headers:
+        child_env["MCP_RUNTIME_HEADERS_JSON"] = json.dumps(mcp_runtime_headers)
+
+    try:
+        process = subprocess.Popen(
+            command,
+            env=child_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,  # Capture output as text
+        )
+    except Exception:
+        try:
+            os.remove(persona_data_path)
+        except OSError:
+            pass
+        raise
 
     # Start threads to print output
     threading.Thread(target=stream_output, args=(process.stdout, "[Pipecat STDOUT]"), daemon=True).start()

@@ -1,6 +1,5 @@
 """WebSocket routes for the Speaking Meeting Bot API."""
 
-import asyncio
 import json
 import os
 from datetime import datetime
@@ -144,6 +143,11 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             if len(meeting_details) > 5 and isinstance(meeting_details[5], dict)
             else {"name": persona_name}
         )
+        mcp_runtime_headers = (
+            meeting_details[6]
+            if len(meeting_details) > 6 and isinstance(meeting_details[6], list)
+            else []
+        )
 
         logger.info(
             f"Retrieved meeting details for {internal_client_id}: {meeting_url}, {persona_name}, {meetingbaas_bot_id}, {enable_tools}, {streaming_audio_frequency}"
@@ -167,6 +171,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 enable_tools=enable_tools,
                 api_key="",
                 meetingbaas_bot_id=meetingbaas_bot_id or "",
+                mcp_runtime_headers=mcp_runtime_headers,
             )
 
             # Store the process for cleanup

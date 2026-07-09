@@ -20,11 +20,14 @@ HttpMcpClient = mcp_client.HttpMcpClient
 StdioMcpClient = mcp_client.StdioMcpClient
 encode_stdio_message = mcp_client.encode_stdio_message
 build_mcp_tool_name = mcp_client.build_mcp_tool_name
+apply_mcp_runtime_headers = mcp_client.apply_mcp_runtime_headers
 normalize_tool_result = mcp_client.normalize_tool_result
 normalize_tools = mcp_client.normalize_tools
 parse_sse_json = mcp_client.parse_sse_json
 sanitize_mapping = mcp_client.sanitize_mapping
+split_mcp_runtime_headers = mcp_client.split_mcp_runtime_headers
 validate_mcp_http_url = mcp_client.validate_mcp_http_url
+validate_mcp_response_peer = mcp_client.validate_mcp_response_peer
 McpClientError = mcp_client.McpClientError
 
 
@@ -105,9 +108,44 @@ class McpClientHelpersTest(unittest.TestCase):
         self.assertEqual(sanitized["Mcp-Session-Id"], "[redacted]")
         self.assertEqual(sanitized["X-Trace-Id"], "trace-123")
 
+    def test_split_mcp_runtime_headers_removes_persisted_headers(self) -> None:
+        payload, runtime_headers = split_mcp_runtime_headers(
+            {
+                "servers": [
+                    {
+                        "name": "drive",
+                        "transport": "streamable_http",
+                        "url": "https://mcp.example.com/mcp",
+                        "headers": {"Authorization": "Bearer secret"},
+                    }
+                ]
+            }
+        )
+
+        self.assertNotIn("headers", payload["servers"][0])
+        self.assertEqual(runtime_headers[0]["Authorization"], "Bearer secret")
+
+        apply_mcp_runtime_headers(payload, runtime_headers)
+
+        self.assertEqual(payload["servers"][0]["headers"]["Authorization"], "Bearer secret")
+
     def test_validate_mcp_http_url_blocks_localhost(self) -> None:
         with self.assertRaises(McpClientError):
             validate_mcp_http_url("http://127.0.0.1:3000/mcp")
+
+    def test_validate_mcp_response_peer_blocks_private_ip(self) -> None:
+        class FakeTransport:
+            def get_extra_info(self, name):
+                if name == "peername":
+                    return ("127.0.0.1", 443)
+                return None
+
+        response = SimpleNamespace(
+            _protocol=SimpleNamespace(transport=FakeTransport()),
+        )
+
+        with self.assertRaises(McpClientError):
+            validate_mcp_response_peer("https://mcp.example.com/mcp", response)
 
     def test_validate_mcp_http_url_allows_exact_private_url(self) -> None:
         original_allowed = os.environ.get("MCP_ALLOWED_PRIVATE_URLS")
@@ -220,6 +258,7 @@ while True:
     if method == "initialize":
         result = {"protocolVersion": "2024-11-05", "capabilities": {}}
     elif method == "tools/list":
+        send({"jsonrpc": "2.0", "method": "notifications/progress", "params": {}})
         result = {"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}
     elif method == "tools/call":
         result = {"content": [{"type": "text", "text": "{\"echo\": true}"}]}

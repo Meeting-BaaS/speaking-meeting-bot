@@ -13,6 +13,37 @@ CHARS_PER_TOKEN = 4
 DEFAULT_SOURCE_MAX_BYTES = 1_000_000
 
 
+class _PinnedResolver:
+    """aiohttp resolver that only returns pre-validated addresses for one host."""
+
+    def __init__(self, addresses_by_host: dict[str, list[str]]):
+        self._addresses_by_host = addresses_by_host
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: int = socket.AF_INET,
+    ) -> list[dict[str, Any]]:
+        addresses = self._addresses_by_host.get(host)
+        if not addresses:
+            raise OSError(f"Host {host} was not pre-validated")
+        return [
+            {
+                "hostname": host,
+                "host": address,
+                "port": port,
+                "family": socket.AF_INET6 if ":" in address else socket.AF_INET,
+                "proto": 0,
+                "flags": socket.AI_NUMERICHOST,
+            }
+            for address in addresses
+        ]
+
+    async def close(self) -> None:
+        return None
+
+
 class PromptContextError(Exception):
     """Raised when external prompt context cannot be loaded."""
 
@@ -79,13 +110,17 @@ async def _fetch_url_source(source: Any) -> str:
     import aiohttp
 
     url = _get(source, "url")
-    _validate_fetch_url(url)
+    resolved_ips = _validate_fetch_url(url)
     headers = _get(source, "headers") or {}
     max_bytes = int(os.getenv("PROMPT_DATA_SOURCE_MAX_BYTES", DEFAULT_SOURCE_MAX_BYTES))
 
     timeout = aiohttp.ClientTimeout(total=12)
+    connector = _build_pinned_connector(aiohttp, url, resolved_ips)
+    session_kwargs: dict[str, Any] = {"timeout": timeout}
+    if connector is not None:
+        session_kwargs["connector"] = connector
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(**session_kwargs) as session:
             async with session.get(url, headers=headers, allow_redirects=False) as resp:
                 if 300 <= resp.status < 400:
                     raise PromptContextError(
@@ -97,6 +132,7 @@ async def _fetch_url_source(source: Any) -> str:
                         f"Prompt data source '{url}' returned HTTP {resp.status}",
                         status_code=502,
                     )
+                _validate_response_peer(url, resp)
                 body = await resp.content.read(max_bytes + 1)
     except PromptContextError:
         raise
@@ -120,6 +156,39 @@ def _private_urls_allowed() -> bool:
     }
 
 
+def _build_pinned_connector(
+    aiohttp_module: Any,
+    url: str,
+    resolved_ips: list[str] | None,
+) -> Any | None:
+    if not resolved_ips or not hasattr(aiohttp_module, "TCPConnector"):
+        return None
+    parsed = urlparse(url)
+    if not parsed.hostname:
+        return None
+    return aiohttp_module.TCPConnector(
+        resolver=_PinnedResolver({parsed.hostname: resolved_ips}),
+        ttl_dns_cache=0,
+    )
+
+
+def _response_peer_ip(response: Any) -> str | None:
+    connection = getattr(response, "connection", None)
+    transport = getattr(connection, "transport", None)
+    if transport is None:
+        protocol = getattr(response, "_protocol", None)
+        transport = getattr(protocol, "transport", None)
+    if transport is None:
+        return None
+
+    peername = transport.get_extra_info("peername")
+    if isinstance(peername, tuple) and peername:
+        return str(peername[0])
+    if isinstance(peername, str):
+        return peername
+    return None
+
+
 def _is_private_ip(value: str) -> bool:
     parsed = ip_address(value)
     return (
@@ -132,7 +201,32 @@ def _is_private_ip(value: str) -> bool:
     )
 
 
-def _validate_fetch_url(url: str) -> None:
+def _validate_response_peer(url: str, response: Any) -> None:
+    """Re-check the connected peer to reduce DNS-rebinding exposure."""
+    if _private_urls_allowed():
+        return
+
+    peer_ip = _response_peer_ip(response)
+    if not peer_ip:
+        raise PromptContextError(
+            f"Prompt data source '{url}' peer address could not be verified",
+            status_code=502,
+        )
+
+    try:
+        if _is_private_ip(peer_ip):
+            raise PromptContextError(
+                f"Prompt data source '{url}' connected to private or local address",
+                status_code=400,
+            )
+    except ValueError:
+        raise PromptContextError(
+            f"Prompt data source '{url}' connected to an invalid peer address",
+            status_code=400,
+        ) from None
+
+
+def _validate_fetch_url(url: str) -> list[str] | None:
     """Block obvious SSRF targets unless explicitly allowed."""
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -142,7 +236,7 @@ def _validate_fetch_url(url: str) -> None:
         )
 
     if _private_urls_allowed():
-        return
+        return None
 
     host = parsed.hostname
     try:
@@ -151,18 +245,20 @@ def _validate_fetch_url(url: str) -> None:
                 f"Prompt data source URL host is private or local: {host}",
                 status_code=400,
             )
-        return
+        return [host]
     except ValueError:
         pass
 
     try:
-        addresses = socket.getaddrinfo(host, None)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as e:
         raise PromptContextError(
             f"Could not resolve prompt data source host '{host}': {e}",
             status_code=400,
         ) from e
 
+    resolved_ips = []
     for address in addresses:
         resolved_ip = address[4][0]
         if _is_private_ip(resolved_ip):
@@ -170,6 +266,9 @@ def _validate_fetch_url(url: str) -> None:
                 f"Prompt data source URL resolves to private or local address: {host}",
                 status_code=400,
             )
+        if resolved_ip not in resolved_ips:
+            resolved_ips.append(resolved_ip)
+    return resolved_ips
 
 
 async def _load_source_text(source: Any) -> str:
