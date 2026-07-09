@@ -317,7 +317,24 @@ providers before creating the upstream MeetingBaaS bot.
 
 MCP servers are live-query capable only when their config is connectable.
 `http`, `streamable_http`, and `sse` servers require `transport`, `url`, and
-optional `headers`. Local process `stdio` MCP is intentionally not accepted by
+optional `headers`. For trusted local mcpproxy groups, prefer `mcp_profile`
+instead of hand-writing the loopback server config:
+
+- `mcp_profile: "professional"` connects to `MCP_PROXY_PROFESSIONAL_URL` or
+  `http://127.0.0.1:8111/mcp`.
+- `mcp_profile: "personal"` connects to `MCP_PROXY_PERSONAL_URL` or
+  `http://127.0.0.1:8110/mcp`.
+- `mcp_profile: "all"` connects to `MCP_PROXY_ALL_URL` or
+  `http://127.0.0.1:8109/mcp`.
+- `mcp_profile_tool_access: "read_only"` exposes only `retrieve_tools`,
+  `call_tool_read`, `read_cache`, and `set_profile`.
+- `mcp_profile_tool_access: "read_write"` additionally exposes
+  `call_tool_write`; presets never expose `upstream_servers`,
+  `call_tool_destructive`, `code_execution`, registry, or quarantine tools.
+
+You can combine `mcp_profile` with explicit `mcp.servers`; the preset is
+prepended, and request MCP instructions are appended after the safety
+instructions. Local process `stdio` MCP is intentionally not accepted by
 the public API because it would execute caller-supplied commands. Remote MCP
 URLs also block localhost and private-network targets by default; production
 deployments should use `MCP_ALLOWED_PRIVATE_URLS` with exact `http://host:port/path`
@@ -337,6 +354,8 @@ curl -X POST http://localhost:${PORT}/bots \
     "personas": ["account_executive"],
     "llm_provider": "anthropic",
     "llm_model": "claude-opus-4-8",
+    "mcp_profile": "professional",
+    "mcp_profile_tool_access": "read_only",
     "prompt_data_token_limit": 4000,
     "prompt_data_sources": [
       {
@@ -351,17 +370,8 @@ curl -X POST http://localhost:${PORT}/bots \
       }
     ],
     "mcp": {
-      "instructions": "Use Google Drive and CRM context only when relevant.",
+      "instructions": "Use CRM context only when relevant. Google Drive is available through the professional mcpproxy profile.",
       "servers": [
-        {
-          "name": "drive-docs-work",
-          "enabled": true,
-          "transport": "streamable_http",
-          "url": "http://127.0.0.1:8123/mcp",
-          "tool_allowlist": ["search", "read"],
-          "timeout_seconds": 20,
-          "instructions": "Use only meeting-relevant Drive docs."
-        },
         {
           "name": "remote-crm",
           "enabled": true,
@@ -407,7 +417,7 @@ This repo contains three OpenAPI files with different roles:
 The service snapshots include `/bots`, `/bots/{bot_id}`,
 `/personas/generate-image`, `/health`, `/ready`, `/webhook`, and the current
 `BotRequest` fields for `prompt_data_sources`, `prompt_data_token_limit`, `mcp`,
-and `speech_speed`.
+`mcp_profile`, `mcp_profile_tool_access`, and `speech_speed`.
 
 Regenerate the service snapshot after API model changes:
 

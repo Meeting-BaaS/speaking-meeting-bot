@@ -15,9 +15,11 @@ if ValidationError is not None:
     assert spec and spec.loader
     sys.modules["models"] = models
     spec.loader.exec_module(models)
+    BotRequest = models.BotRequest
     MCPServerConfig = models.MCPServerConfig
     PromptDataSource = models.PromptDataSource
 else:
+    BotRequest = None
     MCPServerConfig = None
     PromptDataSource = None
 
@@ -100,6 +102,29 @@ class MCPServerConfigTest(unittest.TestCase):
                 url="http://example.com/notes.txt",
                 headers={"Authorization": "Bearer token"},
             )
+
+    def test_mcp_profile_fields_validate_closed_enums(self) -> None:
+        request = BotRequest(
+            meeting_url="https://meet.google.com/abc-defg-hij",
+            mcp_profile="professional",
+            mcp_profile_tool_access="read_write",
+        )
+
+        self.assertEqual(request.mcp_profile, "professional")
+        self.assertEqual(request.mcp_profile_tool_access, "read_write")
+
+        with self.assertRaises(ValidationError):
+            BotRequest(
+                meeting_url="https://meet.google.com/abc-defg-hij",
+                mcp_profile="unsafe",
+            )
+
+        with self.assertRaises(ValidationError):
+            BotRequest(
+                meeting_url="https://meet.google.com/abc-defg-hij",
+                mcp_profile_tool_access="read_write",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,4 +23,6 @@ def test_openapi_snapshot_covers_prompt_context_mcp_and_speech_controls():
     assert "prompt_data_sources" in bot_props
     assert "prompt_data_token_limit" in bot_props
     assert "mcp" in bot_props
+    assert "mcp_profile" in bot_props
+    assert "mcp_profile_tool_access" in bot_props
     assert "speech_speed" in bot_props

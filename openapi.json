@@ -363,6 +363,33 @@
             ],
             "description": "MCP server/tool metadata and optional live connection details"
           },
+          "mcp_profile": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "professional",
+                  "personal",
+                  "all"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mcp Profile",
+            "description": "Optional trusted local mcpproxy group preset. 'professional' connects to MCP_PROXY_PROFESSIONAL_URL or http://127.0.0.1:8111/mcp; 'personal' connects to MCP_PROXY_PERSONAL_URL or http://127.0.0.1:8110/mcp; 'all' connects to MCP_PROXY_ALL_URL or http://127.0.0.1:8109/mcp. The preset is merged with explicit mcp servers when both are supplied."
+          },
+          "mcp_profile_tool_access": {
+            "type": "string",
+            "enum": [
+              "read_only",
+              "read_write"
+            ],
+            "title": "Mcp Profile Tool Access",
+            "description": "Tool exposure for mcp_profile presets. 'read_only' exposes retrieve_tools, call_tool_read, read_cache, and set_profile. 'read_write' also exposes call_tool_write. Presets never expose upstream_servers, call_tool_destructive, code_execution, registry, or quarantine tools.",
+            "default": "read_only"
+          },
           "llm_provider": {
             "anyOf": [
               {
@@ -444,6 +471,8 @@
               }
             ]
           },
+          "mcp_profile": "professional",
+          "mcp_profile_tool_access": "read_only",
           "meeting_url": "https://meet.google.com/abc-defg-hij",
           "personas": [
             "helpful_assistant",

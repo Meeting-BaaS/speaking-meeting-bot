@@ -67,11 +67,15 @@ class TurnConfig(BaseModel):
         None, ge=0.0, le=1.0, description="VAD speech confidence threshold"
     )
     start_secs: float | None = Field(
-        None, ge=0.05, le=5.0,
+        None,
+        ge=0.05,
+        le=5.0,
         description="Sustained speech (seconds) before a turn registers",
     )
     stop_secs: float | None = Field(
-        None, ge=0.1, le=10.0,
+        None,
+        ge=0.1,
+        le=10.0,
         description="Silence (seconds) before the bot considers the speaker done and replies",
     )
     min_volume: float | None = Field(
@@ -120,7 +124,9 @@ class PromptDataSource(BaseModel):
             return value
         normalized = value.strip()
         if not normalized.startswith(("http://", "https://")):
-            raise ValueError("prompt data source url must start with http:// or https://")
+            raise ValueError(
+                "prompt data source url must start with http:// or https://"
+            )
         return normalized
 
     @model_validator(mode="after")
@@ -139,6 +145,8 @@ class PromptDataSource(BaseModel):
 
 MCPTransport = Literal["http", "streamable_http", "sse"]
 LLMProvider = Literal["openai", "anthropic", "zai"]
+MCPProxyProfile = Literal["professional", "personal", "all"]
+MCPProxyToolAccess = Literal["read_only", "read_write"]
 
 
 class MCPServerConfig(BaseModel):
@@ -246,6 +254,8 @@ class BotRequest(BaseModel):
                 "prompt_data_token_limit": 3000,
                 "llm_provider": "anthropic",
                 "llm_model": "claude-opus-4-8",
+                "mcp_profile": "professional",
+                "mcp_profile_tool_access": "read_only",
                 "prompt_data_sources": [
                     {
                         "name": "CRM account notes",
@@ -310,6 +320,27 @@ class BotRequest(BaseModel):
         None,
         description="MCP server/tool metadata and optional live connection details",
     )
+    mcp_profile: MCPProxyProfile | None = Field(
+        None,
+        description=(
+            "Optional trusted local mcpproxy group preset. "
+            "'professional' connects to MCP_PROXY_PROFESSIONAL_URL or "
+            "http://127.0.0.1:8111/mcp; 'personal' connects to "
+            "MCP_PROXY_PERSONAL_URL or http://127.0.0.1:8110/mcp; 'all' "
+            "connects to MCP_PROXY_ALL_URL or http://127.0.0.1:8109/mcp. "
+            "The preset is merged with explicit mcp servers when both are supplied."
+        ),
+    )
+    mcp_profile_tool_access: MCPProxyToolAccess = Field(
+        "read_only",
+        description=(
+            "Tool exposure for mcp_profile presets. 'read_only' exposes "
+            "retrieve_tools, call_tool_read, read_cache, and set_profile. "
+            "'read_write' also exposes call_tool_write. Presets never expose "
+            "upstream_servers, call_tool_destructive, code_execution, registry, "
+            "or quarantine tools."
+        ),
+    )
     llm_provider: LLMProvider | None = Field(
         None,
         description="LLM provider for this bot. Defaults to LLM_PROVIDER, then openai.",
@@ -334,6 +365,12 @@ class BotRequest(BaseModel):
     def validate_meeting_url(cls, value: str) -> str:
         return _validate_meeting_url(value)
 
+    @model_validator(mode="after")
+    def validate_mcp_profile_tool_access(self):
+        if self.mcp_profile is None and self.mcp_profile_tool_access != "read_only":
+            raise ValueError("mcp_profile_tool_access requires mcp_profile")
+        return self
+
     @field_validator("websocket_url")
     @classmethod
     def validate_websocket_url(cls, value: str | None) -> str | None:
@@ -344,6 +381,7 @@ class BotRequest(BaseModel):
         if not normalized.startswith(("ws://", "wss://")):
             raise ValueError("websocket_url must start with ws:// or wss://")
         return normalized
+
 
 class JoinResponse(BaseModel):
     """Response model for a bot joining a meeting"""
@@ -373,20 +411,23 @@ class LeaveBotRequest(BaseModel):
 
 class PersonaImageRequest(BaseModel):
     """Request model for generating persona images."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., description="Name of the persona")
     description: str | None = Field(None, description="Description of the persona")
     gender: str | None = Field(None, description="Gender of the persona")
-    characteristics: list[str] | None = Field(None, description="List of characteristics like blue eyes, etc.")
+    characteristics: list[str] | None = Field(
+        None, description="List of characteristics like blue eyes, etc."
+    )
+
 
 class PersonaImageResponse(BaseModel):
     """Response model for generated persona images."""
+
     name: str = Field(..., description="Name of the persona")
     image_url: str = Field(..., description="URL of the generated image")
     generated_at: datetime = Field(..., description="Timestamp of generation")
 
     class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
+        json_encoders = {datetime: lambda v: v.isoformat()}
