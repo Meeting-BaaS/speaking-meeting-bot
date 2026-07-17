@@ -63,6 +63,9 @@ class CallbackConfig(BaseModel):
     """Callback/webhook configuration"""
 
     url: str
+    # Echoed back by MeetingBaas in the x-mb-secret header so our /webhook can
+    # authenticate the callback. Set from the WEBHOOK_SECRET env at creation.
+    secret: Optional[str] = None
 
 
 def _parse_audio_frequency(freq: str) -> int:
@@ -188,7 +191,10 @@ def create_meeting_bot(
 
     # Build callback config if webhook_url is provided
     callback_enabled = webhook_url is not None
-    callback_config = CallbackConfig(url=webhook_url) if webhook_url else None
+    webhook_secret = os.getenv("WEBHOOK_SECRET")
+    callback_config = (
+        CallbackConfig(url=webhook_url, secret=webhook_secret) if webhook_url else None
+    )
 
     # Create request model
     request = CreateBotRequest(
@@ -235,6 +241,8 @@ def create_meeting_bot(
         if callback_enabled:
             config["callback_enabled"] = True
             config["callback_config"] = {"url": webhook_url}
+            if webhook_secret:
+                config["callback_config"]["secret"] = webhook_secret
 
         # Ensure all values are serializable
         config = stringify_values(config)

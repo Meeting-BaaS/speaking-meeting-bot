@@ -475,8 +475,16 @@ def save_transcript(bot_id: str, persona_name: str, messages: list):
         "messages": conversation
     }
 
-    with open(transcript_file, "w") as f:
+    # Atomic write: the webhook may read this file at any moment (call_ended
+    # summary). A bare truncate+write let it observe half-written JSON and
+    # ack the callback as "done" with a lost summary. Write a unique temp file
+    # in the same dir, fsync, then rename over the target.
+    tmp_file = f"{transcript_file}.{os.getpid()}.tmp"
+    with open(tmp_file, "w") as f:
         json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_file, transcript_file)
 
     log_and_flush(logging.DEBUG, f"[TRANSCRIPT] Saved transcript to {transcript_file}")
 
@@ -1103,7 +1111,6 @@ def cli() -> None:
         "--persona-data-file",
         help="Path to persona data JSON payload. Preferred for MCP secrets.",
     )
-    parser.add_argument("--api-key", help="API key for authentication")
     parser.add_argument("--meetingbaas-bot-id", help="MeetingBaas bot ID")
 
     args = parser.parse_args()

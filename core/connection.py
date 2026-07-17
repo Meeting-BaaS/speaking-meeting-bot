@@ -47,8 +47,16 @@ class PersistentMeetingDetails(dict):
     def __setitem__(self, client_id, details):
         super().__setitem__(client_id, details)
         try:
-            with open(self._path(client_id), "w") as f:
+            # Atomic write so a crash mid-write, or a concurrent startup scan,
+            # never reads a half-written file (which the loader would then drop
+            # as "unreadable", losing a live bot's state).
+            path = self._path(client_id)
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w") as f:
                 json.dump(list(details), f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
         except Exception as e:
             logger.warning(f"Could not persist meeting details for {client_id}: {e}")
 

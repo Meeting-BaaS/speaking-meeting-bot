@@ -20,36 +20,40 @@ websocket_router = APIRouter()
 # on every speaker-state update (MeetingBaas sends them continuously).
 _last_floor_speaker: dict = {}
 
-# Meeting keys whose bots already got their ready signal (see below).
+# Client IDs that already got their ready signal (see below).
 _ready_signaled: set = set()
 
 
-def _signal_ready_from_roster(meeting_url: str, key: str) -> None:
-    """Write ready-signal files for every bot in this meeting, once.
+def _signal_ready_from_roster(client_id: str) -> None:
+    """Write the ready-signal file for THIS bot's own websocket, once.
 
     The bot-specific callback_config only delivers bot.completed/bot.failed —
     the in_call_recording status webhook exists only on account-level SVIX
     webhooks. So the reliable in-band readiness signal is the participant
     roster: MeetingBaas only streams it once the bot is actually admitted
-    into the call (a lobbied bot can't see the roster). On the first roster
-    message for a meeting, release every one of our bots' entry messages.
+    into the call (a lobbied bot can't see the roster).
+
+    Crucially, only signal the bot on WHOSE socket the roster arrived. A
+    roster arriving for one admitted bot does NOT mean its siblings are in the
+    call too — the old "signal every bot sharing the meeting URL" released
+    lobbied siblings early, so they greeted into the waiting room.
     """
-    if key in _ready_signaled:
+    if not client_id or client_id in _ready_signaled:
         return
-    _ready_signaled.add(key)
+    _ready_signaled.add(client_id)
     ready_dir = os.path.join(get_state_dir(), "ready_signals")
     os.makedirs(ready_dir, exist_ok=True)
-    for client_id, details in MEETING_DETAILS.items():
-        if len(details) > 0 and floor_key(details[0]) == key:
-            try:
-                with open(os.path.join(ready_dir, f"{client_id}.ready"), "w") as f:
-                    f.write(datetime.now().isoformat())
-                logger.info(f"Roster seen for meeting {key} — ready signal for {client_id}")
-            except OSError as e:
-                logger.warning(f"Could not write ready signal for {client_id}: {e}")
+    try:
+        with open(os.path.join(ready_dir, f"{client_id}.ready"), "w") as f:
+            f.write(datetime.now().isoformat())
+        logger.info(f"Roster seen — ready signal for {client_id}")
+    except OSError as e:
+        logger.warning(f"Could not write ready signal for {client_id}: {e}")
 
 
-def _update_floor_from_speaker_state(meeting_url: str, text_data: str) -> None:
+def _update_floor_from_speaker_state(
+    meeting_url: str, text_data: str, client_id: str = ""
+) -> None:
     """Track which of OUR bots is speaking in this meeting.
 
     MeetingBaas sends participant state as a JSON list of
@@ -67,9 +71,9 @@ def _update_floor_from_speaker_state(meeting_url: str, text_data: str) -> None:
 
     key = floor_key(meeting_url)
 
-    # A roster message means the bot is admitted and in the call — release
-    # the entry messages for this meeting's bots.
-    _signal_ready_from_roster(meeting_url, key)
+    # A roster message on this socket means THIS bot is admitted and in the
+    # call — release its own entry message (not its siblings').
+    _signal_ready_from_roster(client_id)
 
     our_names = {
         details[1]
@@ -199,7 +203,9 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                     f"Received text message from client {client_id}: {text_data[:100]}..."
                 )
                 # Speaker-state updates drive the bot-vs-bot floor control
-                _update_floor_from_speaker_state(meeting_url, text_data)
+                _update_floor_from_speaker_state(
+                    meeting_url, text_data, internal_client_id
+                )
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for client {client_id}")
     except Exception as e:

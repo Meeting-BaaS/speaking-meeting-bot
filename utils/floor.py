@@ -46,7 +46,10 @@ def floor_file(meeting_url: str) -> str:
 def write_floor(meeting_url: str, speaker: Optional[str]) -> None:
     """Record which of our bots (by display name) holds the floor, or None."""
     path = floor_file(meeting_url)
-    tmp = f"{path}.tmp"
+    # Per-writer temp name: multiple API workers can refresh the same meeting's
+    # floor concurrently, and a shared "<path>.tmp" let them truncate/replace
+    # each other's half-written temp file. os.replace of a unique temp is atomic.
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump({"speaker": speaker, "ts": time.time()}, f)
     os.replace(tmp, path)
