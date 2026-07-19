@@ -8,6 +8,10 @@ public prod URL for off-box callers.
 - **Prod (off-box):** `https://speaking.gmeetrecorder.com`
 - **Auth:** header `x-meeting-baas-api-key: <MEETING_BAAS_API_KEY>` on every call
   except `/docs`, `/openapi.json`, `/redoc`, `/health`, `/ready`, `/`, `/webhook`.
+  - `/webhook` skips the API-key header (MeetingBaas callbacks don't carry it),
+    but has its own gate: it only acts on bot IDs this service launched, and
+    when `WEBHOOK_SECRET` is set it requires a matching `x-mb-secret` header
+    (returns 401 otherwise). Unset → open, but the bot-ID check still applies.
 - **Live schema / try-it:** `GET /docs` (Swagger UI), raw at `GET /openapi.json`.
 
 ## Get the key (on this box)

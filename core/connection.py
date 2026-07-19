@@ -52,11 +52,19 @@ class PersistentMeetingDetails(dict):
             # as "unreadable", losing a live bot's state).
             path = self._path(client_id)
             tmp = f"{path}.{os.getpid()}.tmp"
-            with open(tmp, "w") as f:
-                json.dump(list(details), f)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
+            try:
+                with open(tmp, "w") as f:
+                    json.dump(list(details), f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
+            except Exception:
+                # Don't leave an orphaned temp file behind on failure.
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
         except Exception as e:
             logger.warning(f"Could not persist meeting details for {client_id}: {e}")
 

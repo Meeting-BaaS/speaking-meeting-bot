@@ -40,15 +40,19 @@ def _signal_ready_from_roster(client_id: str) -> None:
     """
     if not client_id or client_id in _ready_signaled:
         return
-    _ready_signaled.add(client_id)
     ready_dir = os.path.join(get_state_dir(), "ready_signals")
     os.makedirs(ready_dir, exist_ok=True)
     try:
         with open(os.path.join(ready_dir, f"{client_id}.ready"), "w") as f:
             f.write(datetime.now().isoformat())
-        logger.info(f"Roster seen — ready signal for {client_id}")
     except OSError as e:
+        # Do NOT mark as signaled on failure — a transient write error would
+        # otherwise early-return every later roster message and the bot would
+        # stay silent forever. Leave it unset so the next roster retries.
         logger.warning(f"Could not write ready signal for {client_id}: {e}")
+        return
+    _ready_signaled.add(client_id)
+    logger.info(f"Roster seen — ready signal for {client_id}")
 
 
 def _update_floor_from_speaker_state(

@@ -480,11 +480,27 @@ def save_transcript(bot_id: str, persona_name: str, messages: list):
     # ack the callback as "done" with a lost summary. Write a unique temp file
     # in the same dir, fsync, then rename over the target.
     tmp_file = f"{transcript_file}.{os.getpid()}.tmp"
-    with open(tmp_file, "w") as f:
-        json.dump(data, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_file, transcript_file)
+    try:
+        with open(tmp_file, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_file, transcript_file)
+        # fsync the directory so the rename itself is durable — fsyncing only
+        # the file does not persist the new directory entry across a reboot.
+        dir_fd = os.open(TRANSCRIPT_DIR, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError as e:
+        # Never let a transcript write failure crash the pipeline; clean up.
+        try:
+            os.remove(tmp_file)
+        except OSError:
+            pass
+        log_and_flush(logging.WARNING, f"[TRANSCRIPT] Could not save transcript: {e}")
+        return
 
     log_and_flush(logging.DEBUG, f"[TRANSCRIPT] Saved transcript to {transcript_file}")
 

@@ -68,6 +68,21 @@ class CallbackConfig(BaseModel):
     secret: Optional[str] = None
 
 
+def _redact_secrets(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Shallow copy of a create-bot payload with the callback secret masked.
+
+    The payload is debug-logged; the webhook secret must never land in logs.
+    """
+    if not isinstance(config, dict):
+        return config
+    cb = config.get("callback_config")
+    if isinstance(cb, dict) and cb.get("secret"):
+        redacted = dict(config)
+        redacted["callback_config"] = {**cb, "secret": "***"}
+        return redacted
+    return config
+
+
 def _parse_audio_frequency(freq: str) -> int:
     """Convert a string audio frequency like '16khz' to an integer in Hz.
 
@@ -255,7 +270,7 @@ def create_meeting_bot(
 
     try:
         logger.info(f"Creating MeetingBaas bot for {meeting_url}")
-        logger.debug(f"Request payload: {config}")
+        logger.debug(f"Request payload: {_redact_secrets(config)}")
 
         # Try to serialize the payload to catch any JSON serialization issues
         try:

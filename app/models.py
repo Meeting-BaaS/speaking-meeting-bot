@@ -22,7 +22,10 @@ def _validate_meeting_url(value: str) -> str:
     parsed = urlparse(normalized)
     if parsed.scheme not in ("http", "https"):
         raise ValueError("meeting_url must start with http:// or https://")
-    if not parsed.hostname:
+    host = parsed.hostname
+    # hostname must exist, contain a dot (FQDN), and hold no whitespace —
+    # urlparse happily returns "exa mple.com" as a hostname otherwise.
+    if not host or any(c.isspace() for c in host) or "." not in host:
         raise ValueError("meeting_url must include a valid host")
 
     return normalized

@@ -985,14 +985,21 @@ async def meetingbaas_webhook(request: Request):
                     transcript_file = candidate
                     break
 
-            if transcript_file:
+            if transcript_file and _claim_summary(bot_id):
                 # Summary generation makes a blocking OpenAI call; run it off the
                 # event loop so it can't stall floor refresh / admission polling
                 # (and so a slow model can't make MeetingBaas retry the webhook).
-                await asyncio.to_thread(
-                    _generate_summary_sync, transcript_file, bot_id
-                )
-            else:
+                # _claim_summary gave us the exclusive claim; release it on
+                # failure so a genuine retry can run, keep it on success so a
+                # re-delivered call_ended is a no-op.
+                try:
+                    await asyncio.to_thread(
+                        _generate_summary_sync, transcript_file, bot_id
+                    )
+                except Exception:
+                    _release_summary_claim(bot_id)
+                    raise
+            elif not transcript_file:
                 logger.warning(f"No transcript file found for bot {bot_id}")
 
         return {"status": "ok"}
@@ -1001,7 +1008,48 @@ async def meetingbaas_webhook(request: Request):
         return {"status": "error", "message": str(e)}
 
 
-def _generate_summary_sync(transcript_file: str, bot_id: str = None):
+def _summary_claim_path(bot_id: str) -> str:
+    summaries_dir = os.path.join(get_state_dir(), "call_summaries")
+    os.makedirs(summaries_dir, exist_ok=True)
+    return os.path.join(summaries_dir, f"{bot_id}.claim")
+
+
+def _claim_summary(bot_id: Optional[str]) -> bool:
+    """Atomically claim summary generation for bot_id; True if we won it.
+
+    Concurrent call_ended callbacks used to both pass the "summary exists?"
+    check and each fire an OpenAI call. O_CREAT|O_EXCL makes the claim atomic
+    across processes/threads: only one caller creates the file, the rest get
+    FileExistsError and skip. bot_id is a validated UUID (see the webhook gate),
+    so it is safe in the filename.
+    """
+    if not bot_id:
+        return False
+    try:
+        fd = os.open(
+            _summary_claim_path(bot_id), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+        )
+        os.close(fd)
+        return True
+    except FileExistsError:
+        logger.info(f"[WEBHOOK] Summary already claimed for bot {bot_id}, skipping")
+        return False
+    except OSError as e:
+        logger.warning(f"Could not claim summary for bot {bot_id}: {e}")
+        return False
+
+
+def _release_summary_claim(bot_id: Optional[str]) -> None:
+    """Drop the claim so a genuine retry can regenerate after a failure."""
+    if not bot_id:
+        return
+    try:
+        os.remove(_summary_claim_path(bot_id))
+    except OSError:
+        pass
+
+
+def _generate_summary_sync(transcript_file: str, bot_id: Optional[str] = None) -> None:
     """Generate a call summary from a transcript file using OpenAI.
 
     Uses bot_id in filename to prevent duplicate summaries when multiple

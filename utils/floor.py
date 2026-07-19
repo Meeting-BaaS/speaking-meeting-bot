@@ -50,9 +50,19 @@ def write_floor(meeting_url: str, speaker: Optional[str]) -> None:
     # floor concurrently, and a shared "<path>.tmp" let them truncate/replace
     # each other's half-written temp file. os.replace of a unique temp is atomic.
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w") as f:
-        json.dump({"speaker": speaker, "ts": time.time()}, f)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w") as f:
+            json.dump({"speaker": speaker, "ts": time.time()}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        # Don't leak the PID-scoped temp file if the write/rename failed.
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def read_floor(meeting_url: str) -> Tuple[Optional[str], float]:
