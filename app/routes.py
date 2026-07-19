@@ -1014,7 +1014,7 @@ def _summary_claim_path(bot_id: str) -> str:
     return os.path.join(summaries_dir, f"{bot_id}.claim")
 
 
-def _claim_summary(bot_id: Optional[str]) -> bool:
+def _claim_summary(bot_id: str | None) -> bool:
     """Atomically claim summary generation for bot_id; True if we won it.
 
     Concurrent call_ended callbacks used to both pass the "summary exists?"
@@ -1039,7 +1039,7 @@ def _claim_summary(bot_id: Optional[str]) -> bool:
         return False
 
 
-def _release_summary_claim(bot_id: Optional[str]) -> None:
+def _release_summary_claim(bot_id: str | None) -> None:
     """Drop the claim so a genuine retry can regenerate after a failure."""
     if not bot_id:
         return
@@ -1049,7 +1049,7 @@ def _release_summary_claim(bot_id: Optional[str]) -> None:
         pass
 
 
-def _generate_summary_sync(transcript_file: str, bot_id: Optional[str] = None) -> None:
+def _generate_summary_sync(transcript_file: str, bot_id: str | None = None) -> None:
     """Generate a call summary from a transcript file using OpenAI.
 
     Uses bot_id in filename to prevent duplicate summaries when multiple

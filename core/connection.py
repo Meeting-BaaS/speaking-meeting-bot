@@ -1,5 +1,6 @@
 """Connection management for WebSocket clients and Pipecat processes."""
 
+import contextlib
 import json
 import os
 import subprocess
@@ -58,12 +59,17 @@ class PersistentMeetingDetails(dict):
                     f.flush()
                     os.fsync(f.fileno())
                 os.replace(tmp, path)
+                # fsync the directory so the rename entry itself is durable —
+                # fsyncing only the file doesn't persist it across a reboot.
+                dir_fd = os.open(self._dir, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
             except Exception:
                 # Don't leave an orphaned temp file behind on failure.
-                try:
+                with contextlib.suppress(OSError):
                     os.remove(tmp)
-                except OSError:
-                    pass
                 raise
         except Exception as e:
             logger.warning(f"Could not persist meeting details for {client_id}: {e}")

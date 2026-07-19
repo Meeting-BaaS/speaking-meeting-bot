@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import argparse
 import inspect
@@ -495,10 +496,8 @@ def save_transcript(bot_id: str, persona_name: str, messages: list):
             os.close(dir_fd)
     except OSError as e:
         # Never let a transcript write failure crash the pipeline; clean up.
-        try:
+        with contextlib.suppress(OSError):
             os.remove(tmp_file)
-        except OSError:
-            pass
         log_and_flush(logging.WARNING, f"[TRANSCRIPT] Could not save transcript: {e}")
         return
 

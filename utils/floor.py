@@ -12,6 +12,7 @@ the state dir (ready_signals/ uses the same pattern), and floor changes are
 seconds-scale — poll latency is fine.
 """
 
+import contextlib
 import hashlib
 import json
 import os
@@ -58,10 +59,8 @@ def write_floor(meeting_url: str, speaker: Optional[str]) -> None:
         os.replace(tmp, path)
     except OSError:
         # Don't leak the PID-scoped temp file if the write/rename failed.
-        try:
+        with contextlib.suppress(OSError):
             os.remove(tmp)
-        except OSError:
-            pass
         raise
 
 
