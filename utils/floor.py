@@ -57,6 +57,13 @@ def write_floor(meeting_url: str, speaker: Optional[str]) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        # fsync the directory so the rename entry itself is durable — matches
+        # the pattern in core/connection.py and scripts/meetingbaas.py.
+        dir_fd = os.open(os.path.dirname(path), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     except OSError:
         # Don't leak the PID-scoped temp file if the write/rename failed.
         with contextlib.suppress(OSError):
