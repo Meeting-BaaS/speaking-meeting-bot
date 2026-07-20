@@ -406,7 +406,7 @@ generic `LLM_MODEL`, then service default:
 
 ### OpenAPI Snapshots
 
-This repo contains three OpenAPI files with different roles:
+This repo contains four OpenAPI files with different roles:
 
 - `openapi.json` is this FastAPI service snapshot for generic tooling.
 - `speaking-bot-openapi.json` is the same service snapshot, named explicitly

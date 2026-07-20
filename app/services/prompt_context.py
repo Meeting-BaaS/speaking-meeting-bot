@@ -5,44 +5,14 @@ import math
 import os
 import socket
 from dataclasses import dataclass
-from ipaddress import ip_address
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlparse
+
+from utils.ssrf import build_pinned_connector, is_private_ip
 
 
 CHARS_PER_TOKEN = 4
 DEFAULT_SOURCE_MAX_BYTES = 1_000_000
-
-
-class _PinnedResolver:
-    """aiohttp resolver that only returns pre-validated addresses for one host."""
-
-    def __init__(self, addresses_by_host: dict[str, list[str]]):
-        self._addresses_by_host = addresses_by_host
-
-    async def resolve(
-        self,
-        host: str,
-        port: int = 0,
-        family: int = socket.AF_INET,
-    ) -> list[dict[str, Any]]:
-        addresses = self._addresses_by_host.get(host)
-        if not addresses:
-            raise OSError(f"Host {host} was not pre-validated")
-        return [
-            {
-                "hostname": host,
-                "host": address,
-                "port": port,
-                "family": socket.AF_INET6 if ":" in address else socket.AF_INET,
-                "proto": 0,
-                "flags": socket.AI_NUMERICHOST,
-            }
-            for address in addresses
-        ]
-
-    async def close(self) -> None:
-        return None
 
 
 class PromptContextError(Exception):
@@ -156,32 +126,9 @@ def _private_urls_allowed() -> bool:
     }
 
 
-def _build_pinned_connector(
-    aiohttp_module: Any,
-    url: str,
-    resolved_ips: list[str] | None,
-) -> Any | None:
-    if not resolved_ips or not hasattr(aiohttp_module, "TCPConnector"):
-        return None
-    parsed = urlparse(url)
-    if not parsed.hostname:
-        return None
-    return aiohttp_module.TCPConnector(
-        resolver=_PinnedResolver({parsed.hostname: resolved_ips}),
-        ttl_dns_cache=0,
-    )
-
-
-def _is_private_ip(value: str) -> bool:
-    parsed = ip_address(value)
-    return (
-        parsed.is_private
-        or parsed.is_loopback
-        or parsed.is_link_local
-        or parsed.is_multicast
-        or parsed.is_reserved
-        or parsed.is_unspecified
-    )
+# Shared SSRF connector builder (see utils/ssrf.py). Kept under this name for
+# the call site above.
+_build_pinned_connector = build_pinned_connector
 
 
 async def _validate_fetch_url(url: str) -> list[str] | None:
@@ -203,7 +150,7 @@ async def _validate_fetch_url(url: str) -> list[str] | None:
 
     host = parsed.hostname
     try:
-        if _is_private_ip(host):
+        if is_private_ip(host):
             raise PromptContextError(
                 f"Prompt data source URL host is private or local: {host}",
                 status_code=400,
@@ -225,7 +172,7 @@ async def _validate_fetch_url(url: str) -> list[str] | None:
     resolved_ips = []
     for address in addresses:
         resolved_ip = address[4][0]
-        if _is_private_ip(resolved_ip):
+        if is_private_ip(resolved_ip):
             raise PromptContextError(
                 f"Prompt data source URL resolves to private or local address: {host}",
                 status_code=400,

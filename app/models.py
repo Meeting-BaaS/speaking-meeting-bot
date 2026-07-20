@@ -220,7 +220,7 @@ class MCPServerConfig(BaseModel):
 
 
 class MCPConfig(BaseModel):
-    """MCP server metadata and optional live connection details."""
+    """Bot-level MCP configuration: the set of servers to expose plus global instructions."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -353,9 +353,9 @@ class BotRequest(BaseModel):
     )
     speech_speed: float | None = Field(
         None,
-        ge=0.5,
-        le=2.0,
-        description="TTS speaking speed multiplier. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default.",
+        ge=0.6,
+        le=1.5,
+        description="TTS speaking speed multiplier. Honored range is 0.6–1.5 (the runner clamps to it); values outside are rejected. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default.",
     )
 
     # NOTE: streaming_audio_frequency is intentionally excluded and handled internally

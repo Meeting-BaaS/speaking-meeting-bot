@@ -333,9 +333,12 @@ async def join_meeting(request: BotRequest, client_request: Request):
     try:
         resolved_llm_provider = resolve_llm_provider(resolved_persona_data)
     except ValueError as e:
+        # A caller-supplied llm_provider that fails to resolve is a bad request
+        # (4xx); a resolution failure with no caller input is a server-side
+        # config problem (503). Mirrors the credential block below.
         return JSONResponse(
             content={"message": str(e), "status": "error"},
-            status_code=503,
+            status_code=400 if request.llm_provider else 503,
         )
 
     missing_key_env = missing_llm_provider_credential(resolved_llm_provider)
@@ -747,6 +750,11 @@ async def generate_persona_image(request: PersonaImageRequest) -> PersonaImageRe
             generated_at=datetime.utcnow(),
         )
 
+    except HTTPException:
+        # Deliberate HTTP errors (e.g. the 400 for a missing image URL) already
+        # carry the right status — re-raise unchanged instead of collapsing
+        # them into a 500 below.
+        raise
     except Exception as e:
         logger.error(f"Error generating image: {str(e)}")
         if isinstance(e, ValueError):
