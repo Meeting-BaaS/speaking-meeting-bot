@@ -22,14 +22,14 @@ from urllib.parse import urlparse
 class PinnedResolver:
     """aiohttp resolver that only returns pre-validated addresses for one host."""
 
-    def __init__(self, addresses_by_host: dict[str, list[str]]):
+    def __init__(self, addresses_by_host: dict[str, list[str]]) -> None:
         self._addresses_by_host = addresses_by_host
 
     async def resolve(
         self,
         host: str,
         port: int = 0,
-        family: int = socket.AF_INET,
+        family: int = socket.AF_INET,  # noqa: ARG002 — aiohttp resolver interface
     ) -> list[dict[str, Any]]:
         addresses = self._addresses_by_host.get(host)
         if not addresses:

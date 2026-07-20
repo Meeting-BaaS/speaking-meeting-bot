@@ -355,7 +355,11 @@ class BotRequest(BaseModel):
         None,
         ge=0.6,
         le=1.5,
-        description="TTS speaking speed multiplier. Honored range is 0.6–1.5 (the runner clamps to it); values outside are rejected. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default.",
+        description=(
+            "TTS speaking speed multiplier. Honored range is 0.6-1.5 (the "
+            "runner clamps to it); values outside are rejected. Defaults to "
+            "CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default."
+        ),
     )
 
     # NOTE: streaming_audio_frequency is intentionally excluded and handled internally
