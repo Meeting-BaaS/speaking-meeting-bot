@@ -299,6 +299,132 @@ curl -X POST http://localhost:${PORT}/bots \
   }'
 ```
 
+You can attach external prompt context and MCP servers per bot. External
+context is loaded before the Pipecat process starts and capped by
+`prompt_data_token_limit` using an approximate token budget. URL sources block
+localhost and private-network targets by default; set
+`PROMPT_DATA_ALLOW_PRIVATE_URLS=true` only in trusted deployments.
+
+You can also select the bot LLM per request with `llm_provider` and
+`llm_model`. Supported providers are `openai`, `anthropic`, and `zai`.
+Provider credentials and base URLs are server-side environment variables only:
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ZAI_API_KEY`, and optional
+`ZAI_BASE_URL`. OpenAI defaults to Pipecat's Responses API service for newest
+models; set `OPENAI_API_SURFACE=chat` to use the older Chat Completions bridge.
+The Z.ai integration uses the OpenAI-compatible Chat Completions bridge;
+Anthropic uses Pipecat's native Claude bridge. The API rejects unconfigured
+providers before creating the upstream MeetingBaaS bot.
+
+MCP servers are live-query capable only when their config is connectable.
+`http`, `streamable_http`, and `sse` servers require `transport`, `url`, and
+optional `headers`. For trusted local mcpproxy groups, prefer `mcp_profile`
+instead of hand-writing the loopback server config:
+
+- `mcp_profile: "professional"` connects to `MCP_PROXY_PROFESSIONAL_URL` or
+  `http://127.0.0.1:8111/mcp`.
+- `mcp_profile: "personal"` connects to `MCP_PROXY_PERSONAL_URL` or
+  `http://127.0.0.1:8110/mcp`.
+- `mcp_profile: "all"` connects to `MCP_PROXY_ALL_URL` or
+  `http://127.0.0.1:8109/mcp`.
+- `mcp_profile_tool_access: "read_only"` exposes only `retrieve_tools`,
+  `call_tool_read`, `read_cache`, and `set_profile`.
+- `mcp_profile_tool_access: "read_write"` additionally exposes
+  `call_tool_write`; presets never expose `upstream_servers`,
+  `call_tool_destructive`, `code_execution`, registry, or quarantine tools.
+
+You can combine `mcp_profile` with explicit `mcp.servers`; the preset is
+prepended, and request MCP instructions are appended after the safety
+instructions. Local process `stdio` MCP is intentionally not accepted by
+the public API because it would execute caller-supplied commands. Remote MCP
+URLs also block localhost and private-network targets by default; production
+deployments should use `MCP_ALLOWED_PRIVATE_URLS` with exact `http://host:port/path`
+entries for trusted loopback MCPs instead of the broad
+`MCP_ALLOW_PRIVATE_URLS=true` development bypass. If `transport` is omitted, the
+server is treated as metadata-only and MCP tools are not executed. Secrets are
+not required in the request, but `headers` are available for deployments that
+need them. Use `tool_allowlist` to constrain which server tools the bot may
+call, and set `enabled: false` to document a server without connecting to it.
+
+```bash
+curl -X POST http://localhost:${PORT}/bots \
+  -H "Content-Type: application/json" \
+  -H "x-meeting-baas-api-key: your-api-key" \
+  -d '{
+    "meeting_url": "https://meet.google.com/xxx-yyyy-zzz",
+    "personas": ["account_executive"],
+    "llm_provider": "anthropic",
+    "llm_model": "claude-opus-4-8",
+    "mcp_profile": "professional",
+    "mcp_profile_tool_access": "read_only",
+    "prompt_data_token_limit": 4000,
+    "prompt_data_sources": [
+      {
+        "name": "CRM account notes",
+        "type": "url",
+        "url": "https://example.com/account-notes.md"
+      },
+      {
+        "name": "Call objective",
+        "type": "text",
+        "text": "Confirm timeline, budget, and integration constraints."
+      }
+    ],
+    "mcp": {
+      "instructions": "Use CRM context only when relevant. Google Drive is available through the professional mcpproxy profile.",
+      "servers": [
+        {
+          "name": "remote-crm",
+          "enabled": true,
+          "transport": "streamable_http",
+          "url": "https://mcp.example.com/mcp",
+          "headers": {
+            "Authorization": "Bearer optional-token"
+          },
+          "tools": ["get_account", "list_recent_calls"],
+          "tool_allowlist": ["get_account", "list_recent_calls"],
+          "timeout_seconds": 15
+        }
+      ]
+    },
+    "speech_speed": 1.25
+  }'
+```
+
+`speech_speed` overrides `CARTESIA_TTS_SPEED`, `TTS_SPEED`, or
+`SPEECH_SPEED`. The Cartesia runner clamps speed to `0.6..1.5`.
+
+LLM defaults are resolved as request value, then provider-specific env, then
+generic `LLM_MODEL`, then service default:
+
+- OpenAI: `OPENAI_MODEL`, default `gpt-5.5`. `OPENAI_API_SURFACE` defaults to
+  `responses`; set it to `chat` for compatibility with older OpenAI-compatible
+  paths. `OPENAI_SERVICE_TIER` is passed through when set.
+- Anthropic: `ANTHROPIC_MODEL`, default `claude-opus-4-8`. Low-latency example:
+  `claude-haiku-4-5`.
+- Z.ai: `ZAI_MODEL`, default `glm-5.2`; `ZAI_BASE_URL` defaults to
+  `https://api.z.ai/api/paas/v4/`.
+
+### OpenAPI Snapshots
+
+This repo contains four OpenAPI files with different roles:
+
+- `openapi.json` is this FastAPI service snapshot for generic tooling.
+- `speaking-bot-openapi.json` is the same service snapshot, named explicitly
+  for the speaking-bots MCP sync.
+- `meeting-baas-openapi-v1.json` is the upstream MeetingBaaS v1 API snapshot.
+- `openapi-v2.json` is the upstream MeetingBaaS v2 API snapshot.
+
+The service snapshots include `/bots`, `/bots/{bot_id}`,
+`/personas/generate-image`, `/health`, `/ready`, `/webhook`, and the current
+`BotRequest` fields for `prompt_data_sources`, `prompt_data_token_limit`, `mcp`,
+`mcp_profile`, `mcp_profile_tool_access`, and `speech_speed`.
+
+Regenerate the service snapshot after API model changes:
+
+```bash
+poetry run python scripts/export_openapi.py
+```
+
 You can still manually specify a WebSocket URL if needed:
 
 ```bash
@@ -440,6 +566,7 @@ Once the server is running, you can access:
 
 - Interactive API docs: `http://localhost:${PORT}/docs`
 - OpenAPI specification: `http://localhost:${PORT}/openapi.json`
+- Committed service OpenAPI snapshots: `openapi.json`, `speaking-bot-openapi.json`
 - Health endpoint: `http://localhost:${PORT}/health`
 - Readiness endpoint: `http://localhost:${PORT}/ready`
 

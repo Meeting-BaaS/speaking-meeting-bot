@@ -7,14 +7,37 @@ import time
 from typing import Any, Dict
 import json
 import threading
+from contextlib import suppress
 
 from meetingbaas_pipecat.utils.logger import logger
+from utils.runtime import get_state_dir
 
 PIPECAT_PROCESSES: Dict[str, subprocess.Popen] = {}
+PERSONA_PAYLOAD_TTL_SECONDS = 3600
 
 def stream_output(pipe, prefix):
     for line in iter(pipe.readline, ''):
         print(f"{prefix} {line.strip()}")
+
+
+def sweep_stale_persona_payloads(payload_dir: str, ttl_seconds: int = PERSONA_PAYLOAD_TTL_SECONDS) -> None:
+    """Remove stale persona payload files from failed or abandoned child starts."""
+    cutoff = time.time() - ttl_seconds
+    try:
+        filenames = os.listdir(payload_dir)
+    except OSError:
+        return
+
+    for filename in filenames:
+        if not filename.endswith(".json"):
+            continue
+        path = os.path.join(payload_dir, filename)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass
+
 
 def start_pipecat_process(
     client_id: str,
@@ -25,6 +48,7 @@ def start_pipecat_process(
     enable_tools: bool,
     api_key: str = "",
     meetingbaas_bot_id: str = "",
+    mcp_runtime_headers: list[dict[str, str] | None] | None = None,
 ) -> subprocess.Popen:
     """
     Start a Pipecat process for a client.
@@ -38,14 +62,26 @@ def start_pipecat_process(
         enable_tools: Whether to enable function calling tools
         api_key: API key for authentication
         meetingbaas_bot_id: ID of the meetingbaas bot
+        mcp_runtime_headers: Per-server MCP headers passed via environment only
 
     Returns:
         The subprocess.Popen object for the started process
     """
     logger.info(f"Starting Pipecat process for client {client_id}")
 
-    # Convert persona_data to JSON string
-    persona_data_json = json.dumps(persona_data)
+    payload_dir = os.path.join(get_state_dir(), "persona_payloads")
+    os.makedirs(payload_dir, exist_ok=True)
+    sweep_stale_persona_payloads(payload_dir)
+    persona_data_path = os.path.join(payload_dir, f"{client_id}.json")
+    payload_fd = os.open(
+        persona_data_path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    with os.fdopen(payload_fd, "w") as f:
+        json.dump(persona_data, f)
+    if (persona_data or {}).get("mcp"):
+        logger.info(f"Passing MCP metadata to Pipecat process for client {client_id}")
 
     # Construct the command to run the meetingbaas.py script
     script_path = os.path.join(
@@ -76,8 +112,8 @@ def start_pipecat_process(
         meeting_url,
         "--persona-name",
         persona_folder_name,
-        "--persona-data-json",
-        persona_data_json,
+        "--persona-data-file",
+        persona_data_path,
         "--streaming-audio-frequency",
         streaming_audio_frequency,
     ]
@@ -92,14 +128,22 @@ def start_pipecat_process(
     if meetingbaas_bot_id:
         command.extend(["--meetingbaas-bot-id", meetingbaas_bot_id])
 
-    # Start the process
-    process = subprocess.Popen(
-        command,
-        env=os.environ.copy(),  # Copy the current environment
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,  # Capture output as text
-    )
+    child_env = os.environ.copy()
+    if mcp_runtime_headers:
+        child_env["MCP_RUNTIME_HEADERS_JSON"] = json.dumps(mcp_runtime_headers)
+
+    try:
+        process = subprocess.Popen(
+            command,
+            env=child_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,  # Capture output as text
+        )
+    except Exception:
+        with suppress(OSError):
+            os.remove(persona_data_path)
+        raise
 
     # Start threads to print output
     threading.Thread(target=stream_output, args=(process.stdout, "[Pipecat STDOUT]"), daemon=True).start()
@@ -146,6 +190,6 @@ def terminate_process_gracefully(
         # Try one last time with kill
         try:
             process.kill()
-        except:
+        except Exception:
             pass
         return False
