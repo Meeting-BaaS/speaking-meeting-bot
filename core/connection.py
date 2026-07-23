@@ -1,5 +1,6 @@
 """Connection management for WebSocket clients and Pipecat processes."""
 
+import contextlib
 import json
 import os
 import subprocess
@@ -47,8 +48,29 @@ class PersistentMeetingDetails(dict):
     def __setitem__(self, client_id, details):
         super().__setitem__(client_id, details)
         try:
-            with open(self._path(client_id), "w") as f:
-                json.dump(list(details), f)
+            # Atomic write so a crash mid-write, or a concurrent startup scan,
+            # never reads a half-written file (which the loader would then drop
+            # as "unreadable", losing a live bot's state).
+            path = self._path(client_id)
+            tmp = f"{path}.{os.getpid()}.tmp"
+            try:
+                with open(tmp, "w") as f:
+                    json.dump(list(details), f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
+                # fsync the directory so the rename entry itself is durable —
+                # fsyncing only the file doesn't persist it across a reboot.
+                dir_fd = os.open(self._dir, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except Exception:
+                # Don't leave an orphaned temp file behind on failure.
+                with contextlib.suppress(OSError):
+                    os.remove(tmp)
+                raise
         except Exception as e:
             logger.warning(f"Could not persist meeting details for {client_id}: {e}")
 

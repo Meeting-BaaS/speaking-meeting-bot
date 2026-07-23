@@ -772,6 +772,25 @@ async def generate_persona_image(request: PersonaImageRequest) -> PersonaImageRe
 # Directory for signaling between webhook and Pipecat process
 READY_SIGNALS_DIR = os.path.join(get_state_dir(), "ready_signals")
 
+
+def _resolve_internal_client_id(bot_id: Optional[str]) -> Optional[str]:
+    """Map a webhook's bot_id to one of OUR launched bots, or None.
+
+    Requires a well-formed UUID and a match in MEETING_DETAILS. Returning None
+    for anything else is what makes the unauthenticated /webhook safe: unknown
+    or crafted bot_ids never reach filesystem joins or OpenAI spend.
+    """
+    if not bot_id or not isinstance(bot_id, str):
+        return None
+    try:
+        uuid.UUID(bot_id)
+    except (ValueError, AttributeError, TypeError):
+        return None
+    for internal_id, details in MEETING_DETAILS.items():
+        if len(details) > 2 and details[2] == bot_id:
+            return internal_id
+    return None
+
 # Bot lifecycle codes from GET /v2/bots/{id}/status that mean "in the call"
 # (release the entry message) vs "over" (stop polling).
 _IN_CALL_STATUSES = {
@@ -789,6 +808,14 @@ _TERMINAL_STATUSES = {
     "transcribing",
     "transcription_failed",
     "awaiting_reconciliation",
+    # v2 states that also mean "this bot will never enter the call" — without
+    # them the poller kept hitting the API until the full wall-clock cap.
+    "bot_rejected",
+    "waiting_room_timeout",
+    "invalid_meeting_url",
+    "meeting_error",
+    "bot_removed",
+    "removed_from_meeting",
 }
 
 
@@ -806,9 +833,14 @@ async def _poll_bot_admission(
     url = f"{MEETING_BAAS_API_URL}/v2/bots/{meetingbaas_bot_id}/status"
     headers = {"x-meeting-baas-api-key": api_key}
     last_status = None
+    # Monotonic deadline, not a fixed iteration count: each request can take up
+    # to 10s, so counting iterations let a flaky upstream stretch a nominal
+    # 900s budget toward 90 minutes.
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + max_wait_secs
     try:
         async with aiohttp.ClientSession() as session:
-            for _ in range(max_wait_secs // 2):
+            while loop.time() < deadline:
                 try:
                     async with session.get(
                         url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
@@ -861,14 +893,22 @@ async def meetingbaas_webhook(request: Request):
     - On 'in_call_recording': signals Pipecat to start speaking
     - On call end: generates a summary from the transcript
     """
+    # Optional shared-secret gate. When WEBHOOK_SECRET is set we require the
+    # matching x-mb-secret header (MeetingBaas echoes callback_config.secret).
+    # Left unset it stays open — but the bot_id must still be one WE launched
+    # (checked below), so an unauthenticated caller can't drive arbitrary work.
+    expected_secret = os.getenv("WEBHOOK_SECRET")
+    if expected_secret and request.headers.get("x-mb-secret") != expected_secret:
+        logger.warning("Webhook rejected: missing/invalid x-mb-secret")
+        return JSONResponse(status_code=401, content={"status": "unauthorized"})
+
     try:
         body = await request.json()
-        logger.info(f"Received MeetingBaas webhook: {body}")
 
         # Extract event info - MeetingBaaS uses nested structure:
         # {'event': 'bot.status_change', 'data': {'bot_id': '...', 'status': {'code': 'in_call_recording'}}}
         event_type = body.get("event") or body.get("type") or ""
-        data = body.get("data", {})
+        data = body.get("data", {}) if isinstance(body.get("data"), dict) else {}
         bot_id = body.get("bot_id") or body.get("botId") or data.get("bot_id")
 
         # The actual status code is nested in data.status.code for status_change events
@@ -880,9 +920,19 @@ async def meetingbaas_webhook(request: Request):
         event_type_lower = str(event_type).lower()
         status_code_lower = str(status_code).lower()
 
+        # Redacted log: never dump the full body — v2 callbacks carry signed
+        # recording/transcript URLs and participant PII.
         logger.info(
             f"Webhook event: {event_type}, status_code: {status_code}, bot_id: {bot_id}"
         )
+
+        # Only act on bots we actually launched. Rejects forged/unknown bot_ids
+        # (which otherwise reached filename joins and OpenAI summary spend) and
+        # blocks path traversal via a crafted bot_id.
+        internal_client_id = _resolve_internal_client_id(bot_id)
+        if internal_client_id is None:
+            logger.warning(f"Webhook ignored: unknown/unregistered bot_id {bot_id!r}")
+            return {"status": "ignored"}
 
         # Check for "in_call_not_recording" or "in_call_recording" - bot can speak as soon as it's in the call
         ready_events = [
@@ -901,25 +951,14 @@ async def meetingbaas_webhook(request: Request):
             logger.info(
                 f"Bot {bot_id} is ready (in_call_recording) - signaling Pipecat to start speaking"
             )
-
-            # Find the internal client_id for this bot
-            internal_client_id = None
-            for internal_id, details in MEETING_DETAILS.items():
-                if len(details) > 2 and details[2] == bot_id:
-                    internal_client_id = internal_id
-                    break
-
-            if internal_client_id:
-                # Write ready signal file
-                os.makedirs(READY_SIGNALS_DIR, exist_ok=True)
-                ready_file = os.path.join(
-                    READY_SIGNALS_DIR, f"{internal_client_id}.ready"
-                )
-                with open(ready_file, "w") as f:
-                    f.write(datetime.now().isoformat())
-                logger.info(f"Created ready signal for client {internal_client_id}")
-            else:
-                logger.warning(f"Could not find internal client_id for bot {bot_id}")
+            # Write ready signal file for this bot's own client_id.
+            os.makedirs(READY_SIGNALS_DIR, exist_ok=True)
+            ready_file = os.path.join(
+                READY_SIGNALS_DIR, f"{internal_client_id}.ready"
+            )
+            with open(ready_file, "w") as f:
+                f.write(datetime.now().isoformat())
+            logger.info(f"Created ready signal for client {internal_client_id}")
 
         # Check for call ended events
         end_events = ["call_ended", "bot_left", "meeting_ended", "complete"]
@@ -934,41 +973,33 @@ async def meetingbaas_webhook(request: Request):
                 f"Call ended event detected for bot {bot_id}, generating summary..."
             )
 
-            # Try to find the transcript file
-            # First try with the MeetingBaaS bot_id, then look for any matching internal client_id
+            # Locate this bot's own transcript — keyed by the MeetingBaas
+            # bot_id, then its internal client_id. No "any recent transcript"
+            # fallback: it used to summarize an UNRELATED bot's call (and bill
+            # OpenAI for it) whenever the real file was missing.
             transcript_dir = os.path.join(get_state_dir(), "transcripts")
             transcript_file = None
+            for name in (bot_id, internal_client_id):
+                candidate = os.path.join(transcript_dir, f"{name}.json")
+                if os.path.exists(candidate):
+                    transcript_file = candidate
+                    break
 
-            if bot_id and os.path.exists(
-                os.path.join(transcript_dir, f"{bot_id}.json")
-            ):
-                transcript_file = os.path.join(transcript_dir, f"{bot_id}.json")
-            else:
-                # Try to find by looking up internal client_id from MEETING_DETAILS
-                for internal_id, details in MEETING_DETAILS.items():
-                    if len(details) > 2 and details[2] == bot_id:
-                        potential_file = os.path.join(
-                            transcript_dir, f"{internal_id}.json"
-                        )
-                        if os.path.exists(potential_file):
-                            transcript_file = potential_file
-                            break
-
-                # If still not found, try to find any recent transcript
-                if not transcript_file and os.path.exists(transcript_dir):
-                    files = sorted(
-                        os.listdir(transcript_dir),
-                        key=lambda x: os.path.getmtime(os.path.join(transcript_dir, x)),
-                        reverse=True,
+            if transcript_file and _claim_summary(bot_id):
+                # Summary generation makes a blocking OpenAI call; run it off the
+                # event loop so it can't stall floor refresh / admission polling
+                # (and so a slow model can't make MeetingBaas retry the webhook).
+                # _claim_summary gave us the exclusive claim; release it on
+                # failure so a genuine retry can run, keep it on success so a
+                # re-delivered call_ended is a no-op.
+                try:
+                    await asyncio.to_thread(
+                        _generate_summary_sync, transcript_file, bot_id
                     )
-                    for f in files:
-                        if f.endswith(".json"):
-                            transcript_file = os.path.join(transcript_dir, f)
-                            break
-
-            if transcript_file and os.path.exists(transcript_file):
-                await generate_summary_from_transcript(transcript_file, bot_id)
-            else:
+                except Exception:
+                    _release_summary_claim(bot_id)
+                    raise
+            elif not transcript_file:
                 logger.warning(f"No transcript file found for bot {bot_id}")
 
         return {"status": "ok"}
@@ -977,7 +1008,48 @@ async def meetingbaas_webhook(request: Request):
         return {"status": "error", "message": str(e)}
 
 
-async def generate_summary_from_transcript(transcript_file: str, bot_id: str = None):
+def _summary_claim_path(bot_id: str) -> str:
+    summaries_dir = os.path.join(get_state_dir(), "call_summaries")
+    os.makedirs(summaries_dir, exist_ok=True)
+    return os.path.join(summaries_dir, f"{bot_id}.claim")
+
+
+def _claim_summary(bot_id: str | None) -> bool:
+    """Atomically claim summary generation for bot_id; True if we won it.
+
+    Concurrent call_ended callbacks used to both pass the "summary exists?"
+    check and each fire an OpenAI call. O_CREAT|O_EXCL makes the claim atomic
+    across processes/threads: only one caller creates the file, the rest get
+    FileExistsError and skip. bot_id is a validated UUID (see the webhook gate),
+    so it is safe in the filename.
+    """
+    if not bot_id:
+        return False
+    try:
+        fd = os.open(
+            _summary_claim_path(bot_id), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+        )
+        os.close(fd)
+        return True
+    except FileExistsError:
+        logger.info(f"[WEBHOOK] Summary already claimed for bot {bot_id}, skipping")
+        return False
+    except OSError as e:
+        logger.warning(f"Could not claim summary for bot {bot_id}: {e}")
+        return False
+
+
+def _release_summary_claim(bot_id: str | None) -> None:
+    """Drop the claim so a genuine retry can regenerate after a failure."""
+    if not bot_id:
+        return
+    try:
+        os.remove(_summary_claim_path(bot_id))
+    except OSError:
+        pass
+
+
+def _generate_summary_sync(transcript_file: str, bot_id: str | None = None) -> None:
     """Generate a call summary from a transcript file using OpenAI.
 
     Uses bot_id in filename to prevent duplicate summaries when multiple

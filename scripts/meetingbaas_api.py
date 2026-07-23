@@ -63,6 +63,24 @@ class CallbackConfig(BaseModel):
     """Callback/webhook configuration"""
 
     url: str
+    # Echoed back by MeetingBaas in the x-mb-secret header so our /webhook can
+    # authenticate the callback. Set from the WEBHOOK_SECRET env at creation.
+    secret: Optional[str] = None
+
+
+def _redact_secrets(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Shallow copy of a create-bot payload with the callback secret masked.
+
+    The payload is debug-logged; the webhook secret must never land in logs.
+    """
+    if not isinstance(config, dict):
+        return config
+    cb = config.get("callback_config")
+    if isinstance(cb, dict) and cb.get("secret"):
+        redacted = dict(config)
+        redacted["callback_config"] = {**cb, "secret": "***"}
+        return redacted
+    return config
 
 
 def _parse_audio_frequency(freq: str) -> int:
@@ -188,7 +206,10 @@ def create_meeting_bot(
 
     # Build callback config if webhook_url is provided
     callback_enabled = webhook_url is not None
-    callback_config = CallbackConfig(url=webhook_url) if webhook_url else None
+    webhook_secret = os.getenv("WEBHOOK_SECRET")
+    callback_config = (
+        CallbackConfig(url=webhook_url, secret=webhook_secret) if webhook_url else None
+    )
 
     # Create request model
     request = CreateBotRequest(
@@ -235,6 +256,8 @@ def create_meeting_bot(
         if callback_enabled:
             config["callback_enabled"] = True
             config["callback_config"] = {"url": webhook_url}
+            if webhook_secret:
+                config["callback_config"]["secret"] = webhook_secret
 
         # Ensure all values are serializable
         config = stringify_values(config)
@@ -247,7 +270,7 @@ def create_meeting_bot(
 
     try:
         logger.info(f"Creating MeetingBaas bot for {meeting_url}")
-        logger.debug(f"Request payload: {config}")
+        logger.debug(f"Request payload: {_redact_secrets(config)}")
 
         # Try to serialize the payload to catch any JSON serialization issues
         try:

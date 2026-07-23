@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import argparse
 import inspect
@@ -475,8 +476,30 @@ def save_transcript(bot_id: str, persona_name: str, messages: list):
         "messages": conversation
     }
 
-    with open(transcript_file, "w") as f:
-        json.dump(data, f, indent=2)
+    # Atomic write: the webhook may read this file at any moment (call_ended
+    # summary). A bare truncate+write let it observe half-written JSON and
+    # ack the callback as "done" with a lost summary. Write a unique temp file
+    # in the same dir, fsync, then rename over the target.
+    tmp_file = f"{transcript_file}.{os.getpid()}.tmp"
+    try:
+        with open(tmp_file, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_file, transcript_file)
+        # fsync the directory so the rename itself is durable — fsyncing only
+        # the file does not persist the new directory entry across a reboot.
+        dir_fd = os.open(TRANSCRIPT_DIR, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError as e:
+        # Never let a transcript write failure crash the pipeline; clean up.
+        with contextlib.suppress(OSError):
+            os.remove(tmp_file)
+        log_and_flush(logging.WARNING, f"[TRANSCRIPT] Could not save transcript: {e}")
+        return
 
     log_and_flush(logging.DEBUG, f"[TRANSCRIPT] Saved transcript to {transcript_file}")
 
@@ -1103,7 +1126,6 @@ def cli() -> None:
         "--persona-data-file",
         help="Path to persona data JSON payload. Preferred for MCP secrets.",
     )
-    parser.add_argument("--api-key", help="API key for authentication")
     parser.add_argument("--meetingbaas-bot-id", help="MeetingBaas bot ID")
 
     args = parser.parse_args()
