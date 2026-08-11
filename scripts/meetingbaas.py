@@ -563,6 +563,34 @@ async def save_call_summary(params: FunctionCallParams):
     await params.result_callback(f"Great, I've saved the summary of our call. Thank you so much for your time today, {prospect_name}!")
 
 
+class SpeechInjectionProbe(FrameProcessor):
+    """Logs the exact on/off of THIS bot's outgoing TTS audio injection.
+
+    Deterministic ground truth of when our bot is pushing audio into the
+    meeting (as opposed to MeetingBaas' speaker *detection*): sits right after
+    the TTS service and logs the bracketing start/stop frames. For correlating
+    our speech injection against an external speaking indicator. Grep the
+    journal for "[SPEECH-INJECT]". Matches frame class names so it survives
+    Pipecat version churn.
+    """
+
+    _START = {"TTSStartedFrame", "BotStartedSpeakingFrame"}
+    _STOP = {"TTSStoppedFrame", "BotStoppedSpeakingFrame"}
+
+    def __init__(self, my_name: str, **kwargs):
+        super().__init__(**kwargs)
+        self._my_name = my_name
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        cls = type(frame).__name__
+        if cls in self._START:
+            log_and_flush(logging.INFO, f"[SPEECH-INJECT] {self._my_name} START ({cls})")
+        elif cls in self._STOP:
+            log_and_flush(logging.INFO, f"[SPEECH-INJECT] {self._my_name} STOP ({cls})")
+        await self.push_frame(frame, direction)
+
+
 class FloorGate(FrameProcessor):
     """Holds LLM→TTS frames while a sibling bot is speaking in the meeting.
 
@@ -933,6 +961,9 @@ async def main(
         my_name=(persona.get("name") if persona else None) or persona_name,
     )
 
+    # Deterministic log of when THIS bot injects audio (grep "[SPEECH-INJECT]").
+    speech_probe = SpeechInjectionProbe(persona_name)
+
     pipeline = Pipeline([
         transport.input(),   # Add transport input to receive audio/data
         stt,
@@ -940,6 +971,7 @@ async def main(
         llm,
         floor_gate,
         tts,
+        speech_probe,        # log outgoing TTS start/stop
         assistant_aggregator,
         transport.output(),  # Add transport output to send audio/data
     ])
