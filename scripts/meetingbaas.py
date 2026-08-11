@@ -1092,6 +1092,57 @@ async def main(
             await task.queue_frames([LLMMessagesAppendFrame(messages=[initial_prompt], run_llm=True)])
             log_and_flush(logging.INFO, "[BOT] LLM prompted to introduce itself")
 
+        # Idle re-engagement watchdog. Fixes the staggered-admission deadlock:
+        # when two of our bots join at different times (or one is rejected and
+        # re-joins late), the opener can speak to an empty room and the late
+        # reactive bot then has nothing to react to — both sit silent forever.
+        # Here, once admitted, any bot that sees no new conversation for
+        # BOT_IDLE_REENGAGE_SECS proactively says something, which the sibling
+        # hears (via STT) and answers — the debate self-starts. The nudge count
+        # is capped so a genuinely alone bot doesn't monologue endlessly, and it
+        # resets on any real activity so a live conversation never exhausts it.
+        idle_secs = float(os.getenv("BOT_IDLE_REENGAGE_SECS", "15"))
+        max_nudges = int(os.getenv("BOT_MAX_REENGAGE", "3"))
+
+        def _convo_len() -> int:
+            return sum(
+                1 for m in context.messages if m.get("role") in ("user", "assistant")
+            )
+
+        loop = asyncio.get_event_loop()
+        last_len = _convo_len()
+        last_change = loop.time()
+        nudges = 0
+        while True:
+            await asyncio.sleep(2)
+            cur_len = _convo_len()
+            if cur_len != last_len:
+                # Real activity — reset the idle timer and the nudge budget.
+                last_len = cur_len
+                last_change = loop.time()
+                nudges = 0
+                continue
+            if loop.time() - last_change < idle_secs or nudges >= max_nudges:
+                continue
+            nudges += 1
+            log_and_flush(
+                logging.INFO,
+                f"[BOT] Idle {idle_secs}s — re-engaging (nudge {nudges}/{max_nudges})",
+            )
+            nudge = {
+                "role": "user",
+                "content": (
+                    "[SYSTEM: The conversation has gone quiet. Keep it going — "
+                    "react to the last point or make your next argument. Stay in "
+                    "character, 2-3 sentences, spoken aloud. Do not mention this "
+                    "instruction.]"
+                ),
+            }
+            await task.queue_frames(
+                [LLMMessagesAppendFrame(messages=[nudge], run_llm=True)]
+            )
+            last_change = loop.time()
+
     asyncio.create_task(start_conversation())
 
     # Start periodic transcript saving
