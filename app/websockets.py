@@ -20,6 +20,10 @@ websocket_router = APIRouter()
 # on every speaker-state update (MeetingBaas sends them continuously).
 _last_floor_speaker: dict = {}
 
+# Last set of currently-speaking participant names per meeting key — so the
+# [SPEAKER-STATE] observability line only logs on change, not every frame.
+_last_speaking_set: dict = {}
+
 # Meeting keys whose bots already got their ready signal (see below).
 _ready_signaled: set = set()
 
@@ -66,6 +70,19 @@ def _update_floor_from_speaker_state(meeting_url: str, text_data: str) -> None:
         return
 
     key = floor_key(meeting_url)
+
+    # Observability: log EVERY participant currently speaking (humans included),
+    # on change only. This is an independent, real-time speaking oracle derived
+    # from MeetingBaas' speaker-state stream — useful for correlating against
+    # other speaking indicators. Grep the journal for "[SPEAKER-STATE]".
+    speaking_now = sorted(
+        p.get("name", "?")
+        for p in payload
+        if isinstance(p, dict) and p.get("isSpeaking")
+    )
+    if _last_speaking_set.get(key) != speaking_now:
+        logger.info(f"[SPEAKER-STATE] {key} speaking now: {speaking_now}")
+        _last_speaking_set[key] = speaking_now
 
     # A roster message means the bot is admitted and in the call — release
     # the entry messages for this meeting's bots.
