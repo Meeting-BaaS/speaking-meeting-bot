@@ -215,34 +215,20 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
     except Exception as e:
         logger.error(f"Error in WebSocket connection: {e} (repr: {repr(e)})")
     finally:
-        # Clean up using internal_client_id
-        if internal_client_id in PIPECAT_PROCESSES:
-            process = PIPECAT_PROCESSES[internal_client_id]
-            if process and process.poll() is None:  # If process is still running
-                try:
-                    if terminate_process_gracefully(process, timeout=3.0):
-                        logger.info(
-                            f"Gracefully terminated Pipecat process for client {internal_client_id}"
-                        )
-                    else:
-                        logger.warning(
-                            f"Had to forcefully kill Pipecat process for client {internal_client_id}"
-                        )
-                except Exception as e:
-                    logger.error(f"Error terminating process: {e}")
-            # Remove from our storage
-            PIPECAT_PROCESSES.pop(internal_client_id, None)
-
-        if internal_client_id in MEETING_DETAILS:
-            MEETING_DETAILS.pop(internal_client_id, None)
-
-        # Mark client as closing to prevent further message sending
-        message_router.mark_closing(internal_client_id)
-
-        # Gracefully disconnect - wrapping in try/except to handle already closed connections
+        # NON-DESTRUCTIVE teardown. MeetingBaas opens this audio socket and
+        # reconnects it freely — on network blips and on the waiting-room ->
+        # admitted transition. The old code killed the Pipecat process AND
+        # popped MEETING_DETAILS on ANY disconnect, so the first transient drop
+        # (routinely while the bot is still in the lobby) orphaned the bot:
+        # every reconnect then failed with "No meeting details found" and the
+        # bot went permanently silent. Bot state must outlive a single socket.
+        #
+        # Only close THIS socket instance here. The pipeline, MEETING_DETAILS,
+        # and process are torn down solely on explicit removal (DELETE /bots ->
+        # leave_bot) or the bot.completed webhook.
         try:
             await registry.disconnect(client_id)
-            logger.info(f"Client {client_id} disconnected")
+            logger.info(f"Client {client_id} socket closed (bot state preserved for reconnect)")
         except Exception as e:
             # Only log at debug level since this is expected during abrupt disconnections
             logger.debug(f"Error disconnecting client {client_id}: {e}")
