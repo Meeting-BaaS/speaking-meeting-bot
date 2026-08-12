@@ -122,8 +122,11 @@ def start_pipecat_process(
     if enable_tools:
         command.append("--enable-tools")
 
-    if api_key:
-        command.extend(["--api-key", api_key])
+    # NOTE: api_key is deliberately NOT forwarded on argv. The child reads every
+    # credential it needs (Cartesia/OpenAI/Deepgram/MeetingBaas) from the
+    # inherited environment; passing the request's key here only exposed it in
+    # `ps`/process listings for no functional gain. Param kept for call-site
+    # compatibility.
 
     if meetingbaas_bot_id:
         command.extend(["--meetingbaas-bot-id", meetingbaas_bot_id])

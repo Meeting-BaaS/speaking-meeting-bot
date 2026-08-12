@@ -1,8 +1,10 @@
 """Connection management for WebSocket clients and Pipecat processes."""
 
+import contextlib
 import json
 import os
 import subprocess
+import tempfile
 from typing import Dict, List, Optional, Tuple
 
 from fastapi import WebSocket
@@ -47,8 +49,33 @@ class PersistentMeetingDetails(dict):
     def __setitem__(self, client_id, details):
         super().__setitem__(client_id, details)
         try:
-            with open(self._path(client_id), "w") as f:
-                json.dump(list(details), f)
+            # Atomic write so a crash mid-write, or a concurrent startup scan,
+            # never reads a half-written file (which the loader would then drop
+            # as "unreadable", losing a live bot's state).
+            path = self._path(client_id)
+            # Per-invocation unique temp so concurrent writes for the same
+            # client can't share (and clobber) one temp path.
+            fd, tmp = tempfile.mkstemp(
+                dir=self._dir, prefix=f"{client_id}.", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w") as temp_file:
+                    json.dump(list(details), temp_file)
+                    temp_file.flush()
+                    os.fsync(temp_file.fileno())
+                os.replace(tmp, path)
+                # fsync the directory so the rename entry itself is durable —
+                # fsyncing only the file doesn't persist it across a reboot.
+                dir_fd = os.open(self._dir, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except Exception:
+                # Don't leave an orphaned temp file behind on failure.
+                with contextlib.suppress(OSError):
+                    os.remove(tmp)
+                raise
         except Exception as e:
             logger.warning(f"Could not persist meeting details for {client_id}: {e}")
 

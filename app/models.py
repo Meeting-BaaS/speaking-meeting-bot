@@ -9,16 +9,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 def _validate_meeting_url(value: str) -> str:
-    """Validate that a meeting URL uses http(s) and includes a host."""
+    """Validate that a meeting URL uses http(s) and includes a real host.
+
+    Parses structurally rather than string-sniffing: the old check let
+    hostless URLs like ``https:///room`` through (``/room`` contains a ``/``),
+    which then flowed to MeetingBaas as a malformed join.
+    """
     if not value:
         raise ValueError("meeting_url is required")
 
     normalized = value.strip()
-    if not normalized.startswith(("http://", "https://")):
+    parsed = urlparse(normalized)
+    if parsed.scheme not in ("http", "https"):
         raise ValueError("meeting_url must start with http:// or https://")
-
-    without_scheme = normalized.split("://", 1)[1]
-    if "/" not in without_scheme and "." not in without_scheme:
+    host = parsed.hostname
+    # hostname must exist, contain a dot (FQDN), and hold no whitespace —
+    # urlparse happily returns "exa mple.com" as a hostname otherwise.
+    if not host or any(c.isspace() for c in host) or "." not in host:
         raise ValueError("meeting_url must include a valid host")
 
     return normalized

@@ -20,36 +20,48 @@ websocket_router = APIRouter()
 # on every speaker-state update (MeetingBaas sends them continuously).
 _last_floor_speaker: dict = {}
 
-# Meeting keys whose bots already got their ready signal (see below).
+# Last set of currently-speaking participant names per meeting key — so the
+# [SPEAKER-STATE] observability line only logs on change, not every frame.
+_last_speaking_set: dict = {}
+
+# Client IDs that already got their ready signal (see below).
 _ready_signaled: set = set()
 
 
-def _signal_ready_from_roster(meeting_url: str, key: str) -> None:
-    """Write ready-signal files for every bot in this meeting, once.
+def _signal_ready_from_roster(client_id: str) -> None:
+    """Write the ready-signal file for THIS bot's own websocket, once.
 
     The bot-specific callback_config only delivers bot.completed/bot.failed —
     the in_call_recording status webhook exists only on account-level SVIX
     webhooks. So the reliable in-band readiness signal is the participant
     roster: MeetingBaas only streams it once the bot is actually admitted
-    into the call (a lobbied bot can't see the roster). On the first roster
-    message for a meeting, release every one of our bots' entry messages.
+    into the call (a lobbied bot can't see the roster).
+
+    Crucially, only signal the bot on WHOSE socket the roster arrived. A
+    roster arriving for one admitted bot does NOT mean its siblings are in the
+    call too — the old "signal every bot sharing the meeting URL" released
+    lobbied siblings early, so they greeted into the waiting room.
     """
-    if key in _ready_signaled:
+    if not client_id or client_id in _ready_signaled:
         return
-    _ready_signaled.add(key)
     ready_dir = os.path.join(get_state_dir(), "ready_signals")
     os.makedirs(ready_dir, exist_ok=True)
-    for client_id, details in MEETING_DETAILS.items():
-        if len(details) > 0 and floor_key(details[0]) == key:
-            try:
-                with open(os.path.join(ready_dir, f"{client_id}.ready"), "w") as f:
-                    f.write(datetime.now().isoformat())
-                logger.info(f"Roster seen for meeting {key} — ready signal for {client_id}")
-            except OSError as e:
-                logger.warning(f"Could not write ready signal for {client_id}: {e}")
+    try:
+        with open(os.path.join(ready_dir, f"{client_id}.ready"), "w") as f:
+            f.write(datetime.now().isoformat())
+    except OSError as e:
+        # Do NOT mark as signaled on failure — a transient write error would
+        # otherwise early-return every later roster message and the bot would
+        # stay silent forever. Leave it unset so the next roster retries.
+        logger.warning(f"Could not write ready signal for {client_id}: {e}")
+        return
+    _ready_signaled.add(client_id)
+    logger.info(f"Roster seen — ready signal for {client_id}")
 
 
-def _update_floor_from_speaker_state(meeting_url: str, text_data: str) -> None:
+def _update_floor_from_speaker_state(
+    meeting_url: str, text_data: str, client_id: str = ""
+) -> None:
     """Track which of OUR bots is speaking in this meeting.
 
     MeetingBaas sends participant state as a JSON list of
@@ -67,9 +79,22 @@ def _update_floor_from_speaker_state(meeting_url: str, text_data: str) -> None:
 
     key = floor_key(meeting_url)
 
-    # A roster message means the bot is admitted and in the call — release
-    # the entry messages for this meeting's bots.
-    _signal_ready_from_roster(meeting_url, key)
+    # Observability: log EVERY participant currently speaking (humans included),
+    # on change only. This is an independent, real-time speaking oracle derived
+    # from MeetingBaas' speaker-state stream — useful for correlating against
+    # other speaking indicators. Grep the journal for "[SPEAKER-STATE]".
+    speaking_now = sorted(
+        p.get("name", "?")
+        for p in payload
+        if isinstance(p, dict) and p.get("isSpeaking")
+    )
+    if _last_speaking_set.get(key) != speaking_now:
+        logger.info(f"[SPEAKER-STATE] {key} speaking now: {speaking_now}")
+        _last_speaking_set[key] = speaking_now
+
+    # A roster message on this socket means THIS bot is admitted and in the
+    # call — release its own entry message (not its siblings').
+    _signal_ready_from_roster(client_id)
 
     our_names = {
         details[1]
@@ -160,6 +185,13 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
         ):
             logger.info(f"Pipecat process already running for client {internal_client_id}")
         else:
+            # A fresh child needs a fresh ready signal. The previous process may
+            # have already consumed and deleted its .ready file, but
+            # _ready_signaled still holds this ID — so later roster messages
+            # would early-return and the replacement child would wait out the
+            # full 900s. Clear the stale ready state so the next roster re-signals.
+            _ready_signaled.discard(internal_client_id)
+
             # Start Pipecat process if not already running
             pipecat_websocket_url = get_internal_pipecat_ws_url(internal_client_id)
             process = start_pipecat_process(
@@ -199,40 +231,28 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                     f"Received text message from client {client_id}: {text_data[:100]}..."
                 )
                 # Speaker-state updates drive the bot-vs-bot floor control
-                _update_floor_from_speaker_state(meeting_url, text_data)
+                _update_floor_from_speaker_state(
+                    meeting_url, text_data, internal_client_id
+                )
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for client {client_id}")
     except Exception as e:
         logger.error(f"Error in WebSocket connection: {e} (repr: {repr(e)})")
     finally:
-        # Clean up using internal_client_id
-        if internal_client_id in PIPECAT_PROCESSES:
-            process = PIPECAT_PROCESSES[internal_client_id]
-            if process and process.poll() is None:  # If process is still running
-                try:
-                    if terminate_process_gracefully(process, timeout=3.0):
-                        logger.info(
-                            f"Gracefully terminated Pipecat process for client {internal_client_id}"
-                        )
-                    else:
-                        logger.warning(
-                            f"Had to forcefully kill Pipecat process for client {internal_client_id}"
-                        )
-                except Exception as e:
-                    logger.error(f"Error terminating process: {e}")
-            # Remove from our storage
-            PIPECAT_PROCESSES.pop(internal_client_id, None)
-
-        if internal_client_id in MEETING_DETAILS:
-            MEETING_DETAILS.pop(internal_client_id, None)
-
-        # Mark client as closing to prevent further message sending
-        message_router.mark_closing(internal_client_id)
-
-        # Gracefully disconnect - wrapping in try/except to handle already closed connections
+        # NON-DESTRUCTIVE teardown. MeetingBaas opens this audio socket and
+        # reconnects it freely — on network blips and on the waiting-room ->
+        # admitted transition. The old code killed the Pipecat process AND
+        # popped MEETING_DETAILS on ANY disconnect, so the first transient drop
+        # (routinely while the bot is still in the lobby) orphaned the bot:
+        # every reconnect then failed with "No meeting details found" and the
+        # bot went permanently silent. Bot state must outlive a single socket.
+        #
+        # Only close THIS socket instance here. The pipeline, MEETING_DETAILS,
+        # and process are torn down solely on explicit removal (DELETE /bots ->
+        # leave_bot) or the bot.completed webhook.
         try:
             await registry.disconnect(client_id)
-            logger.info(f"Client {client_id} disconnected")
+            logger.info(f"Client {client_id} socket closed (bot state preserved for reconnect)")
         except Exception as e:
             # Only log at debug level since this is expected during abrupt disconnections
             logger.debug(f"Error disconnecting client {client_id}: {e}")
