@@ -185,6 +185,13 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
         ):
             logger.info(f"Pipecat process already running for client {internal_client_id}")
         else:
+            # A fresh child needs a fresh ready signal. The previous process may
+            # have already consumed and deleted its .ready file, but
+            # _ready_signaled still holds this ID — so later roster messages
+            # would early-return and the replacement child would wait out the
+            # full 900s. Clear the stale ready state so the next roster re-signals.
+            _ready_signaled.discard(internal_client_id)
+
             # Start Pipecat process if not already running
             pipecat_websocket_url = get_internal_pipecat_ws_url(internal_client_id)
             process = start_pipecat_process(

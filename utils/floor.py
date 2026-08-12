@@ -16,6 +16,7 @@ import contextlib
 import hashlib
 import json
 import os
+import tempfile
 import time
 from typing import Optional, Tuple
 from urllib.parse import urlparse
@@ -47,15 +48,17 @@ def floor_file(meeting_url: str) -> str:
 def write_floor(meeting_url: str, speaker: Optional[str]) -> None:
     """Record which of our bots (by display name) holds the floor, or None."""
     path = floor_file(meeting_url)
-    # Per-writer temp name: multiple API workers can refresh the same meeting's
-    # floor concurrently, and a shared "<path>.tmp" let them truncate/replace
-    # each other's half-written temp file. os.replace of a unique temp is atomic.
-    tmp = f"{path}.{os.getpid()}.tmp"
+    # Per-invocation unique temp: multiple API workers can refresh the same
+    # meeting's floor concurrently, and a shared temp path let them
+    # truncate/replace each other's half-written file. os.replace is atomic.
+    fd, tmp = tempfile.mkstemp(
+        dir=os.path.dirname(path), prefix=os.path.basename(path) + ".", suffix=".tmp"
+    )
     try:
-        with open(tmp, "w") as f:
-            json.dump({"speaker": speaker, "ts": time.time()}, f)
-            f.flush()
-            os.fsync(f.fileno())
+        with os.fdopen(fd, "w") as temp_file:
+            json.dump({"speaker": speaker, "ts": time.time()}, temp_file)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
         os.replace(tmp, path)
         # fsync the directory so the rename entry itself is durable — matches
         # the pattern in core/connection.py and scripts/meetingbaas.py.

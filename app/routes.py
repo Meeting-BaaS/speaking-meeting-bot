@@ -1,6 +1,7 @@
 """API routes for the Speaking Meeting Bot application."""
 
 import asyncio
+import contextlib
 import json
 import os
 import uuid
@@ -773,7 +774,7 @@ async def generate_persona_image(request: PersonaImageRequest) -> PersonaImageRe
 READY_SIGNALS_DIR = os.path.join(get_state_dir(), "ready_signals")
 
 
-def _resolve_internal_client_id(bot_id: Optional[str]) -> Optional[str]:
+def _resolve_internal_client_id(bot_id: str | None) -> str | None:
     """Map a webhook's bot_id to one of OUR launched bots, or None.
 
     Requires a well-formed UUID and a match in MEETING_DETAILS. Returning None
@@ -989,16 +990,12 @@ async def meetingbaas_webhook(request: Request):
                 # Summary generation makes a blocking OpenAI call; run it off the
                 # event loop so it can't stall floor refresh / admission polling
                 # (and so a slow model can't make MeetingBaas retry the webhook).
-                # _claim_summary gave us the exclusive claim; release it on
-                # failure so a genuine retry can run, keep it on success so a
-                # re-delivered call_ended is a no-op.
-                try:
-                    await asyncio.to_thread(
-                        _generate_summary_sync, transcript_file, bot_id
-                    )
-                except Exception:
-                    _release_summary_claim(bot_id)
-                    raise
+                # _claim_summary gave us the exclusive claim; _generate_summary_sync
+                # releases it on failure (it swallows exceptions internally) and
+                # keeps it on success so a re-delivered call_ended is a no-op.
+                await asyncio.to_thread(
+                    _generate_summary_sync, transcript_file, bot_id
+                )
             elif not transcript_file:
                 logger.warning(f"No transcript file found for bot {bot_id}")
 
@@ -1043,10 +1040,8 @@ def _release_summary_claim(bot_id: str | None) -> None:
     """Drop the claim so a genuine retry can regenerate after a failure."""
     if not bot_id:
         return
-    try:
+    with contextlib.suppress(OSError):
         os.remove(_summary_claim_path(bot_id))
-    except OSError:
-        pass
 
 
 def _generate_summary_sync(transcript_file: str, bot_id: str | None = None) -> None:
@@ -1176,3 +1171,8 @@ Format your response as JSON with these keys: prospect_name, company_name, summa
 
     except Exception as e:
         logger.error(f"[WEBHOOK] Error generating summary from transcript: {e}")
+        # This function swallows the exception (returns normally), so the
+        # caller's except never fires — release the claim here so a genuine
+        # retry can regenerate. On success the claim is kept as a dedup
+        # tombstone.
+        _release_summary_claim(bot_id)

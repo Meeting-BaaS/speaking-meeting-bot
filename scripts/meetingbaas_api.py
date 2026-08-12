@@ -270,7 +270,7 @@ def create_meeting_bot(
 
     try:
         logger.info(f"Creating MeetingBaas bot for {meeting_url}")
-        logger.debug(f"Request payload: {_redact_secrets(config)}")
+        logger.debug("Request payload: {}", _redact_secrets(config))
 
         # Try to serialize the payload to catch any JSON serialization issues
         try:
