@@ -55,7 +55,9 @@ class PersistentMeetingDetails(dict):
             path = self._path(client_id)
             # Per-invocation unique temp so concurrent writes for the same
             # client can't share (and clobber) one temp path.
-            fd, tmp = tempfile.mkstemp(dir=self._dir, prefix=f"{client_id}.", suffix=".tmp")
+            fd, tmp = tempfile.mkstemp(
+                dir=self._dir, prefix=f"{client_id}.", suffix=".tmp"
+            )
             try:
                 with os.fdopen(fd, "w") as temp_file:
                     json.dump(list(details), temp_file)

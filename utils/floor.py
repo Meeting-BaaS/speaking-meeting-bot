@@ -52,7 +52,9 @@ def write_floor(meeting_url: str, speaker: Optional[str]) -> None:
     # meeting's floor concurrently, and a shared temp path let them
     # truncate/replace each other's half-written file. os.replace is atomic.
     fd, tmp = tempfile.mkstemp(
-        dir=os.path.dirname(path), prefix=os.path.basename(path) + ".", suffix=".tmp"
+        dir=os.path.dirname(path),
+        prefix=os.path.basename(path) + ".",
+        suffix=".tmp",
     )
     try:
         with os.fdopen(fd, "w") as temp_file:
