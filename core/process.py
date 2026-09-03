@@ -39,6 +39,36 @@ def sweep_stale_persona_payloads(payload_dir: str, ttl_seconds: int = PERSONA_PA
             pass
 
 
+def start_pipecat_warmup() -> None:
+    """Warm the Pipecat child's import chain once, in the background.
+
+    A cold spawn of scripts/meetingbaas.py paid minutes of import time
+    (pipecat -> torch/silero, LLM SDKs) before it could touch its websocket,
+    which starved the audio bridge into keepalive death. Running one throwaway
+    child with --warmup at API startup populates __pycache__ and the OS page
+    cache so every real bot spawn imports in seconds. Fire-and-forget: a
+    failure here only means the first real spawn is slow again, so never let
+    it break API startup.
+    """
+    script_path = os.path.join(
+        os.path.dirname(__file__), "..", "scripts", "meetingbaas.py"
+    )
+    try:
+        process = subprocess.Popen(
+            [sys.executable, script_path, "--warmup"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except Exception as e:
+        logger.warning(f"Could not start Pipecat import warmup: {e}")
+        return
+    threading.Thread(
+        target=stream_output, args=(process.stdout, "[Pipecat WARMUP]"), daemon=True
+    ).start()
+    logger.info(f"Started Pipecat import warmup (PID {process.pid})")
+
+
 def start_pipecat_process(
     client_id: str,
     websocket_url: str,

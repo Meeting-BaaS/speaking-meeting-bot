@@ -4,8 +4,14 @@ import os
 import argparse
 import inspect
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime
+
+# Cold-start instrumentation: everything below this line (pipecat -> torch ->
+# silero, SDK clients, ...) is the expensive part of process startup. Stamp t0
+# before it so [STARTUP] can report real spawn-to-ready latency.
+_PROC_T0 = time.monotonic()
 
 import aiohttp
 import pytz
@@ -29,6 +35,20 @@ from pipecat.services.llm_service import FunctionCallParams
 
 # from pipecat.services.gladia.stt import GladiaSTTService
 from pipecat.services.openai.llm import OpenAILLMService
+
+# Import every LLM service the runtime can select at MODULE level, not lazily
+# inside build_llm_service(): the lazy `import anthropic` cost ~27s on a loaded
+# box and landed AFTER the websocket transport existed but BEFORE the pipeline
+# started consuming audio — stalling the audio bridge long enough for keepalive
+# timeouts. Paying the import here keeps it inside the (warmed) startup window.
+try:
+    from pipecat.services.anthropic.llm import AnthropicLLMService
+except ImportError:  # anthropic extra not installed; provider guarded at runtime
+    AnthropicLLMService = None
+try:
+    from pipecat.services.openai.responses.llm import OpenAIResponsesLLMService
+except ImportError:
+    OpenAIResponsesLLMService = None
 from pipecat.transports.websocket.client import (
     WebsocketClientParams,
     WebsocketClientTransport,
@@ -93,7 +113,10 @@ def build_llm_service(persona: dict | None):
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic")
 
-        from pipecat.services.anthropic.llm import AnthropicLLMService
+        if AnthropicLLMService is None:
+            raise RuntimeError(
+                "LLM_PROVIDER=anthropic but the anthropic pipecat extra is not installed"
+            )
 
         llm = AnthropicLLMService(
             api_key=api_key,
@@ -120,7 +143,10 @@ def build_llm_service(persona: dict | None):
         api_surface = resolve_openai_api_surface()
         service_tier = clean_string(os.getenv("OPENAI_SERVICE_TIER"))
         if api_surface == "responses":
-            from pipecat.services.openai.responses.llm import OpenAIResponsesLLMService
+            if OpenAIResponsesLLMService is None:
+                raise RuntimeError(
+                    "OPENAI_API_SURFACE=responses but the responses pipecat extra is not installed"
+                )
 
             llm = OpenAIResponsesLLMService(
                 api_key=api_key,
@@ -706,7 +732,11 @@ async def main(
     from pipecat.utils.asyncio.task_manager import TaskManager, TaskManagerParams
     TaskManager().setup(TaskManagerParams(loop=asyncio.get_running_loop()))
     
-    log_and_flush(logging.INFO, f"[STARTUP] MeetingBaas bot launching with persona: {persona_name}")
+    log_and_flush(
+        logging.INFO,
+        f"[STARTUP] MeetingBaas bot launching with persona: {persona_name} "
+        f"(imports+spawn took {time.monotonic() - _PROC_T0:.1f}s)",
+    )
     load_dotenv()
 
     if not websocket_url:
@@ -1210,8 +1240,26 @@ def cli() -> None:
         help="Path to persona data JSON payload. Preferred for MCP secrets.",
     )
     parser.add_argument("--meetingbaas-bot-id", help="MeetingBaas bot ID")
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help=(
+            "Import-warmup mode: exit immediately after module imports. Run once "
+            "at API startup so bytecode and page caches are hot and real bot "
+            "spawns skip the multi-minute cold import of pipecat/torch/LLM SDKs."
+        ),
+    )
 
     args = parser.parse_args()
+
+    if args.warmup:
+        # All heavy imports already ran at module load; reaching this line IS
+        # the warmup. Exit before any argument validation or network use.
+        print(
+            f"[WARMUP] Imports warmed in {time.monotonic() - _PROC_T0:.1f}s",
+            flush=True,
+        )
+        return
 
     # Use the persona name passed via command line (should be the folder name like "account_executive")
     persona_name = args.persona_name
