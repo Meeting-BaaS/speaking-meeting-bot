@@ -60,12 +60,17 @@ def start_pipecat_warmup() -> None:
             stderr=subprocess.STDOUT,
             text=True,
         )
-    except Exception as e:
+    except OSError as e:
         logger.warning(f"Could not start Pipecat import warmup: {e}")
         return
-    threading.Thread(
-        target=stream_output, args=(process.stdout, "[Pipecat WARMUP]"), daemon=True
-    ).start()
+
+    def _pump_and_reap() -> None:
+        stream_output(process.stdout, "[Pipecat WARMUP]")
+        # stdout EOF means the child exited; wait() reaps it so the one-shot
+        # warmup process doesn't linger as a zombie.
+        process.wait()
+
+    threading.Thread(target=_pump_and_reap, daemon=True).start()
     logger.info(f"Started Pipecat import warmup (PID {process.pid})")
 
 

@@ -1,7 +1,6 @@
 """Routes messages between clients and Pipecat."""
 
 from collections import deque
-from typing import Deque, Dict
 
 from core.connection import registry
 from core.converter import converter
@@ -21,15 +20,15 @@ class MessageRouter:
         self.converter = converter
         self.logger = logger
         self.closing_clients = set()  # Track clients that are in the process of closing
-        self._pending_audio: Dict[str, Deque[bytes]] = {}
-        self._pending_audio_bytes: Dict[str, int] = {}
+        self._pending_audio: dict[str, deque[bytes]] = {}
+        self._pending_audio_bytes: dict[str, int] = {}
 
-    def mark_closing(self, client_id: str):
+    def mark_closing(self, client_id: str) -> None:
         """Mark a client as closing to prevent sending more data to it."""
         self.closing_clients.add(client_id)
         self.logger.debug(f"Marked client {client_id} as closing")
 
-    def _buffer_pending_audio(self, client_id: str, message: bytes):
+    def _buffer_pending_audio(self, client_id: str, message: bytes) -> None:
         """Hold meeting audio for a client whose Pipecat side isn't connected yet."""
         queue = self._pending_audio.setdefault(client_id, deque())
         queue.append(message)
@@ -38,7 +37,7 @@ class MessageRouter:
             total -= len(queue.popleft())
         self._pending_audio_bytes[client_id] = total
 
-    async def on_pipecat_connected(self, client_id: str):
+    async def on_pipecat_connected(self, client_id: str) -> None:
         """A (possibly replacement) Pipecat child connected: unblock and catch up.
 
         Clearing closing_clients matters as much as the replay — mark_closing
@@ -46,17 +45,44 @@ class MessageRouter:
         received another frame, leaving the bot deaf and mute for good.
         """
         self.closing_clients.discard(client_id)
-        queue = self._pending_audio.pop(client_id, None)
-        total = self._pending_audio_bytes.pop(client_id, 0)
-        if not queue:
-            return
-        self.logger.info(
-            f"Replaying {total} buffered audio bytes to Pipecat for client {client_id}"
-        )
-        for chunk in queue:
-            await self.send_to_pipecat(chunk, client_id)
+        await self._drain_pending_audio(client_id)
 
-    def drop_pending_audio(self, client_id: str):
+    async def _drain_pending_audio(self, client_id: str) -> None:
+        """Replay buffered audio in order, keeping what could not be delivered.
+
+        Chunks are removed from the queue only AFTER a successful send, so a
+        socket that dies mid-replay leaves the remainder buffered for the next
+        reconnect instead of silently dropping it. Live audio arriving during
+        the drain is appended behind the buffered chunks (see send_to_pipecat),
+        so ordering is preserved and the loop naturally picks it up.
+        """
+        queue = self._pending_audio.get(client_id)
+        if queue:
+            self.logger.info(
+                f"Replaying {self._pending_audio_bytes.get(client_id, 0)} buffered "
+                f"audio bytes to Pipecat for client {client_id}"
+            )
+        while queue:
+            pipecat = self.registry.get_pipecat(client_id)
+            if not pipecat or client_id in self.closing_clients:
+                return  # keep the remainder for the next (re)connect
+            chunk = queue[0]
+            try:
+                await pipecat.send_bytes(self.converter.raw_to_protobuf(chunk))
+            except Exception as e:
+                if "close" in str(e).lower() or "closed" in str(e).lower():
+                    self.mark_closing(client_id)
+                else:
+                    self.logger.error(f"Error replaying audio to Pipecat: {e}")
+                return  # chunk stays queued
+            queue.popleft()
+            self._pending_audio_bytes[client_id] = self._pending_audio_bytes.get(
+                client_id, 0
+            ) - len(chunk)
+        self._pending_audio.pop(client_id, None)
+        self._pending_audio_bytes.pop(client_id, None)
+
+    def drop_pending_audio(self, client_id: str) -> None:
         """Discard any audio buffered for a client (bot removed / call over)."""
         self._pending_audio.pop(client_id, None)
         self._pending_audio_bytes.pop(client_id, None)
@@ -110,9 +136,10 @@ class MessageRouter:
             return
 
         pipecat = self.registry.get_pipecat(client_id)
-        if not pipecat:
-            # Child still starting (or between reconnects): keep the audio so
-            # words spoken during warmup reach STT once it connects.
+        if not pipecat or self._pending_audio.get(client_id):
+            # Child still starting (or between reconnects), or a replay drain is
+            # in progress: queue behind the buffered audio so words spoken
+            # during warmup reach STT once it connects, in order.
             self._buffer_pending_audio(client_id, message)
             return
         try:
