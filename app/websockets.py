@@ -267,6 +267,9 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 async def pipecat_websocket(websocket: WebSocket, client_id: str):
     """Handle WebSocket connections from Pipecat."""
     await registry.connect(websocket, client_id, is_pipecat=True)
+    # Un-blacklist a reconnecting child and replay audio buffered while it was
+    # starting, so speech from the warmup window still reaches STT.
+    await message_router.on_pipecat_connected(client_id)
     try:
         while True:
             message = await websocket.receive()
