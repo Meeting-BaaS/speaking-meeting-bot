@@ -46,13 +46,16 @@ class MessageRouter:
         was permanent, so a child that reconnected after a socket error never
         received another frame, leaving the bot deaf and mute for good.
         """
-        self.closing_clients.discard(client_id)
         # Serialize drains per client: two same-client_id connects (e.g. a
         # reconnect racing a stale socket's handler) must not run the drain
         # loop concurrently — both would await send on the same queue[0] and
         # the two popleft()s could duplicate one chunk and discard another.
         lock = self._drain_locks.setdefault(client_id, asyncio.Lock())
         async with lock:
+            # Clear closing state only once any earlier drain has finished:
+            # done before the lock, a failing old drain could re-mark the
+            # client closing and this fresh connection would start poisoned.
+            self.closing_clients.discard(client_id)
             await self._drain_pending_audio(client_id)
 
     async def _drain_pending_audio(self, client_id: str) -> None:
