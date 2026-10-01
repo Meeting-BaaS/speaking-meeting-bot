@@ -682,6 +682,9 @@ async def leave_bot(
         # Remove from our storage
         PIPECAT_PROCESSES.pop(client_id, None)
 
+        # Drop any meeting audio buffered for a child that will never connect
+        message_router.drop_pending_audio(client_id)
+
         # Clean up meeting details
         if client_id in MEETING_DETAILS:
             MEETING_DETAILS.pop(client_id, None)

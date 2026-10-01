@@ -72,6 +72,14 @@ def create_app() -> FastAPI:
     # Add API key middleware
     app.middleware("http")(api_key_middleware)
 
+    @app.on_event("startup")
+    async def _warm_pipecat_imports() -> None:
+        # One throwaway --warmup child so real bot spawns don't pay the
+        # multi-minute cold import of pipecat/torch/LLM SDKs (see core/process).
+        from core.process import start_pipecat_warmup
+
+        start_pipecat_warmup()
+
     # Set the server URL for the OpenAPI schema
     app.openapi_schema = None  # Clear any existing schema
 
@@ -306,6 +314,15 @@ def start_server(host: str = "0.0.0.0", port: int = 7014, local_dev: bool = Fals
         host,
         "--port",
         str(server_port),
+        # Keep websocket peers alive through load spikes: with the 20s default
+        # ping timeout, a starved event loop (e.g. while a Pipecat child cold-
+        # imports torch) let the audio sockets die with "keepalive ping
+        # timeout" mid-warmup. Pings still flow every 20s; peers just get 60s
+        # to answer before the connection is declared dead.
+        "--ws-ping-interval",
+        "20",
+        "--ws-ping-timeout",
+        "60",
     ]
 
     if local_dev:
