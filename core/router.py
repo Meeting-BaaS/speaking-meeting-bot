@@ -1,5 +1,6 @@
 """Routes messages between clients and Pipecat."""
 
+import asyncio
 from collections import deque
 
 from core.connection import registry
@@ -22,6 +23,7 @@ class MessageRouter:
         self.closing_clients = set()  # Track clients that are in the process of closing
         self._pending_audio: dict[str, deque[bytes]] = {}
         self._pending_audio_bytes: dict[str, int] = {}
+        self._drain_locks: dict[str, asyncio.Lock] = {}
 
     def mark_closing(self, client_id: str) -> None:
         """Mark a client as closing to prevent sending more data to it."""
@@ -45,7 +47,13 @@ class MessageRouter:
         received another frame, leaving the bot deaf and mute for good.
         """
         self.closing_clients.discard(client_id)
-        await self._drain_pending_audio(client_id)
+        # Serialize drains per client: two same-client_id connects (e.g. a
+        # reconnect racing a stale socket's handler) must not run the drain
+        # loop concurrently — both would await send on the same queue[0] and
+        # the two popleft()s could duplicate one chunk and discard another.
+        lock = self._drain_locks.setdefault(client_id, asyncio.Lock())
+        async with lock:
+            await self._drain_pending_audio(client_id)
 
     async def _drain_pending_audio(self, client_id: str) -> None:
         """Replay buffered audio in order, keeping what could not be delivered.
@@ -86,6 +94,7 @@ class MessageRouter:
         """Discard any audio buffered for a client (bot removed / call over)."""
         self._pending_audio.pop(client_id, None)
         self._pending_audio_bytes.pop(client_id, None)
+        self._drain_locks.pop(client_id, None)
 
     async def send_binary(self, message: bytes, client_id: str):
         """Send binary data to a client."""
