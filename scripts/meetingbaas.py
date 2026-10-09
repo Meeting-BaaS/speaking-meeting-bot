@@ -2,7 +2,6 @@ import asyncio
 import contextlib
 import os
 import argparse
-import inspect
 import json
 import time
 from dataclasses import dataclass
@@ -21,15 +20,16 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
 from pipecat.frames.frames import LLMMessagesAppendFrame, TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.runner import WorkerRunner
+from pipecat.pipeline.task import PipelineParams
+from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
-from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.cartesia.tts import CartesiaTTSService, GenerationConfig
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.llm_service import FunctionCallParams
 
@@ -102,8 +102,14 @@ def log_and_flush(level, msg):
     for h in logger.handlers:
         h.flush()
 
-def build_llm_service(persona: dict | None):
-    """Build a Pipecat LLM service for OpenAI, Anthropic, or OpenAI-compatible Z.ai."""
+def build_llm_service(persona: dict | None, system_instruction: str | None = None):
+    """Build a Pipecat LLM service for OpenAI, Anthropic, or OpenAI-compatible Z.ai.
+
+    Pipecat 1.12: services take a Settings dataclass (bare model=/run_in_parallel=
+    kwargs are gone), and the system prompt lives on the service as
+    system_instruction — a leading {"role": "system"} context message is
+    deprecated since 1.9 and stops working in 2.0.
+    """
     provider = resolve_llm_provider(persona)
     model = resolve_llm_model(provider, persona)
     api_surface = None
@@ -120,8 +126,9 @@ def build_llm_service(persona: dict | None):
 
         llm = AnthropicLLMService(
             api_key=api_key,
-            model=model,
-            run_in_parallel=False,
+            settings=AnthropicLLMService.Settings(
+                model=model, system_instruction=system_instruction
+            ),
         )
     elif provider == "zai":
         api_key = clean_string(os.getenv("ZAI_API_KEY"))
@@ -132,8 +139,9 @@ def build_llm_service(persona: dict | None):
         llm = OpenAILLMService(
             api_key=api_key,
             base_url=base_url,
-            model=model,
-            run_in_parallel=False,
+            settings=OpenAILLMService.Settings(
+                model=model, system_instruction=system_instruction
+            ),
         )
     else:
         api_key = clean_string(os.getenv("OPENAI_API_KEY"))
@@ -151,15 +159,17 @@ def build_llm_service(persona: dict | None):
             llm = OpenAIResponsesLLMService(
                 api_key=api_key,
                 service_tier=service_tier,
-                settings=OpenAIResponsesLLMService.Settings(model=model),
-                run_in_parallel=False,
+                settings=OpenAIResponsesLLMService.Settings(
+                    model=model, system_instruction=system_instruction
+                ),
             )
         else:
             llm = OpenAILLMService(
                 api_key=api_key,
-                model=model,
                 service_tier=service_tier,
-                run_in_parallel=False,
+                settings=OpenAILLMService.Settings(
+                    model=model, system_instruction=system_instruction
+                ),
             )
 
     surface_detail = f", api_surface={api_surface}" if api_surface else ""
@@ -213,35 +223,15 @@ def build_cartesia_tts_kwargs(
     sample_rate: int,
     speed: float,
 ) -> dict:
-    """Build Cartesia kwargs across Pipecat versions without breaking startup."""
-    kwargs = {
+    """Build Cartesia kwargs for Pipecat 1.12+ (Settings replaces voice_id/params)."""
+    return {
         "api_key": api_key,
-        "voice_id": voice_id,
         "sample_rate": sample_rate,
+        "settings": CartesiaTTSService.Settings(
+            voice=voice_id,
+            generation_config=GenerationConfig(speed=speed),
+        ),
     }
-    try:
-        signature = inspect.signature(CartesiaTTSService.__init__)
-    except (TypeError, ValueError):
-        signature = None
-
-    params = signature.parameters if signature else {}
-    if "speed" in params:
-        kwargs["speed"] = speed
-        return kwargs
-
-    if "params" not in params or not hasattr(CartesiaTTSService, "InputParams"):
-        return kwargs
-
-    try:
-        kwargs["params"] = CartesiaTTSService.InputParams(
-            generation_config={"speed": speed}
-        )
-    except Exception as exc:
-        log_and_flush(
-            logging.WARNING,
-            f"[TTS] Cartesia speed config not supported by this Pipecat version: {exc}",
-        )
-    return kwargs
 
 
 def build_mcp_context_prompt(mcp_config) -> str:
@@ -833,13 +823,29 @@ async def main(
         speed=tts_speed,
     )
     tts = CartesiaTTSService(**tts_kwargs)
-    speed_applied = "speed" in tts_kwargs or "params" in tts_kwargs
+    speed_applied = "settings" in tts_kwargs
     log_and_flush(
         logging.INFO,
         f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}, speed={tts_speed}, speed_applied={speed_applied}",
     )
 
-    llm = build_llm_service(persona)
+    # Assemble the system prompt BEFORE building the LLM service: since
+    # pipecat 1.9 the system prompt belongs on the service (system_instruction),
+    # not as a leading {"role": "system"} message in LLMContext.
+    system_content = persona["prompt"]
+    if additional_content:
+        system_content += f"\n\nYou are {persona_name}\n\n{DEFAULT_SYSTEM_PROMPT}\n\n"
+        system_content += "You have the following additional context. USE IT TO INFORM YOUR RESPONSES:\n\n"
+        system_content += additional_content
+        system_content += "You are a meeting bot. You are in a meeting with a group of people. You are here to help the group. You are not the host of the meeting. You are not the organizer of the meeting. You are not the participant in the meeting. You are the meeting bot."
+        system_content += "YOU ARE HELP TO HELP. KEEP IT SHORT. EVERYTHING YOU SAY WILL BE REPEATED BACK TO THE GROUP OUT LOUD so DO NOT add PUNCTUATION OR CAPS. JUST SAY WHAT YOU NEED TO SAY IN A CONCISE MANNER."
+
+    mcp_context = build_mcp_context_prompt(persona.get("mcp"))
+    if mcp_context:
+        system_content += mcp_context
+        log_and_flush(logging.INFO, "[MCP] Added MCP metadata to system context")
+
+    llm = build_llm_service(persona, system_instruction=system_content)
 
     mcp_manager = None
     if enable_tools:
@@ -940,29 +946,10 @@ async def main(
     bot_name = persona_name or "Bot"
     log_and_flush(logging.INFO, f"[BOT] Using bot name: {bot_name}")
 
-    # Create a more comprehensive system prompt
-    system_content = persona["prompt"]
-
-    # Add additional context if available
-    if additional_content:
-        system_content += f"\n\nYou are {persona_name}\n\n{DEFAULT_SYSTEM_PROMPT}\n\n"
-        system_content += "You have the following additional context. USE IT TO INFORM YOUR RESPONSES:\n\n"
-        system_content += additional_content
-        system_content += "You are a meeting bot. You are in a meeting with a group of people. You are here to help the group. You are not the host of the meeting. You are not the organizer of the meeting. You are not the participant in the meeting. You are the meeting bot."
-        system_content += "YOU ARE HELP TO HELP. KEEP IT SHORT. EVERYTHING YOU SAY WILL BE REPEATED BACK TO THE GROUP OUT LOUD so DO NOT add PUNCTUATION OR CAPS. JUST SAY WHAT YOU NEED TO SAY IN A CONCISE MANNER."
-
-    mcp_context = build_mcp_context_prompt(persona.get("mcp"))
-    if mcp_context:
-        system_content += mcp_context
-        log_and_flush(logging.INFO, "[MCP] Added MCP metadata to system context")
-
-    # Set up messages
-    messages = [
-        {
-            "role": "system",
-            "content": system_content,
-        },
-    ]
+    # The system prompt was set on the LLM service above (system_instruction);
+    # the context starts with no messages. A leading "system" message here is
+    # deprecated since pipecat 1.9 and stops working in 2.0.
+    messages = []
 
     # Create the context object - with or without tools
     if enable_tools and tools:
@@ -1030,12 +1017,15 @@ async def main(
     ])
 
     # Metrics log per-service TTFB (STT/LLM/TTS) — grep journal for "TTFB".
-    task = PipelineTask(
+    # PipelineTask/PipelineRunner are deprecated since pipecat 1.3 (removed in
+    # 2.0); PipelineWorker + WorkerRunner is the supported pair.
+    task = PipelineWorker(
         pipeline,
         params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
         check_dangling_tasks=True,
     )
-    runner = PipelineRunner()
+    runner = WorkerRunner()
+    await runner.add_workers(task)
 
     # Task to periodically save the transcript
     async def periodic_transcript_save():
@@ -1182,7 +1172,9 @@ async def main(
         log_and_flush(logging.INFO, "[RUN] Starting pipeline runner...")
         log_and_flush(logging.INFO, f"[RUN] Pipeline components: {[type(c).__name__ for c in pipeline._processors]}")
         log_and_flush(logging.INFO, "[RUN] Running pipeline with integrated transport...")
-        await runner.run(task)
+        # Worker was registered via add_workers(); passing it to run() is the
+        # deprecated 1.x form.
+        await runner.run()
     except Exception as e:
         log_and_flush(logging.ERROR, f"[ERROR] Exception in pipeline: {e}")
         import traceback
