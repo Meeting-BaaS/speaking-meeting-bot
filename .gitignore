@@ -170,3 +170,10 @@ call_summaries/*
 
 # local secrets, never commit
 .env_clean
+
+# CI working files (see .ci/scripts)
+.ci/*.local-image
+.ci/*.remote-image
+.ci/home
+.ci/tmp-validate
+.ci/deployment

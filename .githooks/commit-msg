@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+bash "$ROOT_DIR/.ci/scripts/git/validate-commit-message.sh" "$1"

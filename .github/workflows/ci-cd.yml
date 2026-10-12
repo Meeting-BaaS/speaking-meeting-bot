@@ -1,0 +1,238 @@
+name: Speaking Bot CI/CD
+
+# Same shape as the connector's and meeting-baas-v2's pipelines for one service:
+# PRs are linted and tested, a push to preprod builds and rolls the preprod
+# speaking bot, a vX.Y.Z tag on main builds and rolls prod, and
+# workflow_dispatch redeploys preprod by hand.
+#
+# This repository is public, so everything a pull request can trigger runs on
+# GitHub-hosted runners; only pushes to preprod, release tags and manual
+# dispatches (all maintainer-only events) reach the self-hosted cluster runner.
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+    branches:
+      - main
+      - preprod
+
+  push:
+    branches:
+      - preprod
+    tags:
+      - 'v*.*.*'
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment"
+        required: true
+        default: "preprod"
+        type: choice
+        options:
+          - preprod
+      image_tag:
+        description: "Optional custom image tag"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # Lint and unit tests on every event; never touches the cluster.
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Cache the Poetry virtualenv
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .venv
+          key: poetry-${{ runner.os }}-py3.11-${{ hashFiles('poetry.lock') }}
+
+      - name: Install dependencies
+        run: |
+          poetry config virtualenvs.in-project true
+          poetry install --no-interaction --no-ansi --no-root
+
+      # Reported but not blocking yet: main carries ~60 pre-existing findings
+      # (unused imports, E402 in scripts/meetingbaas.py). Drop
+      # continue-on-error once they are cleaned up.
+      - name: Lint
+        continue-on-error: true
+        run: poetry run ruff check .
+
+      - name: Unit tests
+        run: poetry run pytest tests
+
+  prepare:
+    name: Validate & prepare
+    runs-on: ubuntu-latest
+
+    outputs:
+      environment: ${{ steps.prepare.outputs.environment }}
+      image_tag: ${{ steps.prepare.outputs.image_tag }}
+      build_matrix: ${{ steps.prepare.outputs.build_matrix }}
+      deploy_target: ${{ steps.prepare.outputs.deploy_target }}
+      should_run: ${{ steps.prepare.outputs.should_run }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Make CI scripts executable
+        run: chmod +x .ci/scripts/*.sh .ci/scripts/git/*.sh .githooks/*
+
+      - name: Validate branch and PR target policy
+        if: github.event_name == 'pull_request'
+        env:
+          BRANCH_NAME: ${{ github.head_ref }}
+          PR_BASE_BRANCH: ${{ github.base_ref }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: bash .ci/scripts/git/validate-branch-name.sh
+
+      - name: Validate provider-agnostic scripts
+        run: .ci/scripts/validate-ci.sh
+
+      - name: Compute environment, services and image tag
+        id: prepare
+        if: github.event_name != 'pull_request'
+        env:
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
+          INPUT_SERVICE: speaking-bot
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: .ci/scripts/resolve-pipeline-context.sh >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    name: Build and push ${{ matrix.service }} image
+    runs-on: baas-k8s-runner
+    needs:
+      - test
+      - prepare
+
+    if: github.event_name != 'pull_request' && needs.prepare.outputs.should_run == 'true'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.prepare.outputs.build_matrix) }}
+
+    env:
+      ENVIRON: ${{ needs.prepare.outputs.environment }}
+      IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCW_SECRET_ACCESS_KEY }}
+      BUILDX_REGISTRY_CACHE: "true"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Make CI scripts executable
+        run: chmod +x .ci/scripts/*.sh
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build and push image
+        run: .ci/scripts/build-and-push.sh --service "${{ matrix.service }}" --image-tag "$IMAGE_TAG"
+
+  deploy:
+    name: Deploy to ${{ needs.prepare.outputs.environment }}
+    runs-on: baas-k8s-runner
+    needs:
+      - prepare
+      - build-and-push
+
+    if: github.event_name != 'pull_request' && needs.prepare.outputs.should_run == 'true' && needs.prepare.outputs.deploy_target != ''
+
+    # One deploy at a time per cluster, shared with meeting-baas-v2's and the
+    # connector's pipelines so no two ever run the controller against the same
+    # cluster concurrently.
+    concurrency:
+      group: cluster-deploy-${{ needs.prepare.outputs.environment }}
+      cancel-in-progress: false
+
+    env:
+      ENVIRON: ${{ needs.prepare.outputs.environment }}
+      IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
+      DEPLOY_TARGET: ${{ needs.prepare.outputs.deploy_target }}
+      GITHUB_ACCESS_TOKEN: ${{ secrets.CI_GITHUB_TOKEN }}
+      # Branch or tag of kubernetes-config-private to deploy with (repository
+      # variable; defaults to v2 when unset).
+      DEPLOYMENT_REF: ${{ vars.DEPLOYMENT_REF }}
+      DEPLOYMENT_DIR: .ci/deployment
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Make CI scripts executable
+        run: chmod +x .ci/scripts/*.sh
+
+      - name: Check out the deployment repo
+        run: .ci/scripts/checkout-deployment.sh
+
+      - name: Set up Helm
+        run: |
+          set -euo pipefail
+          VER="v3.18.4"
+          case "$(uname -m)" in
+            x86_64) ARCH="amd64" ;;
+            aarch64 | arm64) ARCH="arm64" ;;
+            *) echo "[ERROR] Unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          FILE="helm-${VER}-linux-${ARCH}.tar.gz"
+          # Pinned release checksums (helm v3.18.4, from the official
+          # get.helm.sh .sha256sum files).
+          case "${ARCH}" in
+            amd64) EXPECTED="f8180838c23d7c7d797b208861fecb591d9ce1690d8704ed1e4cb8e2add966c1" ;;
+            arm64) EXPECTED="c0a45e67eef0c7416a8a8c9e9d5d2d30d70e4f4d3f7bea5de28241fffa8f3b89" ;;
+          esac
+          if ! curl -fsSL --retry 3 --retry-delay 5 -o "/tmp/${FILE}" \
+            "https://get.helm.sh/${FILE}"; then
+            echo "[WARN] get.helm.sh download failed — falling back to GitHub releases"
+            curl -fsSL --retry 3 --retry-delay 5 -o "/tmp/${FILE}" \
+              "https://github.com/helm/helm/releases/download/${VER}/${FILE}"
+          fi
+          ACTUAL="$(sha256sum "/tmp/${FILE}" | cut -d' ' -f1)"
+          if [[ "${ACTUAL}" != "${EXPECTED}" ]]; then
+            echo "[ERROR] Helm archive checksum mismatch: expected ${EXPECTED}, got ${ACTUAL}" >&2
+            exit 1
+          fi
+          tar -xzf "/tmp/${FILE}" -C /tmp
+          mkdir -p "${HOME}/bin"
+          mv "/tmp/linux-${ARCH}/helm" "${HOME}/bin/helm"
+          echo "${HOME}/bin" >> "${GITHUB_PATH}"
+          "${HOME}/bin/helm" version --short
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4.0.1
+
+      - name: Secure kubeconfig
+        run: chmod 600 .ci/deployment/kubeconfig.yaml
+
+      - name: Deploy
+        run: |
+          bash .ci/scripts/deploy.sh \
+            --service "$DEPLOY_TARGET" \
+            --environment "$ENVIRON" \
+            --image-tag "$IMAGE_TAG"
