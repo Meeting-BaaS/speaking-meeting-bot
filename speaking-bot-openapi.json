@@ -425,15 +425,15 @@
             "anyOf": [
               {
                 "type": "number",
-                "maximum": 2.0,
-                "minimum": 0.5
+                "maximum": 1.5,
+                "minimum": 0.6
               },
               {
                 "type": "null"
               }
             ],
             "title": "Speech Speed",
-            "description": "TTS speaking speed multiplier. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default."
+            "description": "TTS speaking speed multiplier. Honored range is 0.6-1.5 (the runner clamps to it); values outside are rejected. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default."
           }
         },
         "additionalProperties": false,
@@ -567,7 +567,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "MCPConfig",
-        "description": "MCP server metadata and optional live connection details."
+        "description": "Bot-level MCP configuration: the set of servers to expose plus global instructions."
       },
       "MCPServerConfig": {
         "properties": {

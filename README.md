@@ -560,6 +560,27 @@ export BASE_URL=https://your-server-domain.com
 poetry run api --host 0.0.0.0 --port ${PORT}
 ```
 
+### MeetingBaas hosted deployment (preprod / prod)
+
+The hosted service runs on the MeetingBaas Kubernetes clusters, rolled by `.github/workflows/ci-cd.yml` with the same conventions as the other services:
+
+- A pull request runs lint and the unit tests on a GitHub-hosted runner. PRs target `preprod` from a `feat/`, `fix/`, `chore/` or `bugfix/` branch; `preprod` is promoted into `main`.
+- A push to `preprod` builds the image, pushes it to the preprod registry as `speaking-bot-v2:<YYYY-MM-DD>-<sha12>` and rolls `https://speaking.pre-prod-meetingbaas.com`.
+- A `vX.Y.Z` tag on the head of `main` builds `speaking-bot-v2:<YYYY-MM-DD>-vX.Y.Z` in the prod registry and rolls `https://speaking.meetingbaas.com`.
+- "Run workflow" on the Actions tab redeploys preprod by hand, optionally with an existing image tag.
+
+The chart (`charts/speaking_bot_chart`) and the per-environment values and secrets (`environment-overrides/speaking_bot_chart/<env>.yaml`) live in the private `kubernetes-config-private` repo, which the pipeline clones at deploy time (`.ci/scripts/checkout-deployment.sh`). The service keeps every bot's Pipecat process and state in one pod, so it runs as a single replica; a rollout ends the bots that are live at that moment.
+
+To deploy from a laptop that has a clone of the deployment repo:
+
+```bash
+ENVIRON=preprod IMAGE_TAG=2026-10-12-abcdef123456 \
+  .ci/scripts/deploy.sh --service speaking-bot --environment preprod --image-tag 2026-10-12-abcdef123456 \
+  --deployment-dir ../kubernetes-config-private
+```
+
+Install the commit-message and branch-name hooks once with `.ci/scripts/git/install-hooks.sh`.
+
 ### API Documentation
 
 Once the server is running, you can access:
