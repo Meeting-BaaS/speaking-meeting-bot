@@ -287,6 +287,11 @@ class BotCredentials(BaseModel):
         }
 
 
+MeetingBaasTranscriptionProvider = Literal[
+    "gladia", "deepgram", "assemblyai", "speechmatics", "soniox"
+]
+
+
 class BotRequest(BaseModel):
     """Request model for creating a speaking bot in a meeting."""
 
@@ -420,6 +425,18 @@ class BotRequest(BaseModel):
             "configuration. Keys are used only by this bot's pipeline and are "
             "never stored or returned."
         ),
+    )
+    transcription_enabled: bool = Field(
+        True,
+        description=(
+            "Have MeetingBaas transcribe the recording once the meeting ends, "
+            "with the bot's own turns attributed to it by name. Set false for "
+            "a recording without a transcript."
+        ),
+    )
+    transcription_provider: MeetingBaasTranscriptionProvider = Field(
+        "gladia",
+        description="MeetingBaas speech-to-text provider for that transcript.",
     )
 
     # NOTE: streaming_audio_frequency is intentionally excluded and handled internally
