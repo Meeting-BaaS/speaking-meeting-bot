@@ -161,13 +161,15 @@ def create_meeting_bot(
     meeting_url: str,
     websocket_url: str,
     bot_id: str,
-    persona_name: str,
+    bot_name: str,
     api_key: str,
     bot_image: Optional[str] = None,
     entry_message: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
     streaming_audio_frequency: str = "16khz",
     webhook_url: Optional[str] = None,
+    transcription_enabled: bool = True,
+    transcription_provider: str = "gladia",
 ):
     """
     Direct API call to MeetingBaas to create a bot
@@ -176,13 +178,15 @@ def create_meeting_bot(
         meeting_url: URL of the meeting to join
         websocket_url: Base WebSocket URL for audio streaming
         bot_id: Unique identifier for the bot
-        persona_name: Name to display for the bot
+        bot_name: Name the bot shows in the call
         api_key: MeetingBaas API key
         bot_image: Optional URL for bot avatar
         entry_message: Optional message to send when joining
         extra: Optional additional metadata for the bot
         streaming_audio_frequency: Audio frequency for streaming (16khz or 24khz)
         webhook_url: Optional webhook URL for callbacks
+        transcription_enabled: Have MeetingBaas transcribe the recording afterwards
+        transcription_provider: MeetingBaas speech-to-text provider for that transcript
 
     Returns:
         str: The bot ID if successful, None otherwise
@@ -211,10 +215,17 @@ def create_meeting_bot(
         CallbackConfig(url=webhook_url, secret=webhook_secret) if webhook_url else None
     )
 
+    # Without this MeetingBaas records but never transcribes (provider "none").
+    transcription_config = (
+        TranscriptionConfig(provider=transcription_provider)
+        if transcription_enabled
+        else None
+    )
+
     # Create request model
     request = CreateBotRequest(
         meeting_url=meeting_url,
-        bot_name=persona_name,
+        bot_name=bot_name,
         streaming_enabled=True,
         streaming_config=streaming_config,
         bot_image=bot_image,
@@ -222,6 +233,8 @@ def create_meeting_bot(
         extra=extra,
         callback_enabled=callback_enabled,
         callback_config=callback_config,
+        transcription_enabled=transcription_enabled,
+        transcription_config=transcription_config,
         allow_multiple_bots=True,
     )
 
@@ -236,15 +249,18 @@ def create_meeting_bot(
         # Fall back to manual conversion if that fails
         config = {
             "meeting_url": meeting_url,
-            "bot_name": persona_name,
+            "bot_name": bot_name,
             "streaming_enabled": True,
             "streaming_config": {
                 "input_url": websocket_with_path,
                 "output_url": websocket_with_path,
                 "audio_frequency": audio_freq_hz,
             },
+            "transcription_enabled": transcription_enabled,
             "allow_multiple_bots": True,
         }
+        if transcription_enabled:
+            config["transcription_config"] = {"provider": transcription_provider}
 
         # Add optional fields
         if bot_image:

@@ -63,6 +63,7 @@ from utils.runtime import (
 
 # Import the new persona detail extraction service
 from app.services.persona_detail_extraction import extract_persona_details_from_prompt
+from app.display_name import resolve_display_name
 
 router = APIRouter()
 
@@ -137,6 +138,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
     # --- Streamlined Persona and Prompt Resolution Logic ---
     resolved_persona_data: Dict[str, Any] = {}
     persona_name_for_logging: str = "Unknown"
+    bot_name_selected_persona = False
 
     if request.prompt:  # Case 1: Custom prompt provided (dynamic persona)
         logger.info(f"Processing custom prompt for bot {bot_client_id}")
@@ -203,6 +205,12 @@ async def join_meeting(request: BotRequest, client_request: Request):
                 logger.warning(
                     "No personas found, using fallback persona: baas_onboarder."
                 )
+
+        # A bot_name that is just the chosen persona's key shows the persona's
+        # name, whichever field picked the persona.
+        bot_name_selected_persona = (
+            request.bot_name or ""
+        ).strip() == resolved_persona_name
 
         try:
             resolved_persona_data = persona_manager.get_persona(resolved_persona_name)
@@ -381,11 +389,19 @@ async def join_meeting(request: BotRequest, client_request: Request):
     if credentials:
         BOT_CREDENTIALS[bot_client_id] = credentials
 
+    # Index 1 is the name the call shows. Floor control matches the roster's
+    # speaking names against it (app/websockets.py), so it must be that name,
+    # not the persona's.
+    display_name = resolve_display_name(
+        request.bot_name,
+        resolved_persona_data.get("name", persona_name_for_logging),
+        bot_name_selected_persona,
+    )
+    logger.info(f"Display name in the call: {display_name}")
+
     MEETING_DETAILS[bot_client_id] = (
         request.meeting_url,
-        resolved_persona_data.get(
-            "name", persona_name_for_logging
-        ),  # Use display name from resolved data
+        display_name,
         None,  # meetingbaas_bot_id, will be set after creation
         request.enable_tools,
         streaming_audio_frequency,
@@ -500,15 +516,15 @@ async def join_meeting(request: BotRequest, client_request: Request):
             meeting_url=request.meeting_url,
             websocket_url=websocket_url,
             bot_id=bot_client_id,
-            persona_name=resolved_persona_data.get(
-                "name", persona_name_for_logging
-            ),  # Use resolved display name
+            bot_name=display_name,
             api_key=api_key,
             bot_image=bot_image_str,  # Use the pre-stringified value
             entry_message=final_entry_message,
             extra=request.extra,
             streaming_audio_frequency=streaming_audio_frequency,
             webhook_url=webhook_url,
+            transcription_enabled=request.transcription_enabled,
+            transcription_provider=request.transcription_provider,
         )
     except MeetingBaasError as e:
         # Surface the upstream rejection (409 bot-already-exists, 401 bad key, …)

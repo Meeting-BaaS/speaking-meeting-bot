@@ -1,0 +1,31 @@
+import os
+import subprocess
+import sys
+import unittest
+
+
+class PipelineRuntimeTest(unittest.TestCase):
+    def test_worker_is_registered_and_completes_pipeline(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import asyncio\n"
+                "from scripts import meetingbaas as m\n"
+                "async def check():\n"
+                "    pipeline = m.Pipeline([])\n"
+                "    worker, runner = await m.build_pipeline_runner(pipeline)\n"
+                "    assert runner.get_worker(worker.name) is worker\n"
+                "    from pipecat.frames.frames import EndFrame\n"
+                "    await worker.queue_frames([EndFrame()])\n"
+                "    await asyncio.wait_for(runner.run(), timeout=5)\n"
+                "    print('registered')\n"
+                "asyncio.run(check())\n",
+            ],
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "registered")
