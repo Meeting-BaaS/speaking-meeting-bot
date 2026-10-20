@@ -6,6 +6,7 @@ import os
 import sys
 
 from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
@@ -71,6 +72,22 @@ def create_app() -> FastAPI:
 
     # Add API key middleware
     app.middleware("http")(api_key_middleware)
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error_without_input(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        # FastAPI's default 422 echoes the offending input back. Request bodies
+        # can carry secrets (credentials.*, mcp.servers[].headers), so return
+        # the location, message and type only.
+        errors = [
+            {k: v for k, v in error.items() if k not in ("input", "ctx")}
+            for error in exc.errors()
+        ]
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"detail": errors},
+        )
 
     @app.on_event("startup")
     async def _warm_pipecat_imports() -> None:
