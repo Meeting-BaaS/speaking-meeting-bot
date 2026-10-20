@@ -64,6 +64,24 @@ class LLMProviderRoutingTest(unittest.TestCase):
 
         self.assertEqual(surface, "chat")
 
+    def test_all_providers_preserve_sequential_tools_and_system_instruction(self):
+        result = self.run_meetingbaas_snippet(
+            "import os\n"
+            "from scripts import meetingbaas\n"
+            "for provider, surface in [('anthropic', 'chat'), ('openai', 'chat'), "
+            "('openai', 'responses'), ('zai', 'chat')]:\n"
+            "    os.environ['OPENAI_API_SURFACE'] = surface\n"
+            "    llm = meetingbaas.build_llm_service({'llm_provider': provider}, "
+            "system_instruction='Stay in character')\n"
+            "    assert llm._run_in_parallel is False, (provider, surface)\n"
+            "    assert llm._settings.system_instruction == 'Stay in character'\n"
+            "print('verified')\n",
+            ANTHROPIC_API_KEY="test-key",
+            OPENAI_API_KEY="test-key",
+            ZAI_API_KEY="test-key",
+        )
+        self.assertEqual(result, "verified")
+
 
 if __name__ == "__main__":
     unittest.main()

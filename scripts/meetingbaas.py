@@ -118,8 +118,8 @@ async def build_pipeline_runner(pipeline):
 def build_llm_service(persona: dict | None, system_instruction: str | None = None):
     """Build a Pipecat LLM service for OpenAI, Anthropic, or OpenAI-compatible Z.ai.
 
-    Pipecat 1.12: services take a Settings dataclass (bare model=/run_in_parallel=
-    kwargs are gone), and the system prompt lives on the service as
+    Pipecat 1.12: model configuration uses a Settings dataclass. Tool calls
+    remain sequential via LLMService.run_in_parallel, and the system prompt uses
     system_instruction — a leading {"role": "system"} context message is
     deprecated since 1.9 and stops working in 2.0.
     """
@@ -139,6 +139,7 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
 
         llm = AnthropicLLMService(
             api_key=api_key,
+            run_in_parallel=False,
             settings=AnthropicLLMService.Settings(
                 model=model, system_instruction=system_instruction
             ),
@@ -151,6 +152,7 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
         base_url = clean_string(os.getenv("ZAI_BASE_URL")) or DEFAULT_ZAI_BASE_URL
         llm = OpenAILLMService(
             api_key=api_key,
+            run_in_parallel=False,
             base_url=base_url,
             settings=OpenAILLMService.Settings(
                 model=model, system_instruction=system_instruction
@@ -171,6 +173,7 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
 
             llm = OpenAIResponsesLLMService(
                 api_key=api_key,
+                run_in_parallel=False,
                 service_tier=service_tier,
                 settings=OpenAIResponsesLLMService.Settings(
                     model=model, system_instruction=system_instruction
@@ -179,6 +182,7 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
         else:
             llm = OpenAILLMService(
                 api_key=api_key,
+                run_in_parallel=False,
                 service_tier=service_tier,
                 settings=OpenAILLMService.Settings(
                     model=model, system_instruction=system_instruction
