@@ -438,6 +438,22 @@ curl -X POST http://localhost:${PORT}/bots \
   }'
 ```
 
+### Bring Your Own Keys
+
+Each bot can carry its own provider keys instead of using the server's: pass a `credentials` object with any of `llm_api_key` (for the provider in `llm_provider`), `stt_api_key` (Deepgram) and `tts_api_key` (Cartesia). Keys you leave out fall back to the server's environment. They are passed to that bot's Pipecat process through its environment only and are never stored, logged or returned.
+
+```bash
+curl -X POST http://localhost:${PORT}/bots \
+  -H "Content-Type: application/json" \
+  -H "x-meeting-baas-api-key: your-api-key" \
+  -d '{
+    "meeting_url": "https://meet.google.com/xxx-yyyy-zzz",
+    "prompt": "You are a concise meeting assistant.",
+    "llm_provider": "openai",
+    "credentials": {"llm_api_key": "sk-...", "tts_api_key": "your-cartesia-key"}
+  }'
+```
+
 ### Production Deployment Considerations
 
 When deploying to production, always set the `BASE_URL` environment variable to ensure reliable WebSocket connections:
