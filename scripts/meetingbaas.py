@@ -102,6 +102,19 @@ def log_and_flush(level, msg):
     for h in logger.handlers:
         h.flush()
 
+async def build_pipeline_runner(pipeline):
+    """Construct and register the meeting worker before the runner starts."""
+    # Metrics log per-service TTFB (STT/LLM/TTS) — grep journal for "TTFB".
+    task = PipelineWorker(
+        pipeline,
+        params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+        check_dangling_tasks=True,
+    )
+    runner = WorkerRunner()
+    await runner.add_workers(task)
+    return task, runner
+
+
 def build_llm_service(persona: dict | None, system_instruction: str | None = None):
     """Build a Pipecat LLM service for OpenAI, Anthropic, or OpenAI-compatible Z.ai.
 
@@ -1016,16 +1029,7 @@ async def main(
         transport.output(),  # Add transport output to send audio/data
     ])
 
-    # Metrics log per-service TTFB (STT/LLM/TTS) — grep journal for "TTFB".
-    # PipelineTask/PipelineRunner are deprecated since pipecat 1.3 (removed in
-    # 2.0); PipelineWorker + WorkerRunner is the supported pair.
-    task = PipelineWorker(
-        pipeline,
-        params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
-        check_dangling_tasks=True,
-    )
-    runner = WorkerRunner()
-    await runner.add_workers(task)
+    task, runner = await build_pipeline_runner(pipeline)
 
     # Task to periodically save the transcript
     async def periodic_transcript_save():
