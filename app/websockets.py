@@ -6,7 +6,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from core.connection import MEETING_DETAILS, PIPECAT_PROCESSES, registry
+from core.connection import BOT_CREDENTIALS, MEETING_DETAILS, PIPECAT_PROCESSES, registry
 from core.process import start_pipecat_process, terminate_process_gracefully
 from core.router import router as message_router
 from meetingbaas_pipecat.utils.logger import logger
@@ -204,6 +204,9 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 api_key="",
                 meetingbaas_bot_id=meetingbaas_bot_id or "",
                 mcp_runtime_headers=mcp_runtime_headers,
+                # Memory only; absent after an API restart, so the respawned
+                # child falls back to the server's keys.
+                credentials=BOT_CREDENTIALS.get(internal_client_id),
             )
 
             # Store the process for cleanup

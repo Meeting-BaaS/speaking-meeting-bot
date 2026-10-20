@@ -10,6 +10,8 @@ import threading
 from contextlib import suppress
 
 from meetingbaas_pipecat.utils.logger import logger
+from utils.credentials import credential_env_overrides
+from utils.llm_config import resolve_llm_provider
 from utils.runtime import get_state_dir
 
 PIPECAT_PROCESSES: Dict[str, subprocess.Popen] = {}
@@ -84,6 +86,7 @@ def start_pipecat_process(
     api_key: str = "",
     meetingbaas_bot_id: str = "",
     mcp_runtime_headers: list[dict[str, str] | None] | None = None,
+    credentials: Dict[str, str] | None = None,
 ) -> subprocess.Popen:
     """
     Start a Pipecat process for a client.
@@ -98,6 +101,7 @@ def start_pipecat_process(
         api_key: API key for authentication
         meetingbaas_bot_id: ID of the meetingbaas bot
         mcp_runtime_headers: Per-server MCP headers passed via environment only
+        credentials: Bring-your-own provider keys passed via environment only
 
     Returns:
         The subprocess.Popen object for the started process
@@ -169,6 +173,17 @@ def start_pipecat_process(
     child_env = os.environ.copy()
     if mcp_runtime_headers:
         child_env["MCP_RUNTIME_HEADERS_JSON"] = json.dumps(mcp_runtime_headers)
+    if credentials:
+        # Caller-supplied keys override the server's for this child only. The
+        # runner keeps reading the same env vars, so it needs no change.
+        overrides = credential_env_overrides(
+            resolve_llm_provider(persona_data), credentials
+        )
+        child_env.update(overrides)
+        logger.info(
+            f"Using caller-supplied credentials for client {client_id}: "
+            f"{', '.join(sorted(overrides))}"
+        )
 
     try:
         process = subprocess.Popen(

@@ -34,7 +34,7 @@ from utils.llm_config import (
 )
 from utils.mcp_client import split_mcp_runtime_headers
 from config.persona_utils import persona_manager
-from core.connection import MEETING_DETAILS, PIPECAT_PROCESSES, registry
+from core.connection import BOT_CREDENTIALS, MEETING_DETAILS, PIPECAT_PROCESSES, registry
 from core.process import start_pipecat_process, terminate_process_gracefully
 from core.router import router as message_router
 
@@ -342,7 +342,17 @@ async def join_meeting(request: BotRequest, client_request: Request):
             status_code=400 if request.llm_provider else 503,
         )
 
-    missing_key_env = missing_llm_provider_credential(resolved_llm_provider)
+    # Bring-your-own keys: plain strings from here on, kept in memory only and
+    # handed to the Pipecat child through its environment.
+    credentials = request.credentials.reveal() if request.credentials else {}
+    if credentials:
+        logger.info(
+            f"Caller supplied credentials for {', '.join(sorted(credentials))}"
+        )
+
+    missing_key_env = missing_llm_provider_credential(
+        resolved_llm_provider, credentials.get("llm_api_key")
+    )
     if missing_key_env:
         status_code = 400 if request.llm_provider else 503
         return JSONResponse(
@@ -368,6 +378,9 @@ async def join_meeting(request: BotRequest, client_request: Request):
     # Index 6 carries MCP headers in memory only. They must not be serialized
     # into the persona payload file, but websocket fallback spawns still need
     # them to authenticate to header-protected MCP servers.
+    if credentials:
+        BOT_CREDENTIALS[bot_client_id] = credentials
+
     MEETING_DETAILS[bot_client_id] = (
         request.meeting_url,
         resolved_persona_data.get(
@@ -501,6 +514,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
         # Surface the upstream rejection (409 bot-already-exists, 401 bad key, …)
         # instead of a generic 500 the caller can't act on.
         MEETING_DETAILS.pop(bot_client_id, None)
+        BOT_CREDENTIALS.pop(bot_client_id, None)
         return JSONResponse(
             content={
                 "message": f"MeetingBaas API rejected the bot: {e.message}",
@@ -534,6 +548,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
             api_key=api_key,
             meetingbaas_bot_id=meetingbaas_bot_id,
             mcp_runtime_headers=mcp_runtime_headers,
+            credentials=credentials or None,
         )
 
         # Store the process for later termination
@@ -554,6 +569,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
         # Clean up MEETING_DETAILS if bot creation failed
         if bot_client_id in MEETING_DETAILS:
             MEETING_DETAILS.pop(bot_client_id)
+        BOT_CREDENTIALS.pop(bot_client_id, None)
 
         return JSONResponse(
             content={
@@ -688,6 +704,7 @@ async def leave_bot(
         # Clean up meeting details
         if client_id in MEETING_DETAILS:
             MEETING_DETAILS.pop(client_id, None)
+        BOT_CREDENTIALS.pop(client_id, None)
 
         # Release ngrok URL if in local dev mode
         if LOCAL_DEV_MODE and client_id:

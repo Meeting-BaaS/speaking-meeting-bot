@@ -31,6 +31,7 @@ daily = "^0.2.1"
 [tool.poetry.group.dev.dependencies]
 grpcio-tools = "<=1.67.1"
 ipdb = "^0.13.13"
+pytest = "^8.3"
 
 [tool.ruff]
 line-length = 88

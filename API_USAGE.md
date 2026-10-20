@@ -55,6 +55,30 @@ curl -s -X POST http://127.0.0.1:7014/bots \
 | `extra`         | object    | Free-form context handed to the persona. |
 | `turn_config`   | object    | VAD tuning: `{confidence, start_secs, stop_secs, min_volume}`. Optional. |
 | `websocket_url` | string    | Override public WS base. Leave unset in prod. |
+| `credentials`   | object    | Bring your own keys: `{llm_api_key, stt_api_key, tts_api_key}` (LLM per `llm_provider`, Deepgram, Cartesia). Each one optional; missing keys fall back to the server's. Never stored or returned. |
+
+### Bring your own keys
+
+```bash
+curl -s -X POST http://127.0.0.1:7014/bots \
+  -H "Content-Type: application/json" \
+  -H "x-meeting-baas-api-key: $KEY" \
+  -d '{
+    "meeting_url": "https://meet.google.com/abc-defg-hij",
+    "bot_name": "Vibe",
+    "llm_provider": "anthropic",
+    "credentials": {
+      "llm_api_key": "sk-ant-...",
+      "stt_api_key": "<deepgram key>",
+      "tts_api_key": "<cartesia key>"
+    }
+  }'
+```
+
+The keys are handed to this bot's pipeline process only (through its
+environment), never written to the state dir, never logged, and never echoed —
+a 422 on a bad body omits the input. Omit a key to use the server's own. If the
+API restarts mid-call, a respawned pipeline falls back to the server keys.
 
 ## Remove a bot — `DELETE /bots/{bot_id}`
 
