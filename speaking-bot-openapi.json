@@ -226,6 +226,65 @@
   },
   "components": {
     "schemas": {
+      "BotCredentials": {
+        "properties": {
+          "llm_api_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "format": "password",
+            "title": "Llm Api Key",
+            "description": "API key for the LLM provider selected by llm_provider (OpenAI, Anthropic or Z.ai).",
+            "writeOnly": true
+          },
+          "stt_api_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "format": "password",
+            "title": "Stt Api Key",
+            "description": "Deepgram API key for speech-to-text.",
+            "writeOnly": true
+          },
+          "tts_api_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "format": "password",
+            "title": "Tts Api Key",
+            "description": "Cartesia API key for text-to-speech.",
+            "writeOnly": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "BotCredentials",
+        "description": "Bring-your-own provider keys for one bot.\n\nEvery field is optional; a key that is not supplied falls back to the\nserver's own configuration. Keys are handed to this bot's pipeline process\nonly, are never written to disk or logs, and are never returned by the API."
+      },
       "BotRequest": {
         "properties": {
           "meeting_url": {
@@ -434,6 +493,17 @@
             ],
             "title": "Speech Speed",
             "description": "TTS speaking speed multiplier. Honored range is 0.6-1.5 (the runner clamps to it); values outside are rejected. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default."
+          },
+          "credentials": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BotCredentials"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Bring your own provider keys for this bot (LLM, speech-to-text, text-to-speech). Any key left out falls back to the server's own configuration. Keys are used only by this bot's pipeline and are never stored or returned."
           }
         },
         "additionalProperties": false,
