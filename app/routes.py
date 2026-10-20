@@ -192,7 +192,6 @@ async def join_meeting(request: BotRequest, client_request: Request):
             logger.info(f"Using specified persona '{resolved_persona_name}' for bot.")
         elif request.bot_name and request.bot_name in persona_manager.personas:
             resolved_persona_name = request.bot_name
-            bot_name_selected_persona = True
             logger.info(f"Using bot_name as persona '{resolved_persona_name}' for bot.")
         else:
             available_personas = list(persona_manager.personas.keys())
@@ -206,6 +205,12 @@ async def join_meeting(request: BotRequest, client_request: Request):
                 logger.warning(
                     "No personas found, using fallback persona: baas_onboarder."
                 )
+
+        # A bot_name that is just the chosen persona's key shows the persona's
+        # name, whichever field picked the persona.
+        bot_name_selected_persona = (
+            request.bot_name or ""
+        ).strip() == resolved_persona_name
 
         try:
             resolved_persona_data = persona_manager.get_persona(resolved_persona_name)
