@@ -59,6 +59,8 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from config.persona_utils import PersonaManager
 from utils.floor import floor_blocked_by_sibling
+from utils.idle_reengagement import IdleReengagementBudget
+from utils.speech_activity import SpeechActivityTracker
 from utils.mcp_client import (
     HttpMcpClient,
     McpClientError,
@@ -1017,9 +1019,17 @@ async def main(
     # Deterministic log of when THIS bot injects audio (grep "[SPEECH-INJECT]").
     speech_probe = SpeechInjectionProbe(persona_name)
 
+    idle_budget = IdleReengagementBudget(
+        idle_secs=float(os.getenv("BOT_IDLE_REENGAGE_SECS", "15")),
+        max_nudges=int(os.getenv("BOT_MAX_REENGAGE", "3")),
+        last_activity=time.monotonic(),
+    )
+    speech_activity = SpeechActivityTracker(idle_budget)
+
     pipeline = Pipeline([
         transport.input(),   # Add transport input to receive audio/data
         stt,
+        speech_activity,     # only received speech replenishes the idle budget
         user_aggregator,
         llm,
         floor_gate,
@@ -1131,33 +1141,15 @@ async def main(
         # hears (via STT) and answers — the debate self-starts. The nudge count
         # is capped so a genuinely alone bot doesn't monologue endlessly, and it
         # resets on any real activity so a live conversation never exhausts it.
-        idle_secs = float(os.getenv("BOT_IDLE_REENGAGE_SECS", "15"))
-        max_nudges = int(os.getenv("BOT_MAX_REENGAGE", "3"))
-
-        def _convo_len() -> int:
-            return sum(
-                1 for m in context.messages if m.get("role") in ("user", "assistant")
-            )
-
-        loop = asyncio.get_event_loop()
-        last_len = _convo_len()
-        last_change = loop.time()
-        nudges = 0
+        idle_budget.record_speech(time.monotonic())
         while True:
             await asyncio.sleep(2)
-            cur_len = _convo_len()
-            if cur_len != last_len:
-                # Real activity — reset the idle timer and the nudge budget.
-                last_len = cur_len
-                last_change = loop.time()
-                nudges = 0
+            if not idle_budget.take_nudge(time.monotonic()):
                 continue
-            if loop.time() - last_change < idle_secs or nudges >= max_nudges:
-                continue
-            nudges += 1
             log_and_flush(
                 logging.INFO,
-                f"[BOT] Idle {idle_secs}s — re-engaging (nudge {nudges}/{max_nudges})",
+                f"[BOT] Idle {idle_budget.idle_secs}s — re-engaging "
+                f"(nudge {idle_budget.nudges}/{idle_budget.max_nudges})",
             )
             nudge = {
                 "role": "user",
@@ -1171,9 +1163,8 @@ async def main(
             await task.queue_frames(
                 [LLMMessagesAppendFrame(messages=[nudge], run_llm=True)]
             )
-            last_change = loop.time()
 
-    asyncio.create_task(start_conversation())
+    conversation_task = asyncio.create_task(start_conversation())
 
     # Start periodic transcript saving
     transcript_task = asyncio.create_task(periodic_transcript_save())
@@ -1189,6 +1180,9 @@ async def main(
         log_and_flush(logging.ERROR, f"[ERROR] Traceback: {traceback.format_exc()}")
         raise
     finally:
+        # Stop the watchdog before releasing the pipeline and its LLM client.
+        conversation_task.cancel()
+        await asyncio.gather(conversation_task, return_exceptions=True)
         # Cancel the periodic save task
         transcript_task.cancel()
         # Save final transcript
