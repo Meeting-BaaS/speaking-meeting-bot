@@ -95,6 +95,12 @@ MEETING_DETAILS: Dict[
 # Global dictionary to store Pipecat processes
 PIPECAT_PROCESSES: Dict[str, subprocess.Popen] = {}  # client_id -> process
 
+# Per-bot provider keys supplied with the request (bring your own key).
+# Memory only, on purpose: MEETING_DETAILS is persisted to the state dir and
+# these must never land on disk. After an API restart a respawned bot falls
+# back to the server's own keys.
+BOT_CREDENTIALS: Dict[str, Dict[str, str]] = {}  # client_id -> {llm_api_key, ...}
+
 
 class ConnectionRegistry:
     """Manages WebSocket connections for clients and Pipecat."""

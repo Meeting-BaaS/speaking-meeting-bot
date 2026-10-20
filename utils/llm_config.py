@@ -115,13 +115,20 @@ def resolve_openai_api_surface() -> str:
     return surface
 
 
-def missing_llm_provider_credential(provider: str) -> str | None:
+def missing_llm_provider_credential(
+    provider: str, request_key: str | None = None
+) -> str | None:
     """Return the missing provider key env var, or None when configured.
+
+    A key supplied with the request (bring your own key) satisfies the check
+    without the server-wide env var being set.
 
     Raises:
         ValueError: If provider is not supported.
     """
     validate_llm_provider(provider)
+    if clean_string(request_key):
+        return None
     key_env = PROVIDER_KEY_ENVS[provider]
     if clean_string(os.getenv(key_env)):
         return None

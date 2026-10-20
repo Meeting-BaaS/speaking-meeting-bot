@@ -5,7 +5,7 @@ from ipaddress import ip_address
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 
 def _validate_meeting_url(value: str) -> str:
@@ -243,6 +243,50 @@ class MCPConfig(BaseModel):
     )
 
 
+def _secret_field(description: str) -> Any:
+    # writeOnly/password so generated docs and clients treat the value as a
+    # secret; SecretStr keeps it out of reprs, logs and model dumps.
+    return Field(
+        None,
+        min_length=1,
+        description=description,
+        json_schema_extra={"writeOnly": True, "format": "password"},
+    )
+
+
+class BotCredentials(BaseModel):
+    """Bring-your-own provider keys for one bot.
+
+    Every field is optional; a key that is not supplied falls back to the
+    server's own configuration. Keys are handed to this bot's pipeline process
+    only, are never written to disk or logs, and are never returned by the API.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    llm_api_key: SecretStr | None = _secret_field(
+        "API key for the LLM provider selected by llm_provider (OpenAI, Anthropic or Z.ai)."
+    )
+    stt_api_key: SecretStr | None = _secret_field(
+        "Deepgram API key for speech-to-text."
+    )
+    tts_api_key: SecretStr | None = _secret_field(
+        "Cartesia API key for text-to-speech."
+    )
+
+    def reveal(self) -> dict[str, str]:
+        """Return the supplied keys as plain strings, omitting unset ones."""
+        return {
+            name: value.get_secret_value()
+            for name, value in (
+                ("llm_api_key", self.llm_api_key),
+                ("stt_api_key", self.stt_api_key),
+                ("tts_api_key", self.tts_api_key),
+            )
+            if value is not None and value.get_secret_value().strip()
+        }
+
+
 class BotRequest(BaseModel):
     """Request model for creating a speaking bot in a meeting."""
 
@@ -366,6 +410,15 @@ class BotRequest(BaseModel):
             "TTS speaking speed multiplier. Honored range is 0.6-1.5 (the "
             "runner clamps to it); values outside are rejected. Defaults to "
             "CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default."
+        ),
+    )
+    credentials: BotCredentials | None = Field(
+        None,
+        description=(
+            "Bring your own provider keys for this bot (LLM, speech-to-text, "
+            "text-to-speech). Any key left out falls back to the server's own "
+            "configuration. Keys are used only by this bot's pipeline and are "
+            "never stored or returned."
         ),
     )
 
