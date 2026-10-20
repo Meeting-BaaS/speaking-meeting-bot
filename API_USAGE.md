@@ -46,7 +46,7 @@ curl -s -X POST http://127.0.0.1:7014/bots \
 | field           | type      | notes |
 |-----------------|-----------|-------|
 | `meeting_url`   | string    | **required.** http(s) Meet/Zoom/Teams URL. |
-| `bot_name`      | string    | Display name in the call. Also used as persona if it matches one. Keep DISTINCT per bot in the same call. |
+| `bot_name`      | string    | Display name in the call, and the speaker name in the transcript. If it matches a persona key, that persona is used and its own name is shown. Omit → the persona's name. Keep DISTINCT per bot in the same call. |
 | `prompt`        | string    | Ad-hoc system persona. Overrides persona lookup — best for one-off bots. |
 | `personas`      | [string]  | Named persona(s) from `config/personas`; first available wins. |
 | `entry_message` | string    | Spoken **verbatim** once admitted. Omit → bot stays reactive (no greeting). |
@@ -56,6 +56,8 @@ curl -s -X POST http://127.0.0.1:7014/bots \
 | `turn_config`   | object    | VAD tuning: `{confidence, start_secs, stop_secs, min_volume}`. Optional. |
 | `websocket_url` | string    | Override public WS base. Leave unset in prod. |
 | `credentials`   | object    | Bring your own keys: `{llm_api_key, stt_api_key, tts_api_key}` (LLM per `llm_provider`, Deepgram, Cartesia). Each one optional; missing keys fall back to the server's. Never stored or returned. |
+| `transcription_enabled` | bool | MeetingBaas transcribes the recording after the call, bot turns included. Default `true`. |
+| `transcription_provider` | string | `gladia` (default), `deepgram`, `assemblyai`, `speechmatics` or `soniox`. |
 
 ### Bring your own keys
 

@@ -504,6 +504,25 @@
               }
             ],
             "description": "Bring your own provider keys for this bot (LLM, speech-to-text, text-to-speech). Any key left out falls back to the server's own configuration. Keys are used only by this bot's pipeline and are never stored or returned."
+          },
+          "transcription_enabled": {
+            "type": "boolean",
+            "title": "Transcription Enabled",
+            "description": "Have MeetingBaas transcribe the recording once the meeting ends, with the bot's own turns attributed to it by name. Set false for a recording without a transcript.",
+            "default": true
+          },
+          "transcription_provider": {
+            "type": "string",
+            "enum": [
+              "gladia",
+              "deepgram",
+              "assemblyai",
+              "speechmatics",
+              "soniox"
+            ],
+            "title": "Transcription Provider",
+            "description": "MeetingBaas speech-to-text provider for that transcript.",
+            "default": "gladia"
           }
         },
         "additionalProperties": false,
