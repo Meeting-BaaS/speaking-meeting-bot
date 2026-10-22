@@ -6,8 +6,12 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-DEFAULT_OPENAI_MODEL = "gpt-5.5"
-DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
+# Voice defaults favour time-to-first-token over depth: a bot that answers in
+# two sentences gains nothing from a frontier model and loses seconds to it.
+# Operators pick a bigger model with OPENAI_MODEL / ANTHROPIC_MODEL, callers
+# per bot with llm_model.
+DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
+DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5"
 DEFAULT_ZAI_MODEL = "glm-5.2"
 DEFAULT_ZAI_BASE_URL = "https://api.z.ai/api/paas/v4/"
 SUPPORTED_LLM_PROVIDERS = {"openai", "anthropic", "zai"}

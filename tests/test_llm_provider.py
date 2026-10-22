@@ -82,6 +82,26 @@ class LLMProviderRoutingTest(unittest.TestCase):
         )
         self.assertEqual(result, "verified")
 
+    def test_anthropic_runs_without_thinking_and_with_prompt_caching(self):
+        result = self.run_meetingbaas_snippet(
+            "from scripts import meetingbaas\n"
+            "llm = meetingbaas.build_llm_service({'llm_provider': 'anthropic'})\n"
+            "s = llm._settings\n"
+            "assert s.thinking.type == 'disabled', s.thinking\n"
+            "assert s.enable_prompt_caching is True\n"
+            "assert s.max_tokens == 1024\n"
+            "print(s.model)\n",
+            ANTHROPIC_API_KEY="test-key",
+        )
+        self.assertEqual(result, "claude-haiku-4-5")
+
+    def test_default_models_are_the_fast_ones(self):
+        result = self.run_meetingbaas_snippet(
+            "from utils.llm_config import resolve_llm_model\n"
+            "print(resolve_llm_model('openai', {}), resolve_llm_model('anthropic', {}))\n"
+        )
+        self.assertEqual(result, "gpt-5.4-mini claude-haiku-4-5")
+
 
 if __name__ == "__main__":
     unittest.main()

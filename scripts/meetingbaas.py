@@ -139,11 +139,20 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
                 "LLM_PROVIDER=anthropic but the anthropic pipecat extra is not installed"
             )
 
+        # Voice turns must start within a second or two, so thinking is off
+        # explicitly: left unset, Opus/Fable models decide per request and a
+        # "thoughtful" reply arrives seconds late. The persona prompt (often
+        # tens of KB of persona docs) is identical every turn, so prompt
+        # caching cuts both time-to-first-token and cost.
         llm = AnthropicLLMService(
             api_key=api_key,
             run_in_parallel=False,
             settings=AnthropicLLMService.Settings(
-                model=model, system_instruction=system_instruction
+                model=model,
+                system_instruction=system_instruction,
+                max_tokens=1024,
+                thinking=AnthropicLLMService.ThinkingConfig(type="disabled"),
+                enable_prompt_caching=True,
             ),
         )
     elif provider == "zai":
