@@ -218,7 +218,9 @@ def create_app() -> FastAPI:
     app.include_router(websocket_router)
 
     # Add a health endpoint
-    @app.get("/health", tags=["system"])
+    # Operational endpoints stay out of the public OpenAPI document (and the
+    # generated docs); they are still served.
+    @app.get("/health", tags=["system"], include_in_schema=False)
     async def health():
         """Health check endpoint"""
         public_base_url = os.getenv("BASE_URL")
@@ -262,7 +264,7 @@ def create_app() -> FastAPI:
             ],
         }
 
-    @app.get("/ready", tags=["system"])
+    @app.get("/ready", tags=["system"], include_in_schema=False)
     async def ready(request: Request):
         """Readiness endpoint with externally visible base URL resolution."""
         return {
