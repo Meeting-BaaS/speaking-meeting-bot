@@ -437,7 +437,7 @@ def build_image_prompt(
     # Add subject count instruction prominently at the start
     sections.insert(
         1,
-        f"\nTHERE MUST BE EXACTLY ONE "
+        "\nTHERE MUST BE EXACTLY ONE "
         + ("ANIMAL" if IS_ANIMAL else "PERSON")
         + " IN THE IMAGE, NO MORE NO LESS.\n",
     )

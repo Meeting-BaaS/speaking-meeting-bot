@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from fastapi import WebSocket
 

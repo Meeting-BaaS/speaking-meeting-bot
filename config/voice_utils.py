@@ -112,7 +112,7 @@ class VoiceUtils:
             if persona_details:
                 # If persona_details are provided, use them directly (for temporary personas)
                 persona = persona_details
-                logger.info(f"Using provided persona details for voice matching.")
+                logger.info("Using provided persona details for voice matching.")
             elif persona_key:
                 # Otherwise, try to get persona details from persona_manager
                 persona = self.persona_manager.personas.get(persona_key)

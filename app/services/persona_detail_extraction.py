@@ -1,7 +1,7 @@
 import openai
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 from loguru import logger
 
 async def extract_persona_details_from_prompt(
