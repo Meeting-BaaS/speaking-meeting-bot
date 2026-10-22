@@ -3,11 +3,9 @@ import asyncio
 import os
 import random
 import subprocess
-from pathlib import Path
 from typing import Dict, Optional
 
 from dotenv import load_dotenv
-from loguru import logger
 
 from config.persona_utils import (
     PersonaManager,

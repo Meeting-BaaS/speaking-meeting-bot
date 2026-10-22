@@ -2,9 +2,7 @@
 
 from typing import Optional
 from loguru import logger
-from PIL import Image
 import requests
-from io import BytesIO
 import os
 import replicate
 from pathlib import Path
