@@ -50,6 +50,7 @@ from meetingbaas_pipecat.utils.logger import configure_logger
 from utils.floor import floor_blocked_by_sibling
 from utils.idle_reengagement import IdleReengagementBudget
 from utils.llm_config import (
+    ANTHROPIC_THINKING_ON_MODES,
     DEFAULT_ZAI_BASE_URL,
     clean_string,
     resolve_anthropic_thinking,
@@ -140,24 +141,35 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
             )
 
         # Voice turns must start within a second or two, so thinking is off
-        # wherever the model allows it: left unset, newer models decide per
-        # request and a "thoughtful" reply arrives seconds late. Models whose
-        # thinking is always on reject "disabled" outright, so they get no
-        # thinking parameter and the lowest effort instead. The persona prompt
-        # (often tens of KB of persona docs) is identical every turn, so prompt
-        # caching cuts both time-to-first-token and cost.
+        # wherever the model allows it; the setting that achieves that differs
+        # per generation and a rejected request leaves the bot mute, so it is
+        # resolved from the model id. Models whose thinking is always on run
+        # at the lowest effort instead, with room for the thinking tokens that
+        # count against max_tokens. The persona prompt (often tens of KB of
+        # persona docs) is identical every turn, so prompt caching cuts both
+        # time-to-first-token and cost.
+        if os.getenv("ANTHROPIC_THINKING"):
+            log_and_flush(
+                logging.WARNING,
+                "[LLM] ANTHROPIC_THINKING is ignored: the thinking setting "
+                "follows the model id, see utils.llm_config.",
+            )
         thinking_mode = resolve_anthropic_thinking(model)
+        thinking_on = thinking_mode in ANTHROPIC_THINKING_ON_MODES
         settings_kwargs: dict = dict(
             model=model,
             system_instruction=system_instruction,
-            max_tokens=1024,
+            max_tokens=4096 if thinking_on else 1024,
             enable_prompt_caching=True,
         )
         if thinking_mode != "omit":
             settings_kwargs["thinking"] = AnthropicLLMService.ThinkingConfig(
                 type=thinking_mode
             )
-        if thinking_mode in ("omit", "adaptive"):
+        if thinking_on:
+            # Merged over the request last by pipecat, so this would replace an
+            # output_config pipecat set itself; only run_inference(response_schema=...)
+            # does that, and the bot never calls it with a schema.
             settings_kwargs["extra"] = {"output_config": {"effort": "low"}}
         llm = AnthropicLLMService(
             api_key=api_key,
