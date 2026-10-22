@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -16,12 +17,23 @@ DEFAULT_ZAI_MODEL = "glm-5.2"
 DEFAULT_ZAI_BASE_URL = "https://api.z.ai/api/paas/v4/"
 SUPPORTED_LLM_PROVIDERS = {"openai", "anthropic", "zai"}
 SUPPORTED_OPENAI_API_SURFACES = {"responses", "chat"}
-# Operator overrides are always explicit request values: pipecat 1.12 adds
-# ``thinking: disabled`` to any Sonnet 5+ request that omits the parameter,
-# which Sonnet 5.5 rejects, so "omit" is never accepted from the environment.
-# The resolver still returns "omit" on its own for models that are not Sonnet
-# and cannot turn thinking off.
-ANTHROPIC_THINKING_OVERRIDES = {"disabled", "between_tools", "adaptive"}
+# Thinking settings under which the model reasons before answering. The
+# request then needs room for the thinking tokens and the lowest effort to keep
+# a voice turn fast.
+ANTHROPIC_THINKING_ON_MODES = {"adaptive"}
+
+# Family and generation of a Claude model id, wherever the id came from:
+# the current form (claude-sonnet-4-5, claude-opus-5-5, claude-fable-5-1), ids
+# without a minor (claude-opus-5), the pre-4 form with the generation first
+# (claude-3-7-sonnet-20250219, claude-3-opus-20240229), dated or Vertex
+# suffixes (claude-haiku-4-5-20251001, claude-opus-4-5@20251101) and Bedrock
+# prefixes (anthropic.claude-sonnet-5-5-v1:0). A date suffix never reads as a
+# generation because a generation is at most two digits.
+_ANTHROPIC_MODEL_RE = re.compile(
+    r"claude-(?:(?P<old_major>\d)(?:-(?P<old_minor>\d))?-)?"
+    r"(?P<family>opus|sonnet|haiku|fable|mythos)"
+    r"(?:-(?P<major>\d{1,2})(?!\d)(?:[-.](?P<minor>\d{1,2})(?!\d))?)?"
+)
 
 PROVIDER_KEY_ENVS = {
     "openai": "OPENAI_API_KEY",
@@ -101,42 +113,62 @@ def resolve_llm_model(provider: str, persona: Mapping[str, Any] | None) -> str:
     )
 
 
-def resolve_anthropic_thinking(model: str) -> str:
-    """Pick the fastest thinking mode the Anthropic model accepts.
+def parse_anthropic_model(model: str) -> tuple[str, tuple[int, int]] | None:
+    """Family and (major, minor) generation of a Claude model id, or None.
 
-    Voice turns want thinking off, but Anthropic rejects ``disabled`` with a
-    400 on models whose thinking is always on, and a bot whose every request
-    fails is mute. Known families as of 2026-10:
-
-    - Fable, Mythos and Opus 5.5: thinking cannot be turned off. Omit the
-      parameter; the caller keeps effort low instead.
-    - Sonnet 5.5: ``disabled`` is rejected, ``between_tools`` is the off switch.
-    - Everything else (Haiku 4.5 and 5.5, Sonnet 4.x and 5, Opus 4.x and 5):
-      ``disabled``.
-
-    ``ANTHROPIC_THINKING`` (``disabled``, ``between_tools`` or ``adaptive``)
-    overrides the choice, for models released after this list was written.
-    ``adaptive`` is the override for a model whose thinking is always on.
-
-    Raises:
-        ValueError: If ANTHROPIC_THINKING is not a supported override.
+    None means the id names no generation this parser knows (an alias, or a
+    naming scheme newer than it), not that the model does not exist.
     """
-    override = clean_string(os.getenv("ANTHROPIC_THINKING"))
-    if override:
-        mode = override.lower().replace("-", "_")
-        if mode not in ANTHROPIC_THINKING_OVERRIDES:
-            raise ValueError(
-                f"Unsupported ANTHROPIC_THINKING {override!r}. Expected one of: "
-                f"{', '.join(sorted(ANTHROPIC_THINKING_OVERRIDES))}"
-            )
-        return mode
+    match = _ANTHROPIC_MODEL_RE.search(model.lower())
+    if not match:
+        return None
+    family = match.group("family")
+    if match.group("old_major"):
+        return family, (int(match.group("old_major")), int(match.group("old_minor") or 0))
+    if match.group("major"):
+        return family, (int(match.group("major")), int(match.group("minor") or 0))
+    return None
 
-    name = model.lower()
-    if any(family in name for family in ("fable", "mythos", "opus-5-5")):
+
+def resolve_anthropic_thinking(model: str) -> str:
+    """The fastest thinking setting the Anthropic model accepts for a voice turn.
+
+    Returns ``disabled``, ``between_tools``, ``adaptive`` or ``omit`` (send no
+    thinking parameter at all). Voice turns want thinking off, but every
+    generation draws that line differently and a request the model rejects
+    leaves the bot mute, so the choice follows the model id alone, with no
+    operator override to combine wrongly with a per-bot ``llm_model``.
+    Rules as of 2026-10:
+
+    - Fable and Mythos: thinking is always on; ``disabled`` is rejected.
+    - Before 3.7: no thinking support; any thinking parameter is rejected.
+    - 3.7 up to 4.5: ``disabled`` is accepted; ``adaptive`` does not exist yet.
+    - 4.6 up to 5.0, and Haiku 5.5: ``disabled`` is accepted (Opus 5 and
+      Haiku 5.5 only at effort ``high`` or below, which is what a request
+      without an effort setting gets).
+    - Sonnet 5.5: ``disabled`` is rejected; ``between_tools`` is its off
+      switch and takes no other field.
+    - Opus 5.5: thinking is always on.
+    - Anything newer, and any id the parser does not recognise: ``adaptive``,
+      the one setting every model since 4.6 accepts.
+
+    Explicit settings also keep pipecat from adding ``disabled`` itself on
+    Sonnet 5+ requests that omit the parameter. ``omit`` is only returned for
+    pre-3.7 ids, which pipecat does not touch.
+    """
+    parsed = parse_anthropic_model(model)
+    if parsed is None:
+        return "adaptive"
+    family, version = parsed
+    if family in ("fable", "mythos"):
+        return "adaptive"
+    if version < (3, 7):
         return "omit"
-    if "sonnet-5-5" in name:
-        return "between_tools"
-    return "disabled"
+    if version < (5, 5):
+        return "disabled"
+    if version == (5, 5):
+        return {"haiku": "disabled", "sonnet": "between_tools", "opus": "adaptive"}[family]
+    return "adaptive"
 
 
 def resolve_openai_api_surface() -> str:
