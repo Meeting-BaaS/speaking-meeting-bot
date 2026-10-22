@@ -118,12 +118,58 @@ class LLMProviderRoutingTest(unittest.TestCase):
             ANTHROPIC_THINKING="Between-Tools",
         )
         self.assertEqual(result, "between_tools")
-        with self.assertRaises(subprocess.CalledProcessError):
-            self.run_meetingbaas_snippet(
-                "from utils.llm_config import resolve_anthropic_thinking as r\n"
-                "r('claude-haiku-4-5')\n",
-                ANTHROPIC_THINKING="sometimes",
+        for bad in ("sometimes", "omit"):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.run_meetingbaas_snippet(
+                    "from utils.llm_config import resolve_anthropic_thinking as r\n"
+                    "r('claude-sonnet-5-5')\n",
+                    ANTHROPIC_THINKING=bad,
+                )
+
+    # What pipecat actually sends: it adds thinking=disabled to Sonnet 5+
+    # requests that omit the parameter, so the settings alone do not prove
+    # the request is one the model accepts.
+    REQUEST_SNIPPET = (
+        "import asyncio\n"
+        "from types import SimpleNamespace\n"
+        "from unittest.mock import AsyncMock\n"
+        "from pipecat.processors.aggregators.llm_context import LLMContext\n"
+        "from scripts import meetingbaas\n"
+        "llm = meetingbaas.build_llm_service({'llm_provider': 'anthropic'})\n"
+        "create = AsyncMock(return_value=SimpleNamespace(content=[]))\n"
+        "llm._client = SimpleNamespace(beta=SimpleNamespace("
+        "messages=SimpleNamespace(create=create)))\n"
+        "ctx = LLMContext(messages=[{'role': 'user', 'content': 'hi'}])\n"
+        "asyncio.run(llm.run_inference(ctx))\n"
+        "p = create.call_args.kwargs\n"
+        "print(p['model'], p.get('thinking'), p.get('output_config'))\n"
+    )
+
+    def test_requests_carry_a_thinking_value_each_model_accepts(self):
+        cases = {
+            "claude-haiku-4-5": "{'type': 'disabled'} None",
+            "claude-sonnet-5-5": "{'type': 'between_tools'} None",
+            "claude-fable-5-1": "None {'effort': 'low'}",
+            "claude-opus-5-5": "None {'effort': 'low'}",
+        }
+        for model, expected in cases.items():
+            result = self.run_meetingbaas_snippet(
+                self.REQUEST_SNIPPET,
+                ANTHROPIC_API_KEY="test-key",
+                ANTHROPIC_MODEL=model,
             )
+            self.assertEqual(result, f"{model} {expected}", model)
+
+    def test_adaptive_override_reaches_the_request_untouched_on_sonnet(self):
+        result = self.run_meetingbaas_snippet(
+            self.REQUEST_SNIPPET,
+            ANTHROPIC_API_KEY="test-key",
+            ANTHROPIC_MODEL="claude-sonnet-5-5",
+            ANTHROPIC_THINKING="adaptive",
+        )
+        self.assertEqual(
+            result, "claude-sonnet-5-5 {'type': 'adaptive'} {'effort': 'low'}"
+        )
 
     def test_always_on_thinking_models_get_no_thinking_param_and_low_effort(self):
         result = self.run_meetingbaas_snippet(
