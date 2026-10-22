@@ -16,6 +16,8 @@ DEFAULT_ZAI_MODEL = "glm-5.2"
 DEFAULT_ZAI_BASE_URL = "https://api.z.ai/api/paas/v4/"
 SUPPORTED_LLM_PROVIDERS = {"openai", "anthropic", "zai"}
 SUPPORTED_OPENAI_API_SURFACES = {"responses", "chat"}
+# "omit" sends no thinking parameter at all (the model's thinking is always on).
+ANTHROPIC_THINKING_MODES = {"disabled", "between_tools", "adaptive", "omit"}
 
 PROVIDER_KEY_ENVS = {
     "openai": "OPENAI_API_KEY",
@@ -93,6 +95,43 @@ def resolve_llm_model(provider: str, persona: Mapping[str, Any] | None) -> str:
         or clean_string(os.getenv("LLM_MODEL"))
         or default_model
     )
+
+
+def resolve_anthropic_thinking(model: str) -> str:
+    """Pick the fastest thinking mode the Anthropic model accepts.
+
+    Voice turns want thinking off, but Anthropic rejects ``disabled`` with a
+    400 on models whose thinking is always on, and a bot whose every request
+    fails is mute. Known families as of 2026-10:
+
+    - Fable, Mythos and Opus 5.5: thinking cannot be turned off. Omit the
+      parameter; the caller keeps effort low instead.
+    - Sonnet 5.5: ``disabled`` is rejected, ``between_tools`` is the off switch.
+    - Everything else (Haiku 4.5 and 5.5, Sonnet 4.x and 5, Opus 4.x and 5):
+      ``disabled``.
+
+    ``ANTHROPIC_THINKING`` overrides the choice, for models released after
+    this list was written.
+
+    Raises:
+        ValueError: If ANTHROPIC_THINKING is not a supported mode.
+    """
+    override = clean_string(os.getenv("ANTHROPIC_THINKING"))
+    if override:
+        mode = override.lower().replace("-", "_")
+        if mode not in ANTHROPIC_THINKING_MODES:
+            raise ValueError(
+                f"Unsupported ANTHROPIC_THINKING {override!r}. Expected one of: "
+                f"{', '.join(sorted(ANTHROPIC_THINKING_MODES))}"
+            )
+        return mode
+
+    name = model.lower()
+    if any(family in name for family in ("fable", "mythos", "opus-5-5")):
+        return "omit"
+    if "sonnet-5-5" in name:
+        return "between_tools"
+    return "disabled"
 
 
 def resolve_openai_api_surface() -> str:
