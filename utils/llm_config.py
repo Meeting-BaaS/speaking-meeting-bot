@@ -16,8 +16,12 @@ DEFAULT_ZAI_MODEL = "glm-5.2"
 DEFAULT_ZAI_BASE_URL = "https://api.z.ai/api/paas/v4/"
 SUPPORTED_LLM_PROVIDERS = {"openai", "anthropic", "zai"}
 SUPPORTED_OPENAI_API_SURFACES = {"responses", "chat"}
-# "omit" sends no thinking parameter at all (the model's thinking is always on).
-ANTHROPIC_THINKING_MODES = {"disabled", "between_tools", "adaptive", "omit"}
+# Operator overrides are always explicit request values: pipecat 1.12 adds
+# ``thinking: disabled`` to any Sonnet 5+ request that omits the parameter,
+# which Sonnet 5.5 rejects, so "omit" is never accepted from the environment.
+# The resolver still returns "omit" on its own for models that are not Sonnet
+# and cannot turn thinking off.
+ANTHROPIC_THINKING_OVERRIDES = {"disabled", "between_tools", "adaptive"}
 
 PROVIDER_KEY_ENVS = {
     "openai": "OPENAI_API_KEY",
@@ -110,19 +114,20 @@ def resolve_anthropic_thinking(model: str) -> str:
     - Everything else (Haiku 4.5 and 5.5, Sonnet 4.x and 5, Opus 4.x and 5):
       ``disabled``.
 
-    ``ANTHROPIC_THINKING`` overrides the choice, for models released after
-    this list was written.
+    ``ANTHROPIC_THINKING`` (``disabled``, ``between_tools`` or ``adaptive``)
+    overrides the choice, for models released after this list was written.
+    ``adaptive`` is the override for a model whose thinking is always on.
 
     Raises:
-        ValueError: If ANTHROPIC_THINKING is not a supported mode.
+        ValueError: If ANTHROPIC_THINKING is not a supported override.
     """
     override = clean_string(os.getenv("ANTHROPIC_THINKING"))
     if override:
         mode = override.lower().replace("-", "_")
-        if mode not in ANTHROPIC_THINKING_MODES:
+        if mode not in ANTHROPIC_THINKING_OVERRIDES:
             raise ValueError(
                 f"Unsupported ANTHROPIC_THINKING {override!r}. Expected one of: "
-                f"{', '.join(sorted(ANTHROPIC_THINKING_MODES))}"
+                f"{', '.join(sorted(ANTHROPIC_THINKING_OVERRIDES))}"
             )
         return mode
 
