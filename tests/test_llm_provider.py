@@ -8,6 +8,7 @@ class LLMProviderRoutingTest(unittest.TestCase):
     ENV_KEYS = [
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_MODEL",
+        "ANTHROPIC_THINKING",
         "LLM_MODEL",
         "LLM_PROVIDER",
         "OPENAI_API_KEY",
@@ -94,6 +95,63 @@ class LLMProviderRoutingTest(unittest.TestCase):
             ANTHROPIC_API_KEY="test-key",
         )
         self.assertEqual(result, "claude-haiku-4-5")
+
+    def test_anthropic_thinking_mode_follows_the_model(self):
+        result = self.run_meetingbaas_snippet(
+            "from utils.llm_config import resolve_anthropic_thinking as r\n"
+            "modes = [r(m) for m in ('claude-haiku-4-5', 'claude-haiku-5-5', "
+            "'claude-sonnet-4-6', 'claude-sonnet-5', 'claude-opus-5', "
+            "'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1', "
+            "'anthropic.claude-mythos-5-1')]\n"
+            "print(' '.join(modes))\n"
+        )
+        self.assertEqual(
+            result,
+            "disabled disabled disabled disabled disabled "
+            "between_tools omit omit omit",
+        )
+
+    def test_anthropic_thinking_override_wins_and_is_validated(self):
+        result = self.run_meetingbaas_snippet(
+            "from utils.llm_config import resolve_anthropic_thinking as r\n"
+            "print(r('claude-haiku-4-5'))\n",
+            ANTHROPIC_THINKING="Between-Tools",
+        )
+        self.assertEqual(result, "between_tools")
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_meetingbaas_snippet(
+                "from utils.llm_config import resolve_anthropic_thinking as r\n"
+                "r('claude-haiku-4-5')\n",
+                ANTHROPIC_THINKING="sometimes",
+            )
+
+    def test_always_on_thinking_models_get_no_thinking_param_and_low_effort(self):
+        result = self.run_meetingbaas_snippet(
+            "from scripts import meetingbaas\n"
+            "llm = meetingbaas.build_llm_service("
+            "{'llm_provider': 'anthropic', 'llm_model': 'claude-fable-5-1'})\n"
+            "s = llm._settings\n"
+            "assert not isinstance(s.thinking, meetingbaas.AnthropicLLMService.ThinkingConfig), s.thinking\n"
+            "assert s.extra == {'output_config': {'effort': 'low'}}, s.extra\n"
+            "assert s.enable_prompt_caching is True\n"
+            "print(s.model)\n",
+            ANTHROPIC_API_KEY="test-key",
+        )
+        self.assertEqual(result, "claude-fable-5-1")
+
+    def test_sonnet_5_5_turns_thinking_off_with_between_tools(self):
+        result = self.run_meetingbaas_snippet(
+            "from scripts import meetingbaas\n"
+            "llm = meetingbaas.build_llm_service({'llm_provider': 'anthropic'})\n"
+            "s = llm._settings\n"
+            "assert s.thinking.type == 'between_tools', s.thinking\n"
+            "assert s.thinking.display is None and s.thinking.budget_tokens is None\n"
+            "assert s.extra == {}, s.extra\n"
+            "print(s.model)\n",
+            ANTHROPIC_API_KEY="test-key",
+            ANTHROPIC_MODEL="claude-sonnet-5-5",
+        )
+        self.assertEqual(result, "claude-sonnet-5-5")
 
     def test_default_models_are_the_fast_ones(self):
         result = self.run_meetingbaas_snippet(

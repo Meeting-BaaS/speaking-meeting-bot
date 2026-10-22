@@ -52,6 +52,7 @@ from utils.idle_reengagement import IdleReengagementBudget
 from utils.llm_config import (
     DEFAULT_ZAI_BASE_URL,
     clean_string,
+    resolve_anthropic_thinking,
     resolve_llm_model,
     resolve_llm_provider,
     resolve_openai_api_surface,
@@ -139,20 +140,29 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
             )
 
         # Voice turns must start within a second or two, so thinking is off
-        # explicitly: left unset, Opus/Fable models decide per request and a
-        # "thoughtful" reply arrives seconds late. The persona prompt (often
-        # tens of KB of persona docs) is identical every turn, so prompt
+        # wherever the model allows it: left unset, newer models decide per
+        # request and a "thoughtful" reply arrives seconds late. Models whose
+        # thinking is always on reject "disabled" outright, so they get no
+        # thinking parameter and the lowest effort instead. The persona prompt
+        # (often tens of KB of persona docs) is identical every turn, so prompt
         # caching cuts both time-to-first-token and cost.
+        thinking_mode = resolve_anthropic_thinking(model)
+        settings_kwargs: dict = dict(
+            model=model,
+            system_instruction=system_instruction,
+            max_tokens=1024,
+            enable_prompt_caching=True,
+        )
+        if thinking_mode != "omit":
+            settings_kwargs["thinking"] = AnthropicLLMService.ThinkingConfig(
+                type=thinking_mode
+            )
+        if thinking_mode in ("omit", "adaptive"):
+            settings_kwargs["extra"] = {"output_config": {"effort": "low"}}
         llm = AnthropicLLMService(
             api_key=api_key,
             run_in_parallel=False,
-            settings=AnthropicLLMService.Settings(
-                model=model,
-                system_instruction=system_instruction,
-                max_tokens=1024,
-                thinking=AnthropicLLMService.ThinkingConfig(type="disabled"),
-                enable_prompt_caching=True,
-            ),
+            settings=AnthropicLLMService.Settings(**settings_kwargs),
         )
     elif provider == "zai":
         api_key = clean_string(os.getenv("ZAI_API_KEY"))
