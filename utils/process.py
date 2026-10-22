@@ -2,7 +2,6 @@
 
 import subprocess
 import time
-from typing import Optional
 
 from meetingbaas_pipecat.utils.logger import logger
 

@@ -72,11 +72,7 @@ jobs:
           poetry config virtualenvs.in-project true
           poetry install --no-interaction --no-ansi --no-root
 
-      # Reported but not blocking yet: main carries ~60 pre-existing findings
-      # (unused imports, E402 in scripts/meetingbaas.py). Drop
-      # continue-on-error once they are cleaned up.
       - name: Lint
-        continue-on-error: true
         run: poetry run ruff check .
 
       - name: Unit tests

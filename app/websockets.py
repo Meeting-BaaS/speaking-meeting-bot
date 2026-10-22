@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from core.connection import BOT_CREDENTIALS, MEETING_DETAILS, PIPECAT_PROCESSES, registry
-from core.process import start_pipecat_process, terminate_process_gracefully
+from core.process import start_pipecat_process
 from core.router import router as message_router
 from meetingbaas_pipecat.utils.logger import logger
 from utils.floor import floor_key, write_floor

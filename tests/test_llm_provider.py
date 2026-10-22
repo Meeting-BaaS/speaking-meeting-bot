@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -81,6 +82,113 @@ class LLMProviderRoutingTest(unittest.TestCase):
             ZAI_API_KEY="test-key",
         )
         self.assertEqual(result, "verified")
+
+    def test_anthropic_runs_without_thinking_and_with_prompt_caching(self):
+        result = self.run_meetingbaas_snippet(
+            "from scripts import meetingbaas\n"
+            "llm = meetingbaas.build_llm_service({'llm_provider': 'anthropic'})\n"
+            "s = llm._settings\n"
+            "assert s.thinking.type == 'disabled', s.thinking\n"
+            "assert s.enable_prompt_caching is True\n"
+            "assert s.max_tokens == 1024\n"
+            "print(s.model)\n",
+            ANTHROPIC_API_KEY="test-key",
+        )
+        self.assertEqual(result, "claude-haiku-4-5")
+
+    THINKING_BY_MODEL = {
+        "claude-3-opus-20240229": "omit",
+        "claude-3-5-sonnet-20241022": "omit",
+        "claude-3-7-sonnet-20250219": "disabled",
+        "claude-haiku-4-5": "disabled",
+        "claude-haiku-4-5-20251001": "disabled",
+        "claude-opus-4-5@20251101": "disabled",
+        "claude-sonnet-4-6": "disabled",
+        "claude-opus-4-8": "disabled",
+        "claude-sonnet-5": "disabled",
+        "claude-opus-5": "disabled",
+        "claude-haiku-5-5": "disabled",
+        "claude-sonnet-5-5": "between_tools",
+        "anthropic.claude-sonnet-5-5-v1:0": "between_tools",
+        "claude-opus-5-5": "adaptive",
+        "claude-fable-5-1": "adaptive",
+        "claude-mythos-5-1": "adaptive",
+        "claude-opus-6": "adaptive",
+        "claude-haiku-6-2": "adaptive",
+        "claude-next": "adaptive",
+    }
+
+    def test_anthropic_thinking_mode_follows_the_model_generation(self):
+        result = self.run_meetingbaas_snippet(
+            "import json\n"
+            "from utils.llm_config import resolve_anthropic_thinking as r\n"
+            f"models = {list(self.THINKING_BY_MODEL)!r}\n"
+            "print(json.dumps({m: r(m) for m in models}))\n"
+        )
+        self.assertEqual(json.loads(result), self.THINKING_BY_MODEL)
+
+    # What pipecat actually sends: it adds thinking=disabled to Sonnet 5+
+    # requests that omit the parameter, so the settings alone do not prove
+    # the request is one the model accepts.
+    REQUEST_SNIPPET = (
+        "import asyncio\n"
+        "from types import SimpleNamespace\n"
+        "from unittest.mock import AsyncMock\n"
+        "from pipecat.processors.aggregators.llm_context import LLMContext\n"
+        "from scripts import meetingbaas\n"
+        "llm = meetingbaas.build_llm_service({'llm_provider': 'anthropic'})\n"
+        "create = AsyncMock(return_value=SimpleNamespace(content=[]))\n"
+        "llm._client = SimpleNamespace(beta=SimpleNamespace("
+        "messages=SimpleNamespace(create=create)))\n"
+        "ctx = LLMContext(messages=[{'role': 'user', 'content': 'hi'}])\n"
+        "asyncio.run(llm.run_inference(ctx))\n"
+        "p = create.call_args.kwargs\n"
+        # Sampling parameters are rejected on every current model.
+        "assert not {'temperature', 'top_p', 'top_k'} & set(p), sorted(p)\n"
+        "assert not {'temperature', 'top_p', 'top_k'} & set(p.get('extra_body', {}))\n"
+        "print(p['model'], p.get('thinking'), p.get('output_config'), "
+        "p['max_tokens'])\n"
+    )
+
+    def test_requests_carry_a_thinking_value_each_model_accepts(self):
+        cases = {
+            "claude-3-5-sonnet-20241022": "None None 1024",
+            "claude-haiku-4-5": "{'type': 'disabled'} None 1024",
+            "claude-opus-5": "{'type': 'disabled'} None 1024",
+            "claude-sonnet-5-5": "{'type': 'between_tools'} None 1024",
+            "claude-opus-5-5": "{'type': 'adaptive'} {'effort': 'low'} 4096",
+            "claude-fable-5-1": "{'type': 'adaptive'} {'effort': 'low'} 4096",
+            "claude-opus-6": "{'type': 'adaptive'} {'effort': 'low'} 4096",
+        }
+        for model, expected in cases.items():
+            result = self.run_meetingbaas_snippet(
+                self.REQUEST_SNIPPET,
+                ANTHROPIC_API_KEY="test-key",
+                ANTHROPIC_MODEL=model,
+            )
+            self.assertEqual(result, f"{model} {expected}", model)
+
+    def test_per_bot_model_choice_is_resolved_the_same_way(self):
+        result = self.run_meetingbaas_snippet(
+            "from scripts import meetingbaas\n"
+            "llm = meetingbaas.build_llm_service("
+            "{'llm_provider': 'anthropic', 'llm_model': 'claude-sonnet-5-5'})\n"
+            "s = llm._settings\n"
+            "assert s.thinking.type == 'between_tools', s.thinking\n"
+            "assert s.thinking.display is None and s.thinking.budget_tokens is None\n"
+            "assert s.extra == {} and s.max_tokens == 1024, (s.extra, s.max_tokens)\n"
+            "print(s.model)\n",
+            ANTHROPIC_API_KEY="test-key",
+            ANTHROPIC_MODEL="claude-haiku-4-5",
+        )
+        self.assertEqual(result, "claude-sonnet-5-5")
+
+    def test_default_models_are_the_fast_ones(self):
+        result = self.run_meetingbaas_snippet(
+            "from utils.llm_config import resolve_llm_model\n"
+            "print(resolve_llm_model('openai', {}), resolve_llm_model('anthropic', {}))\n"
+        )
+        self.assertEqual(result, "gpt-5.4-mini claude-haiku-4-5")
 
 
 if __name__ == "__main__":
