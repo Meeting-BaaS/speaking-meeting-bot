@@ -1,10 +1,6 @@
 import argparse
-import hashlib
-import hmac
-import json
 import mimetypes
 import os
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -232,34 +228,6 @@ class UTFSUploader:
 
         except Exception as e:
             logger.error(f"Error verifying credentials: {str(e)}")
-            return False
-
-
-def create_parser() -> argparse.ArgumentParser:
-    def verify_upload_endpoint(self) -> bool:
-        """Verify if we can prepare an upload"""
-        try:
-            logger.info("Testing upload preparation...")
-            prepare_url = "https://uploadthing.com/api/v7/prepareUpload"
-            prepare_headers = {
-                "x-uploadthing-api-key": self.api_key,
-                "Content-Type": "application/json",
-            }
-
-            prepare_data = {
-                "files": [{"name": "test.png", "size": 1024, "type": "image/png"}]
-            }
-
-            response = requests.post(
-                prepare_url, headers=prepare_headers, json=prepare_data, timeout=10
-            )
-
-            logger.info(f"Upload preparation response: {response.status_code}")
-            if response.status_code != 200:
-                logger.error(f"Upload preparation failed: {response.text}")
-            return response.status_code == 200
-        except Exception as e:
-            logger.error(f"Error testing upload endpoint: {str(e)}")
             return False
 
 

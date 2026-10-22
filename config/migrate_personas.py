@@ -2,7 +2,6 @@ import asyncio
 import random
 import shutil
 from pathlib import Path
-from typing import Dict
 
 from loguru import logger
 from persona_utils import PersonaManager
@@ -10,7 +9,6 @@ from persona_utils import PersonaManager
 from config.prompts import (
     DEFAULT_CHARACTERISTICS,
     DEFAULT_VOICE_CHARACTERISTICS,
-    SKIN_TONES,
 )
 from config.voice_utils import VoiceUtils
 

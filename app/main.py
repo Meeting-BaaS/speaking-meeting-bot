@@ -15,7 +15,7 @@ from app.routes import router as app_router
 from app.websockets import websocket_router
 from meetingbaas_pipecat.utils.logger import configure_logger
 from utils.runtime import build_public_base_url, parse_cors_origins
-from utils.ngrok import LOCAL_DEV_MODE, NGROK_URL_INDEX, NGROK_URLS, load_ngrok_urls
+from utils.ngrok import load_ngrok_urls
 
 # Configure logging with the prettier logger
 logger = configure_logger()
@@ -218,7 +218,9 @@ def create_app() -> FastAPI:
     app.include_router(websocket_router)
 
     # Add a health endpoint
-    @app.get("/health", tags=["system"])
+    # Operational endpoints stay out of the public OpenAPI document (and the
+    # generated docs); they are still served.
+    @app.get("/health", tags=["system"], include_in_schema=False)
     async def health():
         """Health check endpoint"""
         public_base_url = os.getenv("BASE_URL")
@@ -262,7 +264,7 @@ def create_app() -> FastAPI:
             ],
         }
 
-    @app.get("/ready", tags=["system"])
+    @app.get("/ready", tags=["system"], include_in_schema=False)
     async def ready(request: Request):
         """Readiness endpoint with externally visible base URL resolution."""
         return {
@@ -294,24 +296,14 @@ def start_server(host: str = "0.0.0.0", port: int = 7014, local_dev: bool = Fals
         server_port = port
     logger.info(f"Starting server on {host}:{server_port}")
 
-    # Global variables for ngrok URL tracking
-    NGROK_URLS = []
-    NGROK_URL_INDEX = 0
-
-    # Set LOCAL_DEV_MODE based on parameter
-    LOCAL_DEV_MODE = local_dev
-
-    # Reset the ngrok URL counter when starting the server
-    NGROK_URL_INDEX = 0
-
     if local_dev:
         print("\n⚠️ Starting in local development mode")
         # Cache the ngrok URLs at server start
-        NGROK_URLS = load_ngrok_urls()
+        ngrok_urls = load_ngrok_urls()
 
-        if NGROK_URLS:
-            print(f"✅ {len(NGROK_URLS)} Bot(s) available from Ngrok")
-            for i, url in enumerate(NGROK_URLS):
+        if ngrok_urls:
+            print(f"✅ {len(ngrok_urls)} Bot(s) available from Ngrok")
+            for i, url in enumerate(ngrok_urls):
                 print(f"  Bot {i + 1}: {url}")
         else:
             print(

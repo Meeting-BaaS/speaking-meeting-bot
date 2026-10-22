@@ -921,6 +921,8 @@ async def _poll_bot_admission(
     "/webhook",
     tags=["webhook"],
     status_code=status.HTTP_200_OK,
+    # MeetingBaas's callback into this server, not a customer endpoint.
+    include_in_schema=False,
 )
 async def meetingbaas_webhook(request: Request):
     """

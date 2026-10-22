@@ -162,66 +162,6 @@
           }
         }
       }
-    },
-    "/webhook": {
-      "post": {
-        "tags": [
-          "webhook"
-        ],
-        "summary": "Meetingbaas Webhook",
-        "description": "Webhook endpoint for MeetingBaas callbacks.\n\nReceives events like bot_joined, bot_left, call_ended, transcription, etc.\n- On 'in_call_recording': signals Pipecat to start speaking\n- On call end: generates a summary from the transcript",
-        "operationId": "meetingbaas_webhook_webhook_post",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/health": {
-      "get": {
-        "tags": [
-          "system"
-        ],
-        "summary": "Health",
-        "description": "Health check endpoint",
-        "operationId": "health_health_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ready": {
-      "get": {
-        "tags": [
-          "system"
-        ],
-        "summary": "Ready",
-        "description": "Readiness endpoint with externally visible base URL resolution.",
-        "operationId": "ready_ready_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
     }
   },
   "components": {

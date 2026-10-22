@@ -1,11 +1,8 @@
-import asyncio
 import os
 import random
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-import aiohttp
 import markdown
 from dotenv import load_dotenv
 from loguru import logger
@@ -32,7 +29,6 @@ class PersonaManager:
         """Parse README.md content to extract persona information"""
         # Reset markdown instance for new content
         self.md.reset()
-        html = self.md.convert(content)
 
         # Split content by sections
         sections = content.split("\n## ")

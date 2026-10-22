@@ -1,16 +1,19 @@
+# Cold-start instrumentation: everything imported after this line (pipecat ->
+# torch -> silero, SDK clients, ...) is the expensive part of process startup.
+# The stamp lives in its own tiny module so it is taken before them without a
+# statement ahead of the imports; [STARTUP] reports real spawn-to-ready latency.
+from utils.proc_start import PROC_T0 as _PROC_T0
+
+import argparse
 import asyncio
 import contextlib
-import os
-import argparse
 import json
+import logging
+import os
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
-
-# Cold-start instrumentation: everything below this line (pipecat -> torch ->
-# silero, SDK clients, ...) is the expensive part of process startup. Stamp t0
-# before it so [STARTUP] can report real spawn-to-ready latency.
-_PROC_T0 = time.monotonic()
 
 import aiohttp
 import pytz
@@ -18,7 +21,7 @@ from dotenv import load_dotenv
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
-from pipecat.frames.frames import LLMMessagesAppendFrame, TTSSpeakFrame
+from pipecat.frames.frames import LLMMessagesAppendFrame, SystemFrame, TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import WorkerRunner
 from pipecat.pipeline.task import PipelineParams
@@ -28,6 +31,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.services.cartesia.tts import CartesiaTTSService, GenerationConfig
 from pipecat.services.deepgram.stt import DeepgramSTTService
@@ -35,6 +39,32 @@ from pipecat.services.llm_service import FunctionCallParams
 
 # from pipecat.services.gladia.stt import GladiaSTTService
 from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.transports.websocket.client import (
+    WebsocketClientParams,
+    WebsocketClientTransport,
+)
+
+from config.persona_utils import PersonaManager
+from config.prompts import DEFAULT_SYSTEM_PROMPT
+from meetingbaas_pipecat.utils.logger import configure_logger
+from utils.floor import floor_blocked_by_sibling
+from utils.idle_reengagement import IdleReengagementBudget
+from utils.llm_config import (
+    DEFAULT_ZAI_BASE_URL,
+    clean_string,
+    resolve_llm_model,
+    resolve_llm_provider,
+    resolve_openai_api_surface,
+)
+from utils.mcp_client import (
+    HttpMcpClient,
+    McpClientError,
+    StdioMcpClient,
+    apply_mcp_runtime_headers,
+    build_mcp_tool_name,
+)
+from utils.runtime import get_state_dir
+from utils.speech_activity import SpeechActivityTracker
 
 # Import every LLM service the runtime can select at MODULE level, not lazily
 # inside build_llm_service(): the lazy `import anthropic` cost ~27s on a loaded
@@ -49,37 +79,6 @@ try:
     from pipecat.services.openai.responses.llm import OpenAIResponsesLLMService
 except ImportError:
     OpenAIResponsesLLMService = None
-from pipecat.transports.websocket.client import (
-    WebsocketClientParams,
-    WebsocketClientTransport,
-)
-
-from pipecat.frames.frames import SystemFrame
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-
-from config.persona_utils import PersonaManager
-from utils.floor import floor_blocked_by_sibling
-from utils.idle_reengagement import IdleReengagementBudget
-from utils.speech_activity import SpeechActivityTracker
-from utils.mcp_client import (
-    HttpMcpClient,
-    McpClientError,
-    StdioMcpClient,
-    apply_mcp_runtime_headers,
-    build_mcp_tool_name,
-)
-from utils.runtime import get_state_dir
-from utils.llm_config import (
-    DEFAULT_ZAI_BASE_URL,
-    clean_string,
-    resolve_llm_model,
-    resolve_llm_provider,
-    resolve_openai_api_surface,
-)
-from config.prompts import DEFAULT_SYSTEM_PROMPT
-from meetingbaas_pipecat.utils.logger import configure_logger
-import sys
-import logging
 
 # Global transcript storage - will be saved to file for webhook to read
 TRANSCRIPT_DIR = os.path.join(get_state_dir(), "transcripts")
@@ -139,11 +138,20 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
                 "LLM_PROVIDER=anthropic but the anthropic pipecat extra is not installed"
             )
 
+        # Voice turns must start within a second or two, so thinking is off
+        # explicitly: left unset, Opus/Fable models decide per request and a
+        # "thoughtful" reply arrives seconds late. The persona prompt (often
+        # tens of KB of persona docs) is identical every turn, so prompt
+        # caching cuts both time-to-first-token and cost.
         llm = AnthropicLLMService(
             api_key=api_key,
             run_in_parallel=False,
             settings=AnthropicLLMService.Settings(
-                model=model, system_instruction=system_instruction
+                model=model,
+                system_instruction=system_instruction,
+                max_tokens=1024,
+                thinking=AnthropicLLMService.ThinkingConfig(type="disabled"),
+                enable_prompt_caching=True,
             ),
         )
     elif provider == "zai":
@@ -663,6 +671,11 @@ class FloorGate(FrameProcessor):
 
     POLL_SECS = 0.2
     MAX_HOLD_SECS = 20.0
+    # The floor file is read at most this often. Every TTS audio chunk passes
+    # through here (50+ frames/s), and a JSON read per frame on the event loop
+    # was measurable jitter for nothing: the floor cannot change faster than
+    # the API process writes it.
+    CHECK_INTERVAL_SECS = 0.1
 
     def __init__(self, meeting_url: str, my_name: str, **kwargs):
         super().__init__(**kwargs)
@@ -670,12 +683,21 @@ class FloorGate(FrameProcessor):
         self._my_name = my_name
         self._buffer = []
         self._flush_task = None
+        self._blocked_cached = False
+        self._blocked_checked_at = 0.0
 
     def _blocked(self) -> bool:
+        now = time.monotonic()
+        if now - self._blocked_checked_at < self.CHECK_INTERVAL_SECS:
+            return self._blocked_cached
+        self._blocked_checked_at = now
         try:
-            return floor_blocked_by_sibling(self._meeting_url, self._my_name)
+            self._blocked_cached = floor_blocked_by_sibling(
+                self._meeting_url, self._my_name
+            )
         except Exception:
-            return False  # never let floor bookkeeping kill the pipeline
+            self._blocked_cached = False  # never let floor bookkeeping kill the pipeline
+        return self._blocked_cached
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
