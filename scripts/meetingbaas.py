@@ -672,6 +672,11 @@ class FloorGate(FrameProcessor):
 
     POLL_SECS = 0.2
     MAX_HOLD_SECS = 20.0
+    # The floor file is read at most this often. Every TTS audio chunk passes
+    # through here (50+ frames/s), and a JSON read per frame on the event loop
+    # was measurable jitter for nothing: the floor cannot change faster than
+    # the API process writes it.
+    CHECK_INTERVAL_SECS = 0.1
 
     def __init__(self, meeting_url: str, my_name: str, **kwargs):
         super().__init__(**kwargs)
@@ -679,12 +684,21 @@ class FloorGate(FrameProcessor):
         self._my_name = my_name
         self._buffer = []
         self._flush_task = None
+        self._blocked_cached = False
+        self._blocked_checked_at = 0.0
 
     def _blocked(self) -> bool:
+        now = time.monotonic()
+        if now - self._blocked_checked_at < self.CHECK_INTERVAL_SECS:
+            return self._blocked_cached
+        self._blocked_checked_at = now
         try:
-            return floor_blocked_by_sibling(self._meeting_url, self._my_name)
+            self._blocked_cached = floor_blocked_by_sibling(
+                self._meeting_url, self._my_name
+            )
         except Exception:
-            return False  # never let floor bookkeeping kill the pipeline
+            self._blocked_cached = False  # never let floor bookkeeping kill the pipeline
+        return self._blocked_cached
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
