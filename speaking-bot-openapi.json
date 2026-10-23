@@ -898,7 +898,7 @@
               }
             ],
             "title": "Stop Secs",
-            "description": "Silence (seconds) before the bot considers the speaker done and replies"
+            "description": "Silence (seconds) before the bot checks whether the speaker is done; it replies right away when they are"
           },
           "min_volume": {
             "anyOf": [
@@ -913,12 +913,26 @@
             ],
             "title": "Min Volume",
             "description": "Minimum input volume for VAD"
+          },
+          "unfinished_pause_secs": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 10.0,
+                "minimum": 0.2
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unfinished Pause Secs",
+            "description": "When the speaker sounds mid-thought, silence (seconds) after which the bot replies anyway"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "TurnConfig",
-        "description": "Per-bot voice-activity / turn-taking tuning.\n\nAll fields optional; unset fields fall back to the VAD_* env vars, then\npipecat defaults. Human-facing bots want snappy turn-taking (low\nstop_secs); bot-vs-bot meetings want patience (higher stop_secs and\nstart_secs) so the bots stop barging in on each other."
+        "description": "Per-bot turn-taking tuning.\n\nAll fields optional; unset fields fall back to the VAD_* / TURN_* env\nvars, then the server defaults (0.2 s stop, 1.5 s unfinished pause). A\nlocal end-of-turn model decides whether the speaker has finished once the\nVAD reports a pause, so stop_secs only needs to catch the pause.\nHuman-facing bots want the defaults; bot-vs-bot meetings want patience\n(higher start_secs and unfinished_pause_secs) so the bots stop barging in\non each other."
       },
       "ValidationError": {
         "properties": {

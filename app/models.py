@@ -60,12 +60,15 @@ def _validate_header_transport(url: str | None, headers: dict[str, str] | None) 
 
 
 class TurnConfig(BaseModel):
-    """Per-bot voice-activity / turn-taking tuning.
+    """Per-bot turn-taking tuning.
 
-    All fields optional; unset fields fall back to the VAD_* env vars, then
-    pipecat defaults. Human-facing bots want snappy turn-taking (low
-    stop_secs); bot-vs-bot meetings want patience (higher stop_secs and
-    start_secs) so the bots stop barging in on each other.
+    All fields optional; unset fields fall back to the VAD_* / TURN_* env
+    vars, then the server defaults (0.2 s stop, 1.5 s unfinished pause). A
+    local end-of-turn model decides whether the speaker has finished once the
+    VAD reports a pause, so stop_secs only needs to catch the pause.
+    Human-facing bots want the defaults; bot-vs-bot meetings want patience
+    (higher start_secs and unfinished_pause_secs) so the bots stop barging in
+    on each other.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -83,10 +86,22 @@ class TurnConfig(BaseModel):
         None,
         ge=0.1,
         le=10.0,
-        description="Silence (seconds) before the bot considers the speaker done and replies",
+        description=(
+            "Silence (seconds) before the bot checks whether the speaker is done; "
+            "it replies right away when they are"
+        ),
     )
     min_volume: float | None = Field(
         None, ge=0.0, le=1.0, description="Minimum input volume for VAD"
+    )
+    unfinished_pause_secs: float | None = Field(
+        None,
+        ge=0.2,
+        le=10.0,
+        description=(
+            "When the speaker sounds mid-thought, silence (seconds) after which "
+            "the bot replies anyway"
+        ),
     )
 
 

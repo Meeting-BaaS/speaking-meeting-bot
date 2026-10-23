@@ -20,6 +20,8 @@ import pytz
 from dotenv import load_dotenv
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
 from pipecat.frames.frames import LLMMessagesAppendFrame, SystemFrame, TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
@@ -43,9 +45,12 @@ from pipecat.transports.websocket.client import (
     WebsocketClientParams,
     WebsocketClientTransport,
 )
+from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
+    TurnAnalyzerUserTurnStopStrategy,
+)
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from config.persona_utils import PersonaManager
-from config.prompts import DEFAULT_SYSTEM_PROMPT
 from meetingbaas_pipecat.utils.logger import configure_logger
 from utils.floor import floor_blocked_by_sibling
 from utils.idle_reengagement import IdleReengagementBudget
@@ -67,6 +72,8 @@ from utils.mcp_client import (
 )
 from utils.runtime import get_state_dir
 from utils.speech_activity import SpeechActivityTracker
+from utils.system_prompt import build_system_prompt
+from utils.turn_taking import resolve_turn_taking
 
 # Import every LLM service the runtime can select at MODULE level, not lazily
 # inside build_llm_service(): the lazy `import anthropic` cost ~27s on a loaded
@@ -113,7 +120,10 @@ async def build_pipeline_runner(pipeline):
         params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
         check_dangling_tasks=True,
     )
-    runner = WorkerRunner()
+    # SIGTERM is what the API sends a child that outstayed its socket; handled,
+    # it cancels the pipeline so the shutdown path below still runs (final
+    # transcript, MCP sessions) instead of the process just vanishing.
+    runner = WorkerRunner(handle_sigterm=True)
     await runner.add_workers(task)
     return task, runner
 
@@ -885,19 +895,14 @@ async def main(
 
     # Assemble the system prompt BEFORE building the LLM service: since
     # pipecat 1.9 the system prompt belongs on the service (system_instruction),
-    # not as a leading {"role": "system"} message in LLMContext.
-    system_content = persona["prompt"]
-    if additional_content:
-        system_content += f"\n\nYou are {persona_name}\n\n{DEFAULT_SYSTEM_PROMPT}\n\n"
-        system_content += "You have the following additional context. USE IT TO INFORM YOUR RESPONSES:\n\n"
-        system_content += additional_content
-        system_content += "You are a meeting bot. You are in a meeting with a group of people. You are here to help the group. You are not the host of the meeting. You are not the organizer of the meeting. You are not the participant in the meeting. You are the meeting bot."
-        system_content += "YOU ARE HELP TO HELP. KEEP IT SHORT. EVERYTHING YOU SAY WILL BE REPEATED BACK TO THE GROUP OUT LOUD so DO NOT add PUNCTUATION OR CAPS. JUST SAY WHAT YOU NEED TO SAY IN A CONCISE MANNER."
-
+    # not as a leading {"role": "system"} message in LLMContext. The voice
+    # guidance it appends is part of the latency budget: TTS speaks sentence
+    # by sentence, and the old instruction to drop punctuation meant the whole
+    # reply had to finish generating before a word was heard.
     mcp_context = build_mcp_context_prompt(persona.get("mcp"))
     if mcp_context:
-        system_content += mcp_context
         log_and_flush(logging.INFO, "[MCP] Added MCP metadata to system context")
+    system_content = build_system_prompt(persona, persona_name, mcp_context)
 
     llm = build_llm_service(persona, system_instruction=system_content)
 
@@ -1011,36 +1016,39 @@ async def main(
     else:
         context = LLMContext(messages)
 
-    # Create the context aggregator pair with VAD on the user aggregator
-    # Turn-taking knobs. Precedence: per-request turn_config (rides in the
-    # persona dict from the API) > VAD_* env vars > defaults.
-    #   start_secs — sustained speech required before a turn/interruption
-    #     registers. Raise for bot-vs-bot meetings so TTS tails and breaths
-    #     don't trigger mutual barge-in.
-    #   stop_secs — silence required before the bot considers the speaker
-    #     done and replies. 0.1 (the old hardcode) replied to half-sentences;
-    #     pipecat's default is 0.8.
-    turn_config = (persona.get("turn_config") or {}) if persona else {}
-
-    def _vad_param(key: str, env: str, default: str) -> float:
-        value = turn_config.get(key)
-        return float(value) if value is not None else float(os.getenv(env, default))
-
+    # Turn-taking. Precedence: per-request turn_config (rides in the persona
+    # dict from the API) > VAD_* / TURN_* env vars > utils.turn_taking defaults.
+    # Two stages decide that a speaker has finished: the VAD notices a pause
+    # (stop_secs, 0.2 s), then the local smart-turn model judges from the
+    # audio whether the thought is complete. Complete: the reply starts as
+    # soon as the final transcript lands. Mid-thought: the bot waits up to
+    # unfinished_pause_secs of silence before answering anyway. Pipecat ran
+    # this model by default already, but with its 3 s fallback on top of a
+    # 0.8 s VAD stop; making it explicit puts the numbers where they can be
+    # read and tuned.
+    turn = resolve_turn_taking(persona.get("turn_config") if persona else None)
+    log_and_flush(logging.INFO, f"[TURN] {turn}")
     vad_params = VADParams(
-        confidence=_vad_param("confidence", "VAD_CONFIDENCE", "0.5"),
-        start_secs=_vad_param("start_secs", "VAD_START_SECS", "0.25"),
-        stop_secs=_vad_param("stop_secs", "VAD_STOP_SECS", "0.8"),
-        min_volume=_vad_param("min_volume", "VAD_MIN_VOLUME", "0.6"),
+        confidence=turn.confidence,
+        start_secs=turn.start_secs,
+        stop_secs=turn.stop_secs,
+        min_volume=turn.min_volume,
     )
-    log_and_flush(logging.INFO, f"[VAD] Params: {vad_params}")
+    turn_strategies = UserTurnStrategies(
+        stop=[
+            TurnAnalyzerUserTurnStopStrategy(
+                turn_analyzer=LocalSmartTurnAnalyzerV3(
+                    params=SmartTurnParams(stop_secs=turn.unfinished_pause_secs)
+                )
+            )
+        ]
+    )
 
     aggregator_pair = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(
-                sample_rate=16000,
-                params=vad_params,
-            ),
+            vad_analyzer=SileroVADAnalyzer(sample_rate=16000, params=vad_params),
+            user_turn_strategies=turn_strategies,
         ),
     )
 
@@ -1079,6 +1087,15 @@ async def main(
     ])
 
     task, runner = await build_pipeline_runner(pipeline)
+
+    @transport.event_handler("on_disconnected")
+    async def on_disconnected(transport, websocket):
+        # The API closes this socket when the bot is removed or its call is
+        # over, and nothing reconnects it. A pipeline left running here is a
+        # process holding open STT and TTS sessions and nudging the LLM into
+        # an empty room; end it, which also saves the final transcript below.
+        log_and_flush(logging.INFO, "[WEBSOCKET] API closed the audio socket — ending the pipeline")
+        await task.cancel(reason="audio socket closed")
 
     # Task to periodically save the transcript
     async def periodic_transcript_save():
@@ -1132,9 +1149,13 @@ async def main(
             waited += poll_interval
 
         if not ready and waited >= max_wait_seconds:
-            # Never admitted: stay silent. Speaking "anyway" used to blast the
-            # greeting into the Teams lobby where nobody could hear it.
-            log_and_flush(logging.WARNING, "[BOT] No admission signal — skipping entry message, staying reactive")
+            # Never admitted. Speaking "anyway" used to blast the greeting into
+            # the Teams lobby where nobody could hear it, and staying "reactive"
+            # kept a process alive for a call that never happened. MeetingBaas
+            # reports such a bot as failed and the API tears it down; this is
+            # the child's own exit for when that report never comes.
+            log_and_flush(logging.WARNING, f"[BOT] No admission signal in {max_wait_seconds}s — leaving")
+            await task.cancel(reason="never admitted")
             return
 
         # Small additional delay to ensure audio pipeline is stable
