@@ -434,6 +434,44 @@
             "title": "Speech Speed",
             "description": "TTS speaking speed multiplier between 0.6 and 1.5; values outside are rejected. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default."
           },
+          "speech_volume": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 2.0,
+                "minimum": 0.5
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speech Volume",
+            "description": "TTS loudness multiplier. Honored range is 0.5-2.0 (Cartesia sonic-3). Omit for the provider default."
+          },
+          "speech_emotion": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 60,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speech Emotion",
+            "description": "Emotion tag guiding the TTS tone (Cartesia sonic-3, experimental; 60+ tags such as 'excited', 'calm'). Omit to let the model infer tone from the text, which Cartesia recommends."
+          },
+          "respond_mode": {
+            "type": "string",
+            "enum": [
+              "always",
+              "mentioned"
+            ],
+            "title": "Respond Mode",
+            "description": "When the bot replies. 'always': every completed turn gets an answer (good for 1:1 calls). 'mentioned': the bot only hears turns within a short window after someone says its name \u2014 the mode for multi-party meetings where it should stay quiet until addressed.",
+            "default": "always"
+          },
           "credentials": {
             "anyOf": [
               {
@@ -884,7 +922,7 @@
               }
             ],
             "title": "Start Secs",
-            "description": "Sustained speech (seconds) before a turn registers"
+            "description": "Sustained speech (seconds) before a turn registers while the bot is silent; while it speaks, min_interrupt_words decides"
           },
           "stop_secs": {
             "anyOf": [
@@ -898,7 +936,7 @@
               }
             ],
             "title": "Stop Secs",
-            "description": "Silence (seconds) before the bot considers the speaker done and replies"
+            "description": "Silence (seconds) before the bot checks whether the speaker is done; it replies right away when they are"
           },
           "min_volume": {
             "anyOf": [
@@ -913,12 +951,40 @@
             ],
             "title": "Min Volume",
             "description": "Minimum input volume for VAD"
+          },
+          "unfinished_pause_secs": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 10.0,
+                "minimum": 0.2
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unfinished Pause Secs",
+            "description": "When the speaker sounds mid-thought, silence (seconds) after which the bot replies anyway"
+          },
+          "min_interrupt_words": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 20.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Interrupt Words",
+            "description": "Words someone must say before they interrupt the bot mid-sentence; coughs and 'uh-huh's stay below it. 0 interrupts on any speech"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "TurnConfig",
-        "description": "Per-bot voice-activity / turn-taking tuning.\n\nAll fields optional; unset fields fall back to the VAD_* env vars, then\npipecat defaults. Human-facing bots want snappy turn-taking (low\nstop_secs); bot-vs-bot meetings want patience (higher stop_secs and\nstart_secs) so the bots stop barging in on each other."
+        "description": "Per-bot turn-taking tuning.\n\nAll fields optional; unset fields fall back to the VAD_* / TURN_* env\nvars, then the server defaults (0.2 s stop, 1.5 s unfinished pause). A\nlocal end-of-turn model decides whether the speaker has finished once the\nVAD reports a pause, so stop_secs only needs to catch the pause.\nHuman-facing bots want the defaults; bot-vs-bot meetings want patience\n(higher start_secs and unfinished_pause_secs) so the bots stop barging in\non each other."
       },
       "ValidationError": {
         "properties": {

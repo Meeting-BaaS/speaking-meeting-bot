@@ -60,12 +60,15 @@ def _validate_header_transport(url: str | None, headers: dict[str, str] | None) 
 
 
 class TurnConfig(BaseModel):
-    """Per-bot voice-activity / turn-taking tuning.
+    """Per-bot turn-taking tuning.
 
-    All fields optional; unset fields fall back to the VAD_* env vars, then
-    pipecat defaults. Human-facing bots want snappy turn-taking (low
-    stop_secs); bot-vs-bot meetings want patience (higher stop_secs and
-    start_secs) so the bots stop barging in on each other.
+    All fields optional; unset fields fall back to the VAD_* / TURN_* env
+    vars, then the server defaults (0.2 s stop, 1.5 s unfinished pause). A
+    local end-of-turn model decides whether the speaker has finished once the
+    VAD reports a pause, so stop_secs only needs to catch the pause.
+    Human-facing bots want the defaults; bot-vs-bot meetings want patience
+    (higher start_secs and unfinished_pause_secs) so the bots stop barging in
+    on each other.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -77,16 +80,40 @@ class TurnConfig(BaseModel):
         None,
         ge=0.05,
         le=5.0,
-        description="Sustained speech (seconds) before a turn registers",
+        description=(
+            "Sustained speech (seconds) before a turn registers while the bot is "
+            "silent; while it speaks, min_interrupt_words decides"
+        ),
     )
     stop_secs: float | None = Field(
         None,
         ge=0.1,
         le=10.0,
-        description="Silence (seconds) before the bot considers the speaker done and replies",
+        description=(
+            "Silence (seconds) before the bot checks whether the speaker is done; "
+            "it replies right away when they are"
+        ),
     )
     min_volume: float | None = Field(
         None, ge=0.0, le=1.0, description="Minimum input volume for VAD"
+    )
+    unfinished_pause_secs: float | None = Field(
+        None,
+        ge=0.2,
+        le=10.0,
+        description=(
+            "When the speaker sounds mid-thought, silence (seconds) after which "
+            "the bot replies anyway"
+        ),
+    )
+    min_interrupt_words: int | None = Field(
+        None,
+        ge=0,
+        le=20,
+        description=(
+            "Words someone must say before they interrupt the bot mid-sentence; "
+            "coughs and 'uh-huh's stay below it. 0 interrupts on any speech"
+        ),
     )
 
 
@@ -415,6 +442,35 @@ class BotRequest(BaseModel):
             "TTS speaking speed multiplier between 0.6 and 1.5; values outside "
             "are rejected. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, "
             "SPEECH_SPEED, or the runner default."
+        ),
+    )
+    speech_volume: float | None = Field(
+        None,
+        ge=0.5,
+        le=2.0,
+        description=(
+            "TTS loudness multiplier. Honored range is 0.5-2.0 (Cartesia "
+            "sonic-3). Omit for the provider default."
+        ),
+    )
+    speech_emotion: str | None = Field(
+        None,
+        min_length=1,
+        max_length=60,
+        description=(
+            "Emotion tag guiding the TTS tone (Cartesia sonic-3, experimental; "
+            "60+ tags such as 'excited', 'calm'). Omit to let the model infer "
+            "tone from the text, which Cartesia recommends."
+        ),
+    )
+    respond_mode: Literal["always", "mentioned"] = Field(
+        "always",
+        description=(
+            "When the bot replies. 'always': every completed turn gets an "
+            "answer (good for 1:1 calls). 'mentioned': the bot only hears "
+            "turns within a short window after someone says its name — the "
+            "mode for multi-party meetings where it should stay quiet until "
+            "addressed."
         ),
     )
     credentials: BotCredentials | None = Field(

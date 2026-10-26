@@ -34,9 +34,9 @@ from utils.llm_config import (
 )
 from utils.mcp_client import split_mcp_runtime_headers
 from config.persona_utils import persona_manager
-from core.connection import BOT_CREDENTIALS, MEETING_DETAILS, PIPECAT_PROCESSES, registry
-from core.process import start_pipecat_process, terminate_process_gracefully
-from core.router import router as message_router
+from core.connection import BOT_CREDENTIALS, MEETING_DETAILS, PIPECAT_PROCESSES
+from core.lifecycle import ShutdownReason, shutdown_bot
+from core.process import start_pipecat_process
 
 # Import from the app module (will be defined in __init__.py)
 from meetingbaas_pipecat.utils.logger import logger
@@ -52,7 +52,6 @@ from utils.ngrok import (
     LOCAL_DEV_MODE,
     determine_websocket_url,
     log_ngrok_status,
-    release_ngrok_url,
     update_ngrok_client_id,
 )
 from utils.runtime import (
@@ -171,16 +170,26 @@ async def join_meeting(request: BotRequest, client_request: Request):
                 f"Dynamically created persona '{persona_name_for_logging}' from prompt."
             )
         else:
-            # Fallback if prompt details extraction fails or returns unexpected type
-            logger.warning(
-                "Failed to extract persona details from custom prompt or received unexpected type. Falling back to default bot persona."
-            )
-            resolved_persona_data = persona_manager.get_persona("baas_onboarder")
-            resolved_persona_data["is_temporary"] = (
-                False  # Ensure fallback is not marked temporary
-            )
-            persona_name_for_logging = resolved_persona_data.get(
-                "name", "baas_onboarder"
+            # No server OpenAI key, or the extraction failed: the caller still
+            # gets the persona they wrote. Falling back to the onboarder persona
+            # here used to put a random character in the meeting.
+            prompt_derived_details = None
+            resolved_persona_data = {
+                "name": (request.bot_name or "").strip() or "Assistant",
+                "prompt": request.prompt,
+                "description": request.prompt,
+                "gender": "neutral",
+                "characteristics": [],
+                "image": None,
+                "cartesia_voice_id": None,
+                "relevant_links": [],
+                "additional_content": None,
+                "is_temporary": True,
+            }
+            persona_name_for_logging = resolved_persona_data["name"]
+            logger.info(
+                f"Persona '{persona_name_for_logging}' taken from the prompt as written "
+                "(no persona extraction)"
             )
 
     else:  # Case 2: No custom prompt, use pre-defined persona
@@ -266,20 +275,28 @@ async def join_meeting(request: BotRequest, client_request: Request):
                     f"Failed to generate image for '{persona_name_for_logging}': {e}"
                 )
 
-    # Populate voice ID if not present
+    # Populate voice ID if not present. Matching a voice to the persona is a
+    # server-side OpenAI call; without that key the bot speaks with the
+    # server's default voice (CARTESIA_VOICE_ID) instead of failing to start.
     if not resolved_persona_data.get("cartesia_voice_id"):
-        from config.voice_utils import (
-            VoiceUtils,
-        )  # Import here to avoid circular dependency issues
+        if os.getenv("OPENAI_API_KEY"):
+            from config.voice_utils import (
+                VoiceUtils,
+            )  # Import here to avoid circular dependency issues
 
-        voice_utils = VoiceUtils()
-        cartesia_voice_id = await voice_utils.match_voice_to_persona(
-            persona_details=resolved_persona_data
-        )  # Pass the whole dict
-        resolved_persona_data["cartesia_voice_id"] = cartesia_voice_id
-        logger.info(
-            f"Resolved Cartesia voice ID for '{persona_name_for_logging}': {cartesia_voice_id}"
-        )
+            try:
+                cartesia_voice_id = await VoiceUtils().match_voice_to_persona(
+                    persona_details=resolved_persona_data
+                )
+            except Exception as e:
+                logger.warning(f"Voice matching failed, using the default voice: {e}")
+                cartesia_voice_id = None
+            resolved_persona_data["cartesia_voice_id"] = cartesia_voice_id
+            logger.info(
+                f"Resolved Cartesia voice ID for '{persona_name_for_logging}': {cartesia_voice_id}"
+            )
+        else:
+            logger.info("No server OpenAI key: using the default voice")
 
     logger.info("Final resolved persona data for Pipecat process:")
     logger.info(f"  Name: {resolved_persona_data.get('name')}")
@@ -366,8 +383,9 @@ async def join_meeting(request: BotRequest, client_request: Request):
         return JSONResponse(
             content={
                 "message": (
-                    f"LLM provider '{resolved_llm_provider}' is not configured "
-                    f"on this server; missing {missing_key_env}"
+                    f"This server has no {resolved_llm_provider} key ({missing_key_env} "
+                    "is unset). Pass your own in credentials.llm_api_key, or choose "
+                    "a provider the server has a key for."
                 ),
                 "status": "error",
             },
@@ -376,6 +394,12 @@ async def join_meeting(request: BotRequest, client_request: Request):
 
     if request.speech_speed is not None:
         resolved_persona_data["speech_speed"] = request.speech_speed
+    if request.speech_volume is not None:
+        resolved_persona_data["speech_volume"] = request.speech_volume
+    if request.speech_emotion is not None:
+        resolved_persona_data["speech_emotion"] = request.speech_emotion
+    if request.respond_mode != "always":
+        resolved_persona_data["respond_mode"] = request.respond_mode
 
     # Store all relevant details in MEETING_DETAILS dictionary.
     # Index 5 carries the FULL resolved persona dict (prompt, voice, image…):
@@ -668,66 +692,13 @@ async def leave_bot(
     else:
         logger.warning("No MeetingBaas bot ID or API key found, skipping API call")
 
-    # 2. Close WebSocket connections if they exist
+    # 2 + 3. Close the sockets, let the child exit (or make it), forget the bot.
     if client_id:
-        # Mark the client as closing to prevent further messages
-        message_router.mark_closing(client_id)
-
-        # Close Pipecat WebSocket first
-        if client_id in registry.pipecat_connections:
-            try:
-                await registry.disconnect(client_id, is_pipecat=True)
-                logger.info(f"Closed Pipecat WebSocket for client {client_id}")
-            except Exception as e:
-                success = False
-                logger.error(f"Error closing Pipecat WebSocket: {e}")
-
-        # Then close client WebSocket if it exists
-        if client_id in registry.active_connections:
-            try:
-                await registry.disconnect(client_id, is_pipecat=False)
-                logger.info(f"Closed client WebSocket for client {client_id}")
-            except Exception as e:
-                success = False
-                logger.error(f"Error closing client WebSocket: {e}")
-
-        # Add a small delay to allow for clean disconnection
-        await asyncio.sleep(0.5)
-
-    # 3. Terminate the Pipecat process after WebSockets are closed
-    if client_id and client_id in PIPECAT_PROCESSES:
-        process = PIPECAT_PROCESSES[client_id]
-        if process and process.poll() is None:  # If process is still running
-            try:
-                if terminate_process_gracefully(process, timeout=3.0):
-                    logger.info(
-                        f"Gracefully terminated Pipecat process for client {client_id}"
-                    )
-                else:
-                    logger.warning(
-                        f"Had to forcefully kill Pipecat process for client {client_id}"
-                    )
-            except Exception as e:
-                success = False
-                logger.error(f"Error terminating Pipecat process: {e}")
-
-        # Remove from our storage
-        PIPECAT_PROCESSES.pop(client_id, None)
-
-        # Drop any meeting audio buffered for a child that will never connect
-        message_router.drop_pending_audio(client_id)
-
-        # Clean up meeting details
-        if client_id in MEETING_DETAILS:
-            MEETING_DETAILS.pop(client_id, None)
-        BOT_CREDENTIALS.pop(client_id, None)
-
-        # Release ngrok URL if in local dev mode
-        if LOCAL_DEV_MODE and client_id:
-            release_ngrok_url(client_id)
-            log_ngrok_status()
-    else:
-        logger.warning(f"No Pipecat process found for client {client_id}")
+        try:
+            await shutdown_bot(client_id, reason=ShutdownReason.REMOVED_BY_CALLER)
+        except Exception as e:
+            success = False
+            logger.error(f"Error shutting down bot {client_id}: {e}")
 
     return {
         "message": "Bot removal request processed",
@@ -904,7 +875,13 @@ async def _poll_bot_admission(
                             if bot_status in _TERMINAL_STATUSES:
                                 logger.info(
                                     f"Bot {meetingbaas_bot_id} reached terminal status "
-                                    f"'{bot_status}' before admission — stopping poll"
+                                    f"'{bot_status}' before admission — shutting it down"
+                                )
+                                await shutdown_bot(
+                                    client_id,
+                                    reason=ShutdownReason.with_detail(
+                                        ShutdownReason.NEVER_ADMITTED, bot_status
+                                    ),
                                 )
                                 return
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:
@@ -999,8 +976,10 @@ async def meetingbaas_webhook(request: Request):
                 f.write(datetime.now().isoformat())
             logger.info(f"Created ready signal for client {internal_client_id}")
 
-        # Check for call ended events
-        end_events = ["call_ended", "bot_left", "meeting_ended", "complete"]
+        # Events after which this bot will never be in the call again. "failed"
+        # was missing: a bot that never got in (lobby timeout, bad URL) kept its
+        # child alive until the next deploy.
+        end_events = ["call_ended", "bot_left", "meeting_ended", "complete", "failed"]
 
         # Check both event_type and status_code for end events
         is_end_event = any(end in event_type_lower for end in end_events) or any(
@@ -1008,8 +987,18 @@ async def meetingbaas_webhook(request: Request):
         )
 
         if is_end_event:
-            logger.info(
-                f"Call ended event detected for bot {bot_id}, generating summary..."
+            logger.info(f"Call over for bot {bot_id} ({event_type or status_code})")
+
+            # Tear the bot down first: closing its socket makes the child end
+            # its pipeline and write the final transcript, which the summary
+            # below then reads complete.
+            failed = "failed" in event_type_lower or "failed" in status_code_lower
+            await shutdown_bot(
+                internal_client_id,
+                reason=ShutdownReason.with_detail(
+                    ShutdownReason.BOT_FAILED if failed else ShutdownReason.CALL_ENDED,
+                    event_type or status_code,
+                ),
             )
 
             # Locate this bot's own transcript — keyed by the MeetingBaas
@@ -1024,7 +1013,9 @@ async def meetingbaas_webhook(request: Request):
                     transcript_file = candidate
                     break
 
-            if transcript_file and _claim_summary(bot_id):
+            if transcript_file and not os.getenv("OPENAI_API_KEY"):
+                logger.info("No server OpenAI key: skipping the call summary")
+            elif transcript_file and _claim_summary(bot_id):
                 # Summary generation makes a blocking OpenAI call; run it off the
                 # event loop so it can't stall floor refresh / admission polling
                 # (and so a slow model can't make MeetingBaas retry the webhook).

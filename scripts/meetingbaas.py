@@ -20,8 +20,11 @@ import pytz
 from dotenv import load_dotenv
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
 from pipecat.frames.frames import LLMMessagesAppendFrame, SystemFrame, TTSSpeakFrame
+from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import WorkerRunner
 from pipecat.pipeline.task import PipelineParams
@@ -34,6 +37,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.services.cartesia.tts import CartesiaTTSService, GenerationConfig
+from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.llm_service import FunctionCallParams
 
@@ -43,13 +47,23 @@ from pipecat.transports.websocket.client import (
     WebsocketClientParams,
     WebsocketClientTransport,
 )
+from pipecat.turns.user_start import (
+    MinWordsUserTurnStartStrategy,
+    WakePhraseUserTurnStartStrategy,
+)
+from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
+    TurnAnalyzerUserTurnStopStrategy,
+)
+from pipecat.turns.user_turn_strategies import (
+    EagerUserTurnStrategies,
+    UserTurnStrategies,
+)
 
 from config.persona_utils import PersonaManager
-from config.prompts import DEFAULT_SYSTEM_PROMPT
 from meetingbaas_pipecat.utils.logger import configure_logger
 from utils.early_audio import hold_messages_until_started
 from utils.floor import floor_blocked_by_sibling
-from utils.idle_reengagement import IdleReengagementBudget
+from utils.idle_reengagement import IdleReengagementBudget, max_nudges_for
 from utils.llm_config import (
     ANTHROPIC_THINKING_ON_MODES,
     DEFAULT_ZAI_BASE_URL,
@@ -67,7 +81,10 @@ from utils.mcp_client import (
     build_mcp_tool_name,
 )
 from utils.runtime import get_state_dir
+from utils.speakers import read_recent_speakers
 from utils.speech_activity import SpeechActivityTracker
+from utils.system_prompt import build_system_prompt
+from utils.turn_taking import resolve_turn_taking
 
 # Import every LLM service the runtime can select at MODULE level, not lazily
 # inside build_llm_service(): the lazy `import anthropic` cost ~27s on a loaded
@@ -106,15 +123,53 @@ def log_and_flush(level, msg):
     for h in logger.handlers:
         h.flush()
 
+def speculative_turns_enabled() -> bool:
+    """STT_SPECULATIVE_TURNS=1 switches to Deepgram Flux + eager end-of-turn.
+
+    Experimental: the LLM generates against the predicted end of turn and the
+    response is released only when the turn commits, hiding the turn-decision
+    window. Off by default — it replaces the local smart-turn analyzer and
+    changes the STT service.
+    """
+    return os.getenv("STT_SPECULATIVE_TURNS", "").strip() in ("1", "true", "yes")
+
+
+def _voice_max_tokens() -> int:
+    """Output cap for a voice turn (VOICE_LLM_MAX_TOKENS, default 1024).
+
+    A spoken reply is a few sentences; an uncapped generation that rambles is
+    pure time-to-last-word latency and floor-hogging. 1024 matches the
+    Anthropic path's non-thinking cap. Tool-call JSON fits comfortably.
+    """
+    try:
+        return int(os.getenv("VOICE_LLM_MAX_TOKENS", "1024"))
+    except ValueError:
+        return 1024
+
+
 async def build_pipeline_runner(pipeline):
     """Construct and register the meeting worker before the runner starts."""
-    # Metrics log per-service TTFB (STT/LLM/TTS) — grep journal for "TTFB".
+    # Per-turn latency accounting: every user-to-bot interval broken into named
+    # parts that sum to the measured total (VAD silence, turn decision, LLM
+    # TTFB, TTS…). One [LATENCY] block per turn — this is the ground truth any
+    # latency tuning starts from. Per-service TTFB metrics still log separately.
+    latency_observer = UserBotLatencyObserver()
+
+    @latency_observer.event_handler("on_latency_breakdown")
+    async def on_latency_breakdown(observer, breakdown):
+        for line in breakdown.turn_contribution_lines():
+            log_and_flush(logging.INFO, f"[LATENCY] {line}")
+
     task = PipelineWorker(
         pipeline,
         params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
         check_dangling_tasks=True,
+        observers=[latency_observer],
     )
-    runner = WorkerRunner()
+    # SIGTERM is what the API sends a child that outstayed its socket; handled,
+    # it cancels the pipeline so the shutdown path below still runs (final
+    # transcript, MCP sessions) instead of the process just vanishing.
+    runner = WorkerRunner(handle_sigterm=True)
     await runner.add_workers(task)
     return task, runner
 
@@ -179,7 +234,9 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
             run_in_parallel=False,
             base_url=base_url,
             settings=OpenAILLMService.Settings(
-                model=model, system_instruction=system_instruction
+                model=model,
+                system_instruction=system_instruction,
+                max_tokens=_voice_max_tokens(),
             ),
         )
     else:
@@ -200,7 +257,14 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
                 run_in_parallel=False,
                 service_tier=service_tier,
                 settings=OpenAIResponsesLLMService.Settings(
-                    model=model, system_instruction=system_instruction
+                    model=model,
+                    system_instruction=system_instruction,
+                    # The Responses API caps output with max_output_tokens, which
+                    # pipecat fills from max_completion_tokens; max_tokens is the
+                    # Chat Completions name and would be ignored here. Reasoning
+                    # stays off by default (pipecat's choice for latency), so
+                    # the cap is spent on the spoken reply alone.
+                    max_completion_tokens=_voice_max_tokens(),
                 ),
             )
         else:
@@ -209,7 +273,9 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
                 run_in_parallel=False,
                 service_tier=service_tier,
                 settings=OpenAILLMService.Settings(
-                    model=model, system_instruction=system_instruction
+                    model=model,
+                    system_instruction=system_instruction,
+                    max_tokens=_voice_max_tokens(),
                 ),
             )
 
@@ -257,22 +323,68 @@ def resolve_tts_speed(persona: dict | None) -> float:
     return min(max(speed, 0.6), 1.5)
 
 
+def resolve_tts_volume(persona: dict | None) -> float | None:
+    """Resolve TTS volume (Cartesia honors 0.5-2.0); None = provider default."""
+    persona = persona or {}
+    volume = _coerce_float(
+        persona.get("speech_volume") or os.getenv("CARTESIA_TTS_VOLUME")
+    )
+    if volume is None:
+        return None
+    return min(max(volume, 0.5), 2.0)
+
+
+def resolve_tts_emotion(persona: dict | None) -> str | None:
+    """Resolve the TTS emotion tag; None = let sonic-3.x infer from the text.
+
+    Cartesia calls emotion control experimental and recommends relying on the
+    model's own expressiveness, so this is opt-in per request/persona only.
+    """
+    persona = persona or {}
+    emotion = persona.get("speech_emotion") or os.getenv("CARTESIA_TTS_EMOTION")
+    emotion = clean_string(emotion) if emotion else None
+    return emotion or None
+
+
 def build_cartesia_tts_kwargs(
     *,
     api_key: str | None,
     voice_id: str | None,
     sample_rate: int,
     speed: float,
+    volume: float | None = None,
+    emotion: str | None = None,
+    pronunciation_dict_id: str | None = None,
 ) -> dict:
-    """Build Cartesia kwargs for Pipecat 1.12+ (Settings replaces voice_id/params)."""
-    return {
+    """Build Cartesia kwargs for Pipecat 1.12+ (Settings replaces voice_id/params).
+
+    volume/emotion ride sonic-3's generation_config (None = provider default);
+    pronunciation_dict_id points at a Cartesia-hosted dictionary so names like
+    "MeetingBaas" or client jargon are said right.
+    """
+    generation: dict = {"speed": speed}
+    if volume is not None:
+        generation["volume"] = volume
+    if emotion is not None:
+        generation["emotion"] = emotion
+    settings_kwargs: dict = {
+        "voice": voice_id,
+        "generation_config": GenerationConfig(**generation),
+    }
+    if pronunciation_dict_id:
+        settings_kwargs["pronunciation_dict_id"] = pronunciation_dict_id
+    kwargs = {
         "api_key": api_key,
         "sample_rate": sample_rate,
-        "settings": CartesiaTTSService.Settings(
-            voice=voice_id,
-            generation_config=GenerationConfig(speed=speed),
-        ),
+        "settings": CartesiaTTSService.Settings(**settings_kwargs),
     }
+    # How long Cartesia buffers audio before the first chunk plays. Lower =
+    # first word sooner; too low risks audible underruns. Unset = provider
+    # default.
+    buffer_ms = _coerce_float(os.getenv("CARTESIA_MAX_BUFFER_DELAY_MS"))
+    if buffer_ms is not None:
+        kwargs["max_buffer_delay_ms"] = int(buffer_ms)
+    return kwargs
 
 
 def build_mcp_context_prompt(mcp_config) -> str:
@@ -643,6 +755,36 @@ async def save_call_summary(params: FunctionCallParams):
     await params.result_callback(f"Great, I've saved the summary of our call. Thank you so much for your time today, {prospect_name}!")
 
 
+class SpeakerLabeler(FrameProcessor):
+    """Prefix final transcriptions with the speaker's display name.
+
+    MeetingBaas tells the API who is speaking (names, humans included); the
+    API mirrors that into a per-meeting speakers file (utils/speakers.py).
+    When a final transcription lands and exactly one recent speaker other than
+    this bot matches, the text becomes "Name: text". The LLM can then tell a
+    remark addressed to it from participants talking to each other — the whole
+    basis of staying quiet in a multi-party meeting. Ambiguous (overlapping
+    speakers, stale file): leave the text unlabeled rather than guess.
+    """
+
+    def __init__(self, meeting_url: str, my_name: str, **kwargs):
+        super().__init__(**kwargs)
+        self._meeting_url = meeting_url
+        self._my_name = (my_name or "").strip().lower()
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if type(frame).__name__ == "TranscriptionFrame" and getattr(frame, "text", None):
+            candidates = [
+                name
+                for name in read_recent_speakers(self._meeting_url)
+                if name.strip().lower() != self._my_name
+            ]
+            if len(candidates) == 1 and not frame.text.startswith(f"{candidates[0]}:"):
+                frame.text = f"{candidates[0]}: {frame.text}"
+        await self.push_frame(frame, direction)
+
+
 class SpeechInjectionProbe(FrameProcessor):
     """Logs the exact on/off of THIS bot's outgoing TTS audio injection.
 
@@ -876,34 +1018,34 @@ async def main(
     log_and_flush(logging.INFO, f"[PERSONA] Using voice ID: {voice_id}")
 
     tts_speed = resolve_tts_speed(persona)
+    tts_volume = resolve_tts_volume(persona)
+    tts_emotion = resolve_tts_emotion(persona)
     tts_kwargs = build_cartesia_tts_kwargs(
         api_key=os.getenv("CARTESIA_API_KEY"),
         voice_id=voice_id,
         sample_rate=output_sample_rate,
         speed=tts_speed,
+        volume=tts_volume,
+        emotion=tts_emotion,
+        pronunciation_dict_id=clean_string(os.getenv("CARTESIA_PRONUNCIATION_DICT_ID")),
     )
     tts = CartesiaTTSService(**tts_kwargs)
-    speed_applied = "settings" in tts_kwargs
     log_and_flush(
         logging.INFO,
-        f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}, speed={tts_speed}, speed_applied={speed_applied}",
+        f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, "
+        f"voice_id={voice_id}, speed={tts_speed}, volume={tts_volume}, emotion={tts_emotion}",
     )
 
     # Assemble the system prompt BEFORE building the LLM service: since
     # pipecat 1.9 the system prompt belongs on the service (system_instruction),
-    # not as a leading {"role": "system"} message in LLMContext.
-    system_content = persona["prompt"]
-    if additional_content:
-        system_content += f"\n\nYou are {persona_name}\n\n{DEFAULT_SYSTEM_PROMPT}\n\n"
-        system_content += "You have the following additional context. USE IT TO INFORM YOUR RESPONSES:\n\n"
-        system_content += additional_content
-        system_content += "You are a meeting bot. You are in a meeting with a group of people. You are here to help the group. You are not the host of the meeting. You are not the organizer of the meeting. You are not the participant in the meeting. You are the meeting bot."
-        system_content += "YOU ARE HELP TO HELP. KEEP IT SHORT. EVERYTHING YOU SAY WILL BE REPEATED BACK TO THE GROUP OUT LOUD so DO NOT add PUNCTUATION OR CAPS. JUST SAY WHAT YOU NEED TO SAY IN A CONCISE MANNER."
-
+    # not as a leading {"role": "system"} message in LLMContext. The voice
+    # guidance it appends is part of the latency budget: TTS speaks sentence
+    # by sentence, and the old instruction to drop punctuation meant the whole
+    # reply had to finish generating before a word was heard.
     mcp_context = build_mcp_context_prompt(persona.get("mcp"))
     if mcp_context:
-        system_content += mcp_context
         log_and_flush(logging.INFO, "[MCP] Added MCP metadata to system context")
+    system_content = build_system_prompt(persona, persona_name, mcp_context)
 
     llm = build_llm_service(persona, system_instruction=system_content)
 
@@ -989,12 +1131,33 @@ async def main(
     log_and_flush(logging.INFO, f"[STT] Deepgram API key present: {bool(deepgram_api_key)}")
     log_and_flush(logging.INFO, f"[STT] Deepgram config: encoding=linear16, sample_rate={output_sample_rate}, language={language}")
 
-    stt = DeepgramSTTService(
-        api_key=deepgram_api_key,
-        encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
-        sample_rate=output_sample_rate,
-        settings=DeepgramSTTService.Settings(language=language),
-    )
+    if speculative_turns_enabled():
+        # Flux is the Deepgram service that emits eager end-of-turn
+        # predictions; the Eager turn strategies below depend on them.
+        stt = DeepgramFluxSTTService(
+            api_key=deepgram_api_key,
+            # Flux takes 16-bit PCM at any supported rate; the rate rides in
+            # sample_rate, there is no "linear24" encoding.
+            sample_rate=output_sample_rate,
+            flux_encoding="linear16",
+            # Without this Flux emits no eager end-of-turn predictions and the
+            # Eager strategies below never speculate.
+            enable_eager_end_of_turn=True,
+        )
+    else:
+        stt_settings_kwargs: dict = {"language": language}
+        # How many ms of silence Deepgram waits before finalizing a transcript.
+        # Lower = faster final transcripts = faster replies; too low splits
+        # sentences. Unset = Deepgram's default.
+        dg_endpointing = _coerce_float(os.getenv("DEEPGRAM_ENDPOINTING_MS"))
+        if dg_endpointing is not None:
+            stt_settings_kwargs["endpointing"] = int(dg_endpointing)
+        stt = DeepgramSTTService(
+            api_key=deepgram_api_key,
+            encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
+            sample_rate=output_sample_rate,
+            settings=DeepgramSTTService.Settings(**stt_settings_kwargs),
+        )
 
     # stt = GladiaSTTService(
     #     api_key=os.getenv("GLADIA_API_KEY"),
@@ -1017,36 +1180,94 @@ async def main(
     else:
         context = LLMContext(messages)
 
-    # Create the context aggregator pair with VAD on the user aggregator
-    # Turn-taking knobs. Precedence: per-request turn_config (rides in the
-    # persona dict from the API) > VAD_* env vars > defaults.
-    #   start_secs — sustained speech required before a turn/interruption
-    #     registers. Raise for bot-vs-bot meetings so TTS tails and breaths
-    #     don't trigger mutual barge-in.
-    #   stop_secs — silence required before the bot considers the speaker
-    #     done and replies. 0.1 (the old hardcode) replied to half-sentences;
-    #     pipecat's default is 0.8.
-    turn_config = (persona.get("turn_config") or {}) if persona else {}
-
-    def _vad_param(key: str, env: str, default: str) -> float:
-        value = turn_config.get(key)
-        return float(value) if value is not None else float(os.getenv(env, default))
-
+    # Turn-taking. Precedence: per-request turn_config (rides in the persona
+    # dict from the API) > VAD_* / TURN_* env vars > utils.turn_taking defaults.
+    # Two stages decide that a speaker has finished: the VAD notices a pause
+    # (stop_secs, 0.2 s), then the local smart-turn model judges from the
+    # audio whether the thought is complete. Complete: the reply starts as
+    # soon as the final transcript lands. Mid-thought: the bot waits up to
+    # unfinished_pause_secs of silence before answering anyway. Pipecat ran
+    # this model by default already, but with its 3 s fallback on top of a
+    # 0.8 s VAD stop; making it explicit puts the numbers where they can be
+    # read and tuned.
+    turn = resolve_turn_taking(persona.get("turn_config") if persona else None)
+    log_and_flush(logging.INFO, f"[TURN] {turn}")
     vad_params = VADParams(
-        confidence=_vad_param("confidence", "VAD_CONFIDENCE", "0.5"),
-        start_secs=_vad_param("start_secs", "VAD_START_SECS", "0.25"),
-        stop_secs=_vad_param("stop_secs", "VAD_STOP_SECS", "0.8"),
-        min_volume=_vad_param("min_volume", "VAD_MIN_VOLUME", "0.6"),
+        confidence=turn.confidence,
+        start_secs=turn.start_secs,
+        stop_secs=turn.stop_secs,
+        min_volume=turn.min_volume,
     )
-    log_and_flush(logging.INFO, f"[VAD] Params: {vad_params}")
+    # Interruption hygiene for multi-party meetings: a cough, an "uh-huh"
+    # or cross-talk should not cut the bot off mid-sentence. The word
+    # threshold applies only while the bot is speaking; when it is silent,
+    # a turn starts normally. min_interrupt_words=0 restores barge-in on
+    # any speech.
+    start_strategies = []
+    # respond_mode="mentioned": the bot's name must be heard in a final
+    # transcription before a turn starts, and again before the next one
+    # (single_activation). Pipecat's other mode keeps the window open while
+    # anyone keeps talking, which in a lively meeting means one mention and
+    # the bot listens for the rest of the call. RESPOND_MENTION_WINDOW_SECS is
+    # how long the turn that follows a mention may take to complete. Placed
+    # FIRST so it gates the other start strategies.
+    respond_mode = str((persona or {}).get("respond_mode") or "always").lower()
+    if respond_mode == "mentioned":
+        bot_display_name = (persona.get("name") if persona else None) or persona_name
+        wake_window = _coerce_float(os.getenv("RESPOND_MENTION_WINDOW_SECS"), 10.0)
+        start_strategies.append(
+            WakePhraseUserTurnStartStrategy(
+                phrases=[bot_display_name],
+                timeout=wake_window,
+                single_activation=True,
+            )
+        )
+        log_and_flush(
+            logging.INFO,
+            f"[RESPOND] mentioned-only mode: wake phrase '{bot_display_name}', "
+            f"window {wake_window}s",
+        )
+    if turn.min_interrupt_words > 0:
+        start_strategies.append(
+            MinWordsUserTurnStartStrategy(min_words=turn.min_interrupt_words)
+        )
+    start_strategies = start_strategies or None
+    if speculative_turns_enabled():
+        # EXPERIMENTAL (STT_SPECULATIVE_TURNS=1): Deepgram Flux predicts the
+        # end of a turn eagerly and the LLM generates against the prediction;
+        # the response is held and released only when the turn commits — the
+        # turn-decision window is spent generating instead of waiting. The
+        # service owns turn detection in this mode, so Eager REPLACES the
+        # local smart-turn analyzer (running both would double-answer turns).
+        turn_strategies = EagerUserTurnStrategies()
+        if start_strategies:
+            turn_strategies.start = start_strategies
+        log_and_flush(
+            logging.WARNING,
+            "[TURN] Speculative turns enabled (Deepgram Flux + eager end-of-turn)"
+            " — experimental",
+        )
+    else:
+        turn_strategies = UserTurnStrategies(
+            start=start_strategies,
+            stop=[
+                TurnAnalyzerUserTurnStopStrategy(
+                    turn_analyzer=LocalSmartTurnAnalyzerV3(
+                        params=SmartTurnParams(stop_secs=turn.unfinished_pause_secs)
+                    )
+                )
+            ],
+        )
 
     aggregator_pair = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(
-                sample_rate=16000,
-                params=vad_params,
-            ),
+            vad_analyzer=SileroVADAnalyzer(sample_rate=16000, params=vad_params),
+            user_turn_strategies=turn_strategies,
+            # An interruption that yields no transcript (noise, a breath that
+            # tripped the VAD) must not trigger an unprompted LLM reply into
+            # the meeting; leave it unanswered.
+            empty_user_turn=None,
         ),
     )
 
@@ -1065,15 +1286,25 @@ async def main(
     speech_probe = SpeechInjectionProbe(persona_name)
 
     idle_budget = IdleReengagementBudget(
-        idle_secs=float(os.getenv("BOT_IDLE_REENGAGE_SECS", "15")),
-        max_nudges=int(os.getenv("BOT_MAX_REENGAGE", "3")),
+        idle_secs=_coerce_float(os.getenv("BOT_IDLE_REENGAGE_SECS"), 15.0),
+        max_nudges=max_nudges_for(
+            respond_mode, int(_coerce_float(os.getenv("BOT_MAX_REENGAGE"), 3))
+        ),
         last_activity=time.monotonic(),
     )
     speech_activity = SpeechActivityTracker(idle_budget)
 
+    # Label final transcriptions with the speaker's name (multi-party
+    # addressee awareness); in "mentioned" mode, additionally gate the LLM so
+    # it only hears turns within a window after someone says the bot's name.
+    speaker_labeler = SpeakerLabeler(
+        meeting_url=meeting_url,
+        my_name=(persona.get("name") if persona else None) or persona_name,
+    )
     pipeline = Pipeline([
         audio_input,         # transport input, guarded against early audio
         stt,
+        speaker_labeler,     # "Name: text" so the LLM knows who is talking
         speech_activity,     # only received speech replenishes the idle budget
         user_aggregator,
         llm,
@@ -1085,6 +1316,15 @@ async def main(
     ])
 
     task, runner = await build_pipeline_runner(pipeline)
+
+    @transport.event_handler("on_disconnected")
+    async def on_disconnected(transport, websocket):
+        # The API closes this socket when the bot is removed or its call is
+        # over, and nothing reconnects it. A pipeline left running here is a
+        # process holding open STT and TTS sessions and nudging the LLM into
+        # an empty room; end it, which also saves the final transcript below.
+        log_and_flush(logging.INFO, "[WEBSOCKET] API closed the audio socket — ending the pipeline")
+        await task.cancel(reason="audio socket closed")
 
     # Task to periodically save the transcript
     async def periodic_transcript_save():
@@ -1138,9 +1378,13 @@ async def main(
             waited += poll_interval
 
         if not ready and waited >= max_wait_seconds:
-            # Never admitted: stay silent. Speaking "anyway" used to blast the
-            # greeting into the Teams lobby where nobody could hear it.
-            log_and_flush(logging.WARNING, "[BOT] No admission signal — skipping entry message, staying reactive")
+            # Never admitted. Speaking "anyway" used to blast the greeting into
+            # the Teams lobby where nobody could hear it, and staying "reactive"
+            # kept a process alive for a call that never happened. MeetingBaas
+            # reports such a bot as failed and the API tears it down; this is
+            # the child's own exit for when that report never comes.
+            log_and_flush(logging.WARNING, f"[BOT] No admission signal in {max_wait_seconds}s — leaving")
+            await task.cancel(reason="never admitted")
             return
 
         # Small additional delay to ensure audio pipeline is stable

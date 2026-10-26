@@ -1,6 +1,6 @@
 import unittest
 
-from utils.idle_reengagement import IdleReengagementBudget
+from utils.idle_reengagement import IdleReengagementBudget, max_nudges_for
 
 
 class IdleReengagementTest(unittest.TestCase):
@@ -76,3 +76,14 @@ class SpeechActivityTrackerTest(unittest.IsolatedAsyncioTestCase):
         ):
             await self.tracker.process_frame(frame, FrameDirection.DOWNSTREAM)
         self.assertEqual(self.budget.nudges, 3)
+
+
+class MaxNudgesForTest(unittest.TestCase):
+    def test_mentioned_mode_never_nudges(self):
+        self.assertEqual(max_nudges_for("mentioned", 3), 0)
+        self.assertEqual(max_nudges_for("Mentioned", 3), 0)
+
+    def test_always_mode_keeps_the_configured_budget(self):
+        self.assertEqual(max_nudges_for("always", 3), 3)
+        self.assertEqual(max_nudges_for("", 2), 2)
+        self.assertEqual(max_nudges_for("always", -1), 0)

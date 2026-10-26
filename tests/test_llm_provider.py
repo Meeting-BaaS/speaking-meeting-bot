@@ -9,6 +9,7 @@ class LLMProviderRoutingTest(unittest.TestCase):
     ENV_KEYS = [
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_MODEL",
+        "VOICE_LLM_MAX_TOKENS",
         "LLM_MODEL",
         "LLM_PROVIDER",
         "OPENAI_API_KEY",
@@ -182,6 +183,21 @@ class LLMProviderRoutingTest(unittest.TestCase):
             ANTHROPIC_MODEL="claude-haiku-4-5",
         )
         self.assertEqual(result, "claude-sonnet-5-5")
+
+    def test_voice_output_cap_reaches_each_openai_surface(self):
+        # The Responses API only honours max_completion_tokens; the cap must
+        # land on that field there and on max_tokens for Chat Completions.
+        result = self.run_meetingbaas_snippet(
+            "import os\n"
+            "from scripts import meetingbaas\n"
+            "r = meetingbaas.build_llm_service({'llm_provider': 'openai'})\n"
+            "os.environ['OPENAI_API_SURFACE'] = 'chat'\n"
+            "c = meetingbaas.build_llm_service({'llm_provider': 'openai'})\n"
+            "print(r._settings.max_completion_tokens, c._settings.max_tokens)\n",
+            OPENAI_API_KEY="test-key",
+            VOICE_LLM_MAX_TOKENS="700",
+        )
+        self.assertEqual(result, "700 700")
 
     def test_default_models_are_the_fast_ones(self):
         result = self.run_meetingbaas_snippet(
