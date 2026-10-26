@@ -434,6 +434,34 @@
             "title": "Speech Speed",
             "description": "TTS speaking speed multiplier. Honored range is 0.6-1.5 (the runner clamps to it); values outside are rejected. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default."
           },
+          "speech_volume": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 2.0,
+                "minimum": 0.5
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speech Volume",
+            "description": "TTS loudness multiplier. Honored range is 0.5-2.0 (Cartesia sonic-3). Omit for the provider default."
+          },
+          "speech_emotion": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 60,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speech Emotion",
+            "description": "Emotion tag guiding the TTS tone (Cartesia sonic-3, experimental; 60+ tags such as 'excited', 'calm'). Omit to let the model infer tone from the text, which Cartesia recommends."
+          },
           "credentials": {
             "anyOf": [
               {

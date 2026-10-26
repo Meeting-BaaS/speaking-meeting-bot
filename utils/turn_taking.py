@@ -18,6 +18,11 @@ DEFAULT_MIN_VOLUME = 0.6
 # ends the turn anyway. Pipecat's 3 s reads as the bot ignoring you; people
 # give each other about a second and a half.
 DEFAULT_UNFINISHED_PAUSE_SECS = 1.5
+# Words required before speech counts as an interruption while the bot is
+# talking. In a multi-party meeting coughs, "uh-huh"s and cross-talk barge the
+# bot constantly at 0; three words is the documented threshold for separating
+# a real interjection from a backchannel.
+DEFAULT_MIN_INTERRUPT_WORDS = 3
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,7 @@ class TurnTaking:
     stop_secs: float
     min_volume: float
     unfinished_pause_secs: float
+    min_interrupt_words: int
 
 
 def resolve_turn_taking(
@@ -58,4 +64,14 @@ def resolve_turn_taking(
         stop_secs=stop_secs,
         min_volume=pick("min_volume", "VAD_MIN_VOLUME", DEFAULT_MIN_VOLUME),
         unfinished_pause_secs=max(unfinished, stop_secs),
+        min_interrupt_words=max(
+            0,
+            int(
+                pick(
+                    "min_interrupt_words",
+                    "TURN_MIN_INTERRUPT_WORDS",
+                    DEFAULT_MIN_INTERRUPT_WORDS,
+                )
+            ),
+        ),
     )

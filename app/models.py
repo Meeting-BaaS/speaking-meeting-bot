@@ -432,6 +432,25 @@ class BotRequest(BaseModel):
             "CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default."
         ),
     )
+    speech_volume: float | None = Field(
+        None,
+        ge=0.5,
+        le=2.0,
+        description=(
+            "TTS loudness multiplier. Honored range is 0.5-2.0 (Cartesia "
+            "sonic-3). Omit for the provider default."
+        ),
+    )
+    speech_emotion: str | None = Field(
+        None,
+        min_length=1,
+        max_length=60,
+        description=(
+            "Emotion tag guiding the TTS tone (Cartesia sonic-3, experimental; "
+            "60+ tags such as 'excited', 'calm'). Omit to let the model infer "
+            "tone from the text, which Cartesia recommends."
+        ),
+    )
     credentials: BotCredentials | None = Field(
         None,
         description=(

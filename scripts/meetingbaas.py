@@ -45,6 +45,7 @@ from pipecat.transports.websocket.client import (
     WebsocketClientParams,
     WebsocketClientTransport,
 )
+from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
 from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
     TurnAnalyzerUserTurnStopStrategy,
 )
@@ -266,21 +267,60 @@ def resolve_tts_speed(persona: dict | None) -> float:
     return min(max(speed, 0.6), 1.5)
 
 
+def resolve_tts_volume(persona: dict | None) -> float | None:
+    """Resolve TTS volume (Cartesia honors 0.5-2.0); None = provider default."""
+    persona = persona or {}
+    volume = _coerce_float(
+        persona.get("speech_volume") or os.getenv("CARTESIA_TTS_VOLUME")
+    )
+    if volume is None:
+        return None
+    return min(max(volume, 0.5), 2.0)
+
+
+def resolve_tts_emotion(persona: dict | None) -> str | None:
+    """Resolve the TTS emotion tag; None = let sonic-3.x infer from the text.
+
+    Cartesia calls emotion control experimental and recommends relying on the
+    model's own expressiveness, so this is opt-in per request/persona only.
+    """
+    persona = persona or {}
+    emotion = persona.get("speech_emotion") or os.getenv("CARTESIA_TTS_EMOTION")
+    emotion = clean_string(emotion) if emotion else None
+    return emotion or None
+
+
 def build_cartesia_tts_kwargs(
     *,
     api_key: str | None,
     voice_id: str | None,
     sample_rate: int,
     speed: float,
+    volume: float | None = None,
+    emotion: str | None = None,
+    pronunciation_dict_id: str | None = None,
 ) -> dict:
-    """Build Cartesia kwargs for Pipecat 1.12+ (Settings replaces voice_id/params)."""
+    """Build Cartesia kwargs for Pipecat 1.12+ (Settings replaces voice_id/params).
+
+    volume/emotion ride sonic-3's generation_config (None = provider default);
+    pronunciation_dict_id points at a Cartesia-hosted dictionary so names like
+    "MeetingBaas" or client jargon are said right.
+    """
+    generation: dict = {"speed": speed}
+    if volume is not None:
+        generation["volume"] = volume
+    if emotion is not None:
+        generation["emotion"] = emotion
+    settings_kwargs: dict = {
+        "voice": voice_id,
+        "generation_config": GenerationConfig(**generation),
+    }
+    if pronunciation_dict_id:
+        settings_kwargs["pronunciation_dict_id"] = pronunciation_dict_id
     return {
         "api_key": api_key,
         "sample_rate": sample_rate,
-        "settings": CartesiaTTSService.Settings(
-            voice=voice_id,
-            generation_config=GenerationConfig(speed=speed),
-        ),
+        "settings": CartesiaTTSService.Settings(**settings_kwargs),
     }
 
 
@@ -880,17 +920,22 @@ async def main(
     log_and_flush(logging.INFO, f"[PERSONA] Using voice ID: {voice_id}")
 
     tts_speed = resolve_tts_speed(persona)
+    tts_volume = resolve_tts_volume(persona)
+    tts_emotion = resolve_tts_emotion(persona)
     tts_kwargs = build_cartesia_tts_kwargs(
         api_key=os.getenv("CARTESIA_API_KEY"),
         voice_id=voice_id,
         sample_rate=output_sample_rate,
         speed=tts_speed,
+        volume=tts_volume,
+        emotion=tts_emotion,
+        pronunciation_dict_id=clean_string(os.getenv("CARTESIA_PRONUNCIATION_DICT_ID")),
     )
     tts = CartesiaTTSService(**tts_kwargs)
-    speed_applied = "settings" in tts_kwargs
     log_and_flush(
         logging.INFO,
-        f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}, speed={tts_speed}, speed_applied={speed_applied}",
+        f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, "
+        f"voice_id={voice_id}, speed={tts_speed}, volume={tts_volume}, emotion={tts_emotion}",
     )
 
     # Assemble the system prompt BEFORE building the LLM service: since
@@ -1035,13 +1080,23 @@ async def main(
         min_volume=turn.min_volume,
     )
     turn_strategies = UserTurnStrategies(
+        # Interruption hygiene for multi-party meetings: a cough, an "uh-huh"
+        # or cross-talk should not cut the bot off mid-sentence. The word
+        # threshold applies only while the bot is speaking; when it is silent,
+        # a turn starts normally. min_interrupt_words=0 restores barge-in on
+        # any speech.
+        start=(
+            [MinWordsUserTurnStartStrategy(min_words=turn.min_interrupt_words)]
+            if turn.min_interrupt_words > 0
+            else None
+        ),
         stop=[
             TurnAnalyzerUserTurnStopStrategy(
                 turn_analyzer=LocalSmartTurnAnalyzerV3(
                     params=SmartTurnParams(stop_secs=turn.unfinished_pause_secs)
                 )
             )
-        ]
+        ],
     )
 
     aggregator_pair = LLMContextAggregatorPair(
@@ -1049,6 +1104,10 @@ async def main(
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(sample_rate=16000, params=vad_params),
             user_turn_strategies=turn_strategies,
+            # An interruption that yields no transcript (noise, a breath that
+            # tripped the VAD) must not trigger an unprompted LLM reply into
+            # the meeting; leave it unanswered.
+            empty_user_turn=None,
         ),
     )
 

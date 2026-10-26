@@ -394,6 +394,10 @@ async def join_meeting(request: BotRequest, client_request: Request):
 
     if request.speech_speed is not None:
         resolved_persona_data["speech_speed"] = request.speech_speed
+    if request.speech_volume is not None:
+        resolved_persona_data["speech_volume"] = request.speech_volume
+    if request.speech_emotion is not None:
+        resolved_persona_data["speech_emotion"] = request.speech_emotion
 
     # Store all relevant details in MEETING_DETAILS dictionary.
     # Index 5 carries the FULL resolved persona dict (prompt, voice, image…):
