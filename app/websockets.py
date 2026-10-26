@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -27,6 +28,36 @@ _last_speaking_set: dict = {}
 
 # Client IDs that already got their ready signal (see below).
 _ready_signaled: set = set()
+
+# Per meeting key: the last speaker set written to the speakers file, when, and
+# whether the end of that speech has been recorded (see _record_speakers).
+_speakers_written: dict = {}
+# While the same people keep talking, refresh the file's timestamp this often
+# so it does not go stale mid-utterance.
+SPEAKERS_REFRESH_SECS = 1.0
+
+
+def _record_speakers(meeting_url: str, key: str, speaking_now: list) -> None:
+    """Keep the per-meeting speakers file current without a write per message.
+
+    Written on a change of speakers, refreshed about once a second while they
+    keep talking, and written once more when speech stops: a long utterance
+    arrives as one state change at the start and one at the end, and the final
+    transcription lands a beat after that end, so the record must still be
+    fresh then. Repeated silence updates write nothing.
+    """
+    now = time.monotonic()
+    names, written_at, end_recorded = _speakers_written.get(key, ([], 0.0, True))
+    try:
+        if speaking_now:
+            if speaking_now != names or now - written_at >= SPEAKERS_REFRESH_SECS:
+                write_speakers(meeting_url, speaking_now)
+                _speakers_written[key] = (speaking_now, now, False)
+        elif names and not end_recorded:
+            write_speakers(meeting_url, names)
+            _speakers_written[key] = (names, now, True)
+    except OSError as e:
+        logger.debug(f"Could not write speakers file for {key}: {e}")
 
 
 def _signal_ready_from_roster(client_id: str) -> None:
@@ -94,14 +125,8 @@ def _update_floor_from_speaker_state(
         _last_speaking_set[key] = speaking_now
 
     # Record who is talking (humans included) for the children's speaker
-    # labeling. Only non-empty sets are written: the file then holds "the most
-    # recent speakers and when", which is what a child needs when the
-    # transcription lands a beat after the speech stopped.
-    if speaking_now:
-        try:
-            write_speakers(meeting_url, speaking_now)
-        except OSError as e:
-            logger.debug(f"Could not write speakers file for {key}: {e}")
+    # labeling.
+    _record_speakers(meeting_url, key, speaking_now)
 
     # A roster message on this socket means THIS bot is admitted and in the
     # call — release its own entry message (not its siblings').

@@ -62,7 +62,7 @@ from pipecat.turns.user_turn_strategies import (
 from config.persona_utils import PersonaManager
 from meetingbaas_pipecat.utils.logger import configure_logger
 from utils.floor import floor_blocked_by_sibling
-from utils.idle_reengagement import IdleReengagementBudget
+from utils.idle_reengagement import IdleReengagementBudget, max_nudges_for
 from utils.llm_config import (
     ANTHROPIC_THINKING_ON_MODES,
     DEFAULT_ZAI_BASE_URL,
@@ -258,7 +258,12 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
                 settings=OpenAIResponsesLLMService.Settings(
                     model=model,
                     system_instruction=system_instruction,
-                    max_tokens=_voice_max_tokens(),
+                    # The Responses API caps output with max_output_tokens, which
+                    # pipecat fills from max_completion_tokens; max_tokens is the
+                    # Chat Completions name and would be ignored here. Reasoning
+                    # stays off by default (pipecat's choice for latency), so
+                    # the cap is spent on the spoken reply alone.
+                    max_completion_tokens=_voice_max_tokens(),
                 ),
             )
         else:
@@ -375,8 +380,8 @@ def build_cartesia_tts_kwargs(
     # How long Cartesia buffers audio before the first chunk plays. Lower =
     # first word sooner; too low risks audible underruns. Unset = provider
     # default.
-    buffer_ms = clean_string(os.getenv("CARTESIA_MAX_BUFFER_DELAY_MS"))
-    if buffer_ms:
+    buffer_ms = _coerce_float(os.getenv("CARTESIA_MAX_BUFFER_DELAY_MS"))
+    if buffer_ms is not None:
         kwargs["max_buffer_delay_ms"] = int(buffer_ms)
     return kwargs
 
@@ -1125,16 +1130,21 @@ async def main(
         # predictions; the Eager turn strategies below depend on them.
         stt = DeepgramFluxSTTService(
             api_key=deepgram_api_key,
+            # Flux takes 16-bit PCM at any supported rate; the rate rides in
+            # sample_rate, there is no "linear24" encoding.
             sample_rate=output_sample_rate,
-            flux_encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
+            flux_encoding="linear16",
+            # Without this Flux emits no eager end-of-turn predictions and the
+            # Eager strategies below never speculate.
+            enable_eager_end_of_turn=True,
         )
     else:
         stt_settings_kwargs: dict = {"language": language}
         # How many ms of silence Deepgram waits before finalizing a transcript.
         # Lower = faster final transcripts = faster replies; too low splits
         # sentences. Unset = Deepgram's default.
-        dg_endpointing = clean_string(os.getenv("DEEPGRAM_ENDPOINTING_MS"))
-        if dg_endpointing:
+        dg_endpointing = _coerce_float(os.getenv("DEEPGRAM_ENDPOINTING_MS"))
+        if dg_endpointing is not None:
             stt_settings_kwargs["endpointing"] = int(dg_endpointing)
         stt = DeepgramSTTService(
             api_key=deepgram_api_key,
@@ -1189,17 +1199,21 @@ async def main(
     # any speech.
     start_strategies = []
     # respond_mode="mentioned": the bot's name must be heard in a final
-    # transcription before any turn starts; after that, interaction stays open
-    # for RESPOND_MENTION_WINDOW_SECS. Placed FIRST so it gates the other
-    # start strategies. This is how a bot stays quiet in a multi-party meeting
-    # until someone addresses it.
+    # transcription before a turn starts, and again before the next one
+    # (single_activation). Pipecat's other mode keeps the window open while
+    # anyone keeps talking, which in a lively meeting means one mention and
+    # the bot listens for the rest of the call. RESPOND_MENTION_WINDOW_SECS is
+    # how long the turn that follows a mention may take to complete. Placed
+    # FIRST so it gates the other start strategies.
     respond_mode = str((persona or {}).get("respond_mode") or "always").lower()
     if respond_mode == "mentioned":
         bot_display_name = (persona.get("name") if persona else None) or persona_name
-        wake_window = float(os.getenv("RESPOND_MENTION_WINDOW_SECS", "10"))
+        wake_window = _coerce_float(os.getenv("RESPOND_MENTION_WINDOW_SECS"), 10.0)
         start_strategies.append(
             WakePhraseUserTurnStartStrategy(
-                phrases=[bot_display_name], timeout=wake_window
+                phrases=[bot_display_name],
+                timeout=wake_window,
+                single_activation=True,
             )
         )
         log_and_flush(
@@ -1266,8 +1280,10 @@ async def main(
     speech_probe = SpeechInjectionProbe(persona_name)
 
     idle_budget = IdleReengagementBudget(
-        idle_secs=float(os.getenv("BOT_IDLE_REENGAGE_SECS", "15")),
-        max_nudges=int(os.getenv("BOT_MAX_REENGAGE", "3")),
+        idle_secs=_coerce_float(os.getenv("BOT_IDLE_REENGAGE_SECS"), 15.0),
+        max_nudges=max_nudges_for(
+            respond_mode, int(_coerce_float(os.getenv("BOT_MAX_REENGAGE"), 3))
+        ),
         last_activity=time.monotonic(),
     )
     speech_activity = SpeechActivityTracker(idle_budget)

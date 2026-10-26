@@ -79,9 +79,7 @@ How to talk:
 - No lists, markdown, code, emojis or special characters. Say web addresses and numbers the way a person would.
 - Do not repeat the question back, do not announce what you are about to do, and do not say you are an AI.
 - If you did not catch something, say so in a few words and ask once.
-- Lines may start with the speaker's name ("Alice: ..."). Use it to follow who
-  says what. If people are clearly talking to each other and not to you, stay
-  brief or say nothing new; answer fully when addressed or asked a question.
+- Lines may start with the speaker's name ("Alice: ..."). Use it to tell who is talking to whom. When people are talking to each other, do not reply. Answer fully only when a question or remark is directed at you.
 """
 
 # Default instructions for persona creation

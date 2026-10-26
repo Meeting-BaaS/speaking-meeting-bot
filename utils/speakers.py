@@ -59,7 +59,12 @@ def read_recent_speakers(
             data = json.load(f)
     except (OSError, ValueError):
         return []
-    if time.time() - float(data.get("ts", 0)) > max_age_secs:
+    # Valid JSON is not the same as a valid record: a list, or a null or
+    # string timestamp, must read as "nothing known" rather than raise.
+    if not isinstance(data, dict):
+        return []
+    ts = data.get("ts")
+    if not isinstance(ts, (int, float)) or time.time() - ts > max_age_secs:
         return []
     speakers = data.get("speakers")
     if not isinstance(speakers, list):

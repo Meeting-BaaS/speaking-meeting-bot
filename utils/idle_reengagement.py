@@ -3,6 +3,15 @@
 from dataclasses import dataclass
 
 
+def max_nudges_for(respond_mode: str, configured: int) -> int:
+    """How many unprompted nudges a bot gets; none when it only answers when named.
+
+    A bot in ``mentioned`` mode exists to stay quiet until addressed, and an
+    idle nudge is exactly the unprompted speech that mode rules out.
+    """
+    return 0 if (respond_mode or "").lower() == "mentioned" else max(0, configured)
+
+
 @dataclass
 class IdleReengagementBudget:
     idle_secs: float

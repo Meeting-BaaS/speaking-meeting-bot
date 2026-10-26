@@ -46,6 +46,13 @@ class SpeakersFileTest(unittest.TestCase):
             f.write('{"speakers": ["Ok", 42, "  "], "ts": %f}' % time.time())
         self.assertEqual(read_recent_speakers(MEETING), ["Ok"])
 
+    def test_valid_json_that_is_not_a_record_is_empty(self):
+        path = speakers._speakers_path(MEETING)
+        for body in ("[]", '{"ts": null, "speakers": ["Ok"]}', '{"ts": "soon", "speakers": ["Ok"]}'):
+            with open(path, "w") as f:
+                f.write(body)
+            self.assertEqual(read_recent_speakers(MEETING), [], body)
+
     def test_corrupt_json_is_empty(self):
         path = speakers._speakers_path(MEETING)
         with open(path, "w") as f:

@@ -26,3 +26,7 @@ class SystemPromptTest(unittest.TestCase):
     def test_voice_guidance_asks_for_sentence_punctuation(self):
         self.assertIn("punctuation", VOICE_STYLE_PROMPT)
         self.assertIn("short first sentence", VOICE_STYLE_PROMPT)
+
+    def test_voice_guidance_only_answers_what_is_directed_at_the_bot(self):
+        self.assertIn("directed at you", VOICE_STYLE_PROMPT)
+        self.assertIn("talking to each other, do not reply", VOICE_STYLE_PROMPT)
