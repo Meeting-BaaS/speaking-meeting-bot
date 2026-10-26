@@ -271,7 +271,7 @@ The local development mode simplifies WebSocket setup by:
    ngrok start --all --config config/ngrok/config.yml
    ```
 
-   This creates two public URLs that both forward to the server on port 7014, one per bot on ngrok's free tier.
+   This creates two public URLs that both forward to the server on port 7014. With `--local-dev` the server hands one URL to each bot (two bots on ngrok's free tier); with `BASE_URL` set as in the next step, every bot shares that one URL instead, which works for any number of bots.
 
 5. Copy the ngrok HTTPS URL (e.g., `https://xxxx.ngrok-free.app`) and set it as `BASE_URL` in your `.env` file:
 
