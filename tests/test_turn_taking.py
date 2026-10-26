@@ -13,7 +13,24 @@ class TurnTakingTest(unittest.TestCase):
                 stop_secs=0.2,
                 min_volume=0.6,
                 unfinished_pause_secs=1.5,
+                min_interrupt_words=3,
             ),
+        )
+
+    def test_min_interrupt_words_request_env_and_floor(self):
+        self.assertEqual(
+            resolve_turn_taking({"min_interrupt_words": 5}, env={}).min_interrupt_words, 5
+        )
+        self.assertEqual(
+            resolve_turn_taking(None, env={"TURN_MIN_INTERRUPT_WORDS": "1"}).min_interrupt_words,
+            1,
+        )
+        # 0 is a deliberate "interrupt on any speech"; negatives clamp to 0.
+        self.assertEqual(
+            resolve_turn_taking({"min_interrupt_words": 0}, env={}).min_interrupt_words, 0
+        )
+        self.assertEqual(
+            resolve_turn_taking({"min_interrupt_words": -2}, env={}).min_interrupt_words, 0
         )
 
     def test_env_overrides_defaults_and_request_overrides_env(self):
