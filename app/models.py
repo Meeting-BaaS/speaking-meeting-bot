@@ -80,7 +80,10 @@ class TurnConfig(BaseModel):
         None,
         ge=0.05,
         le=5.0,
-        description="Sustained speech (seconds) before a turn registers",
+        description=(
+            "Sustained speech (seconds) before a turn registers while the bot is "
+            "silent; while it speaks, min_interrupt_words decides"
+        ),
     )
     stop_secs: float | None = Field(
         None,
@@ -101,6 +104,15 @@ class TurnConfig(BaseModel):
         description=(
             "When the speaker sounds mid-thought, silence (seconds) after which "
             "the bot replies anyway"
+        ),
+    )
+    min_interrupt_words: int | None = Field(
+        None,
+        ge=0,
+        le=20,
+        description=(
+            "Words someone must say before they interrupt the bot mid-sentence; "
+            "coughs and 'uh-huh's stay below it. 0 interrupts on any speech"
         ),
     )
 
