@@ -170,16 +170,26 @@ async def join_meeting(request: BotRequest, client_request: Request):
                 f"Dynamically created persona '{persona_name_for_logging}' from prompt."
             )
         else:
-            # Fallback if prompt details extraction fails or returns unexpected type
-            logger.warning(
-                "Failed to extract persona details from custom prompt or received unexpected type. Falling back to default bot persona."
-            )
-            resolved_persona_data = persona_manager.get_persona("baas_onboarder")
-            resolved_persona_data["is_temporary"] = (
-                False  # Ensure fallback is not marked temporary
-            )
-            persona_name_for_logging = resolved_persona_data.get(
-                "name", "baas_onboarder"
+            # No server OpenAI key, or the extraction failed: the caller still
+            # gets the persona they wrote. Falling back to the onboarder persona
+            # here used to put a random character in the meeting.
+            prompt_derived_details = None
+            resolved_persona_data = {
+                "name": (request.bot_name or "").strip() or "Assistant",
+                "prompt": request.prompt,
+                "description": request.prompt,
+                "gender": "neutral",
+                "characteristics": [],
+                "image": None,
+                "cartesia_voice_id": None,
+                "relevant_links": [],
+                "additional_content": None,
+                "is_temporary": True,
+            }
+            persona_name_for_logging = resolved_persona_data["name"]
+            logger.info(
+                f"Persona '{persona_name_for_logging}' taken from the prompt as written "
+                "(no persona extraction)"
             )
 
     else:  # Case 2: No custom prompt, use pre-defined persona
@@ -265,20 +275,28 @@ async def join_meeting(request: BotRequest, client_request: Request):
                     f"Failed to generate image for '{persona_name_for_logging}': {e}"
                 )
 
-    # Populate voice ID if not present
+    # Populate voice ID if not present. Matching a voice to the persona is a
+    # server-side OpenAI call; without that key the bot speaks with the
+    # server's default voice (CARTESIA_VOICE_ID) instead of failing to start.
     if not resolved_persona_data.get("cartesia_voice_id"):
-        from config.voice_utils import (
-            VoiceUtils,
-        )  # Import here to avoid circular dependency issues
+        if os.getenv("OPENAI_API_KEY"):
+            from config.voice_utils import (
+                VoiceUtils,
+            )  # Import here to avoid circular dependency issues
 
-        voice_utils = VoiceUtils()
-        cartesia_voice_id = await voice_utils.match_voice_to_persona(
-            persona_details=resolved_persona_data
-        )  # Pass the whole dict
-        resolved_persona_data["cartesia_voice_id"] = cartesia_voice_id
-        logger.info(
-            f"Resolved Cartesia voice ID for '{persona_name_for_logging}': {cartesia_voice_id}"
-        )
+            try:
+                cartesia_voice_id = await VoiceUtils().match_voice_to_persona(
+                    persona_details=resolved_persona_data
+                )
+            except Exception as e:
+                logger.warning(f"Voice matching failed, using the default voice: {e}")
+                cartesia_voice_id = None
+            resolved_persona_data["cartesia_voice_id"] = cartesia_voice_id
+            logger.info(
+                f"Resolved Cartesia voice ID for '{persona_name_for_logging}': {cartesia_voice_id}"
+            )
+        else:
+            logger.info("No server OpenAI key: using the default voice")
 
     logger.info("Final resolved persona data for Pipecat process:")
     logger.info(f"  Name: {resolved_persona_data.get('name')}")
@@ -365,8 +383,9 @@ async def join_meeting(request: BotRequest, client_request: Request):
         return JSONResponse(
             content={
                 "message": (
-                    f"LLM provider '{resolved_llm_provider}' is not configured "
-                    f"on this server; missing {missing_key_env}"
+                    f"This server has no {resolved_llm_provider} key ({missing_key_env} "
+                    "is unset). Pass your own in credentials.llm_api_key, or choose "
+                    "a provider the server has a key for."
                 ),
                 "status": "error",
             },
@@ -988,7 +1007,9 @@ async def meetingbaas_webhook(request: Request):
                     transcript_file = candidate
                     break
 
-            if transcript_file and _claim_summary(bot_id):
+            if transcript_file and not os.getenv("OPENAI_API_KEY"):
+                logger.info("No server OpenAI key: skipping the call summary")
+            elif transcript_file and _claim_summary(bot_id):
                 # Summary generation makes a blocking OpenAI call; run it off the
                 # event loop so it can't stall floor refresh / admission polling
                 # (and so a slow model can't make MeetingBaas retry the webhook).

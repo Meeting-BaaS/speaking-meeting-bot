@@ -27,7 +27,9 @@ JSON Output:'''
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        logger.error("OPENAI_API_KEY environment variable not set.")
+        # Not an error: a server without its own OpenAI key runs the prompt
+        # as written (see join_meeting).
+        logger.info("No server OpenAI key: skipping persona extraction")
         return None
 
     try:
