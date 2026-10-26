@@ -24,6 +24,7 @@ from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
 from pipecat.frames.frames import LLMMessagesAppendFrame, SystemFrame, TTSSpeakFrame
+from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import WorkerRunner
 from pipecat.pipeline.task import PipelineParams
@@ -36,6 +37,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.services.cartesia.tts import CartesiaTTSService, GenerationConfig
+from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.llm_service import FunctionCallParams
 
@@ -45,11 +47,17 @@ from pipecat.transports.websocket.client import (
     WebsocketClientParams,
     WebsocketClientTransport,
 )
-from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
+from pipecat.turns.user_start import (
+    MinWordsUserTurnStartStrategy,
+    WakePhraseUserTurnStartStrategy,
+)
 from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
     TurnAnalyzerUserTurnStopStrategy,
 )
-from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.turns.user_turn_strategies import (
+    EagerUserTurnStrategies,
+    UserTurnStrategies,
+)
 
 from config.persona_utils import PersonaManager
 from meetingbaas_pipecat.utils.logger import configure_logger
@@ -72,6 +80,7 @@ from utils.mcp_client import (
     build_mcp_tool_name,
 )
 from utils.runtime import get_state_dir
+from utils.speakers import read_recent_speakers
 from utils.speech_activity import SpeechActivityTracker
 from utils.system_prompt import build_system_prompt
 from utils.turn_taking import resolve_turn_taking
@@ -113,13 +122,48 @@ def log_and_flush(level, msg):
     for h in logger.handlers:
         h.flush()
 
+def speculative_turns_enabled() -> bool:
+    """STT_SPECULATIVE_TURNS=1 switches to Deepgram Flux + eager end-of-turn.
+
+    Experimental: the LLM generates against the predicted end of turn and the
+    response is released only when the turn commits, hiding the turn-decision
+    window. Off by default — it replaces the local smart-turn analyzer and
+    changes the STT service.
+    """
+    return os.getenv("STT_SPECULATIVE_TURNS", "").strip() in ("1", "true", "yes")
+
+
+def _voice_max_tokens() -> int:
+    """Output cap for a voice turn (VOICE_LLM_MAX_TOKENS, default 1024).
+
+    A spoken reply is a few sentences; an uncapped generation that rambles is
+    pure time-to-last-word latency and floor-hogging. 1024 matches the
+    Anthropic path's non-thinking cap. Tool-call JSON fits comfortably.
+    """
+    try:
+        return int(os.getenv("VOICE_LLM_MAX_TOKENS", "1024"))
+    except ValueError:
+        return 1024
+
+
 async def build_pipeline_runner(pipeline):
     """Construct and register the meeting worker before the runner starts."""
-    # Metrics log per-service TTFB (STT/LLM/TTS) — grep journal for "TTFB".
+    # Per-turn latency accounting: every user-to-bot interval broken into named
+    # parts that sum to the measured total (VAD silence, turn decision, LLM
+    # TTFB, TTS…). One [LATENCY] block per turn — this is the ground truth any
+    # latency tuning starts from. Per-service TTFB metrics still log separately.
+    latency_observer = UserBotLatencyObserver()
+
+    @latency_observer.event_handler("on_latency_breakdown")
+    async def on_latency_breakdown(observer, breakdown):
+        for line in breakdown.turn_contribution_lines():
+            log_and_flush(logging.INFO, f"[LATENCY] {line}")
+
     task = PipelineWorker(
         pipeline,
         params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
         check_dangling_tasks=True,
+        observers=[latency_observer],
     )
     # SIGTERM is what the API sends a child that outstayed its socket; handled,
     # it cancels the pipeline so the shutdown path below still runs (final
@@ -189,7 +233,9 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
             run_in_parallel=False,
             base_url=base_url,
             settings=OpenAILLMService.Settings(
-                model=model, system_instruction=system_instruction
+                model=model,
+                system_instruction=system_instruction,
+                max_tokens=_voice_max_tokens(),
             ),
         )
     else:
@@ -210,7 +256,9 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
                 run_in_parallel=False,
                 service_tier=service_tier,
                 settings=OpenAIResponsesLLMService.Settings(
-                    model=model, system_instruction=system_instruction
+                    model=model,
+                    system_instruction=system_instruction,
+                    max_tokens=_voice_max_tokens(),
                 ),
             )
         else:
@@ -219,7 +267,9 @@ def build_llm_service(persona: dict | None, system_instruction: str | None = Non
                 run_in_parallel=False,
                 service_tier=service_tier,
                 settings=OpenAILLMService.Settings(
-                    model=model, system_instruction=system_instruction
+                    model=model,
+                    system_instruction=system_instruction,
+                    max_tokens=_voice_max_tokens(),
                 ),
             )
 
@@ -317,11 +367,18 @@ def build_cartesia_tts_kwargs(
     }
     if pronunciation_dict_id:
         settings_kwargs["pronunciation_dict_id"] = pronunciation_dict_id
-    return {
+    kwargs = {
         "api_key": api_key,
         "sample_rate": sample_rate,
         "settings": CartesiaTTSService.Settings(**settings_kwargs),
     }
+    # How long Cartesia buffers audio before the first chunk plays. Lower =
+    # first word sooner; too low risks audible underruns. Unset = provider
+    # default.
+    buffer_ms = clean_string(os.getenv("CARTESIA_MAX_BUFFER_DELAY_MS"))
+    if buffer_ms:
+        kwargs["max_buffer_delay_ms"] = int(buffer_ms)
+    return kwargs
 
 
 def build_mcp_context_prompt(mcp_config) -> str:
@@ -692,6 +749,36 @@ async def save_call_summary(params: FunctionCallParams):
     await params.result_callback(f"Great, I've saved the summary of our call. Thank you so much for your time today, {prospect_name}!")
 
 
+class SpeakerLabeler(FrameProcessor):
+    """Prefix final transcriptions with the speaker's display name.
+
+    MeetingBaas tells the API who is speaking (names, humans included); the
+    API mirrors that into a per-meeting speakers file (utils/speakers.py).
+    When a final transcription lands and exactly one recent speaker other than
+    this bot matches, the text becomes "Name: text". The LLM can then tell a
+    remark addressed to it from participants talking to each other — the whole
+    basis of staying quiet in a multi-party meeting. Ambiguous (overlapping
+    speakers, stale file): leave the text unlabeled rather than guess.
+    """
+
+    def __init__(self, meeting_url: str, my_name: str, **kwargs):
+        super().__init__(**kwargs)
+        self._meeting_url = meeting_url
+        self._my_name = (my_name or "").strip().lower()
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if type(frame).__name__ == "TranscriptionFrame" and getattr(frame, "text", None):
+            candidates = [
+                name
+                for name in read_recent_speakers(self._meeting_url)
+                if name.strip().lower() != self._my_name
+            ]
+            if len(candidates) == 1 and not frame.text.startswith(f"{candidates[0]}:"):
+                frame.text = f"{candidates[0]}: {frame.text}"
+        await self.push_frame(frame, direction)
+
+
 class SpeechInjectionProbe(FrameProcessor):
     """Logs the exact on/off of THIS bot's outgoing TTS audio injection.
 
@@ -1033,12 +1120,28 @@ async def main(
     log_and_flush(logging.INFO, f"[STT] Deepgram API key present: {bool(deepgram_api_key)}")
     log_and_flush(logging.INFO, f"[STT] Deepgram config: encoding=linear16, sample_rate={output_sample_rate}, language={language}")
 
-    stt = DeepgramSTTService(
-        api_key=deepgram_api_key,
-        encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
-        sample_rate=output_sample_rate,
-        settings=DeepgramSTTService.Settings(language=language),
-    )
+    if speculative_turns_enabled():
+        # Flux is the Deepgram service that emits eager end-of-turn
+        # predictions; the Eager turn strategies below depend on them.
+        stt = DeepgramFluxSTTService(
+            api_key=deepgram_api_key,
+            sample_rate=output_sample_rate,
+            flux_encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
+        )
+    else:
+        stt_settings_kwargs: dict = {"language": language}
+        # How many ms of silence Deepgram waits before finalizing a transcript.
+        # Lower = faster final transcripts = faster replies; too low splits
+        # sentences. Unset = Deepgram's default.
+        dg_endpointing = clean_string(os.getenv("DEEPGRAM_ENDPOINTING_MS"))
+        if dg_endpointing:
+            stt_settings_kwargs["endpointing"] = int(dg_endpointing)
+        stt = DeepgramSTTService(
+            api_key=deepgram_api_key,
+            encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
+            sample_rate=output_sample_rate,
+            settings=DeepgramSTTService.Settings(**stt_settings_kwargs),
+        )
 
     # stt = GladiaSTTService(
     #     api_key=os.getenv("GLADIA_API_KEY"),
@@ -1079,25 +1182,62 @@ async def main(
         stop_secs=turn.stop_secs,
         min_volume=turn.min_volume,
     )
-    turn_strategies = UserTurnStrategies(
-        # Interruption hygiene for multi-party meetings: a cough, an "uh-huh"
-        # or cross-talk should not cut the bot off mid-sentence. The word
-        # threshold applies only while the bot is speaking; when it is silent,
-        # a turn starts normally. min_interrupt_words=0 restores barge-in on
-        # any speech.
-        start=(
-            [MinWordsUserTurnStartStrategy(min_words=turn.min_interrupt_words)]
-            if turn.min_interrupt_words > 0
-            else None
-        ),
-        stop=[
-            TurnAnalyzerUserTurnStopStrategy(
-                turn_analyzer=LocalSmartTurnAnalyzerV3(
-                    params=SmartTurnParams(stop_secs=turn.unfinished_pause_secs)
-                )
+    # Interruption hygiene for multi-party meetings: a cough, an "uh-huh"
+    # or cross-talk should not cut the bot off mid-sentence. The word
+    # threshold applies only while the bot is speaking; when it is silent,
+    # a turn starts normally. min_interrupt_words=0 restores barge-in on
+    # any speech.
+    start_strategies = []
+    # respond_mode="mentioned": the bot's name must be heard in a final
+    # transcription before any turn starts; after that, interaction stays open
+    # for RESPOND_MENTION_WINDOW_SECS. Placed FIRST so it gates the other
+    # start strategies. This is how a bot stays quiet in a multi-party meeting
+    # until someone addresses it.
+    respond_mode = str((persona or {}).get("respond_mode") or "always").lower()
+    if respond_mode == "mentioned":
+        bot_display_name = (persona.get("name") if persona else None) or persona_name
+        wake_window = float(os.getenv("RESPOND_MENTION_WINDOW_SECS", "10"))
+        start_strategies.append(
+            WakePhraseUserTurnStartStrategy(
+                phrases=[bot_display_name], timeout=wake_window
             )
-        ],
-    )
+        )
+        log_and_flush(
+            logging.INFO,
+            f"[RESPOND] mentioned-only mode: wake phrase '{bot_display_name}', "
+            f"window {wake_window}s",
+        )
+    if turn.min_interrupt_words > 0:
+        start_strategies.append(
+            MinWordsUserTurnStartStrategy(min_words=turn.min_interrupt_words)
+        )
+    start_strategies = start_strategies or None
+    if speculative_turns_enabled():
+        # EXPERIMENTAL (STT_SPECULATIVE_TURNS=1): Deepgram Flux predicts the
+        # end of a turn eagerly and the LLM generates against the prediction;
+        # the response is held and released only when the turn commits — the
+        # turn-decision window is spent generating instead of waiting. The
+        # service owns turn detection in this mode, so Eager REPLACES the
+        # local smart-turn analyzer (running both would double-answer turns).
+        turn_strategies = EagerUserTurnStrategies()
+        if start_strategies:
+            turn_strategies.start = start_strategies
+        log_and_flush(
+            logging.WARNING,
+            "[TURN] Speculative turns enabled (Deepgram Flux + eager end-of-turn)"
+            " — experimental",
+        )
+    else:
+        turn_strategies = UserTurnStrategies(
+            start=start_strategies,
+            stop=[
+                TurnAnalyzerUserTurnStopStrategy(
+                    turn_analyzer=LocalSmartTurnAnalyzerV3(
+                        params=SmartTurnParams(stop_secs=turn.unfinished_pause_secs)
+                    )
+                )
+            ],
+        )
 
     aggregator_pair = LLMContextAggregatorPair(
         context,
@@ -1132,9 +1272,17 @@ async def main(
     )
     speech_activity = SpeechActivityTracker(idle_budget)
 
+    # Label final transcriptions with the speaker's name (multi-party
+    # addressee awareness); in "mentioned" mode, additionally gate the LLM so
+    # it only hears turns within a window after someone says the bot's name.
+    speaker_labeler = SpeakerLabeler(
+        meeting_url=meeting_url,
+        my_name=(persona.get("name") if persona else None) or persona_name,
+    )
     pipeline = Pipeline([
         transport.input(),   # Add transport input to receive audio/data
         stt,
+        speaker_labeler,     # "Name: text" so the LLM knows who is talking
         speech_activity,     # only received speech replenishes the idle budget
         user_aggregator,
         llm,

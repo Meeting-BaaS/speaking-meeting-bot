@@ -463,6 +463,16 @@ class BotRequest(BaseModel):
             "tone from the text, which Cartesia recommends."
         ),
     )
+    respond_mode: Literal["always", "mentioned"] = Field(
+        "always",
+        description=(
+            "When the bot replies. 'always': every completed turn gets an "
+            "answer (good for 1:1 calls). 'mentioned': the bot only hears "
+            "turns within a short window after someone says its name — the "
+            "mode for multi-party meetings where it should stay quiet until "
+            "addressed."
+        ),
+    )
     credentials: BotCredentials | None = Field(
         None,
         description=(

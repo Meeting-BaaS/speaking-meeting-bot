@@ -462,6 +462,16 @@
             "title": "Speech Emotion",
             "description": "Emotion tag guiding the TTS tone (Cartesia sonic-3, experimental; 60+ tags such as 'excited', 'calm'). Omit to let the model infer tone from the text, which Cartesia recommends."
           },
+          "respond_mode": {
+            "type": "string",
+            "enum": [
+              "always",
+              "mentioned"
+            ],
+            "title": "Respond Mode",
+            "description": "When the bot replies. 'always': every completed turn gets an answer (good for 1:1 calls). 'mentioned': the bot only hears turns within a short window after someone says its name \u2014 the mode for multi-party meetings where it should stay quiet until addressed.",
+            "default": "always"
+          },
           "credentials": {
             "anyOf": [
               {
