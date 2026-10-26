@@ -12,6 +12,7 @@ from core.router import router as message_router
 from meetingbaas_pipecat.utils.logger import logger
 from utils.floor import floor_key, write_floor
 from utils.ngrok import LOCAL_DEV_MODE, log_ngrok_status, release_ngrok_url
+from utils.speakers import write_speakers
 from utils.runtime import get_internal_pipecat_ws_url, get_state_dir
 
 websocket_router = APIRouter()
@@ -91,6 +92,16 @@ def _update_floor_from_speaker_state(
     if _last_speaking_set.get(key) != speaking_now:
         logger.info(f"[SPEAKER-STATE] {key} speaking now: {speaking_now}")
         _last_speaking_set[key] = speaking_now
+
+    # Record who is talking (humans included) for the children's speaker
+    # labeling. Only non-empty sets are written: the file then holds "the most
+    # recent speakers and when", which is what a child needs when the
+    # transcription lands a beat after the speech stopped.
+    if speaking_now:
+        try:
+            write_speakers(meeting_url, speaking_now)
+        except OSError as e:
+            logger.debug(f"Could not write speakers file for {key}: {e}")
 
     # A roster message on this socket means THIS bot is admitted and in the
     # call — release its own entry message (not its siblings').
