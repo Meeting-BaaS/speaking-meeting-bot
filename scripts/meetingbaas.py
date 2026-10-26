@@ -47,6 +47,7 @@ from pipecat.transports.websocket.client import (
 from config.persona_utils import PersonaManager
 from config.prompts import DEFAULT_SYSTEM_PROMPT
 from meetingbaas_pipecat.utils.logger import configure_logger
+from utils.early_audio import hold_messages_until_started
 from utils.floor import floor_blocked_by_sibling
 from utils.idle_reengagement import IdleReengagementBudget
 from utils.llm_config import (
@@ -820,6 +821,11 @@ async def main(
             serializer=ProtobufFrameSerializer(),
         ),
     )
+    # Audio can reach this socket before the pipeline has started the input
+    # side (the API replays startup audio on connect); hold it until then
+    # instead of letting it kill the receive loop. See utils/early_audio.py.
+    audio_input = transport.input()
+    hold_messages_until_started(audio_input)
     log_and_flush(logging.INFO, "[TRANSPORT] WebSocket transport initialized")
     log_and_flush(logging.INFO, f"[TRANSPORT] URI: {websocket_url}")
     log_and_flush(logging.INFO, f"[TRANSPORT] Audio out enabled: True, sample_rate: {output_sample_rate}")
@@ -1066,7 +1072,7 @@ async def main(
     speech_activity = SpeechActivityTracker(idle_budget)
 
     pipeline = Pipeline([
-        transport.input(),   # Add transport input to receive audio/data
+        audio_input,         # transport input, guarded against early audio
         stt,
         speech_activity,     # only received speech replenishes the idle budget
         user_aggregator,
