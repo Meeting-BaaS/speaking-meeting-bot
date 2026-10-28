@@ -63,6 +63,9 @@ from utils.runtime import (
 # Import the new persona detail extraction service
 from app.services.persona_detail_extraction import extract_persona_details_from_prompt
 from app.display_name import resolve_display_name
+from app.peer_forwarding import forward_bot_request, forward_leave_request, is_forwarded
+from core.drain import is_draining
+from utils.pod_routing import with_pod_prefix
 
 router = APIRouter()
 
@@ -97,6 +100,19 @@ async def join_meeting(request: BotRequest, client_request: Request):
     # Get API key from request state (set by middleware)
     api_key = client_request.state.api_key
 
+    # A pod being rolled out takes no new bots; the owner pod of a meeting
+    # takes every bot sent to it, so sibling bots share one floor file.
+    if is_draining():
+        return JSONResponse(
+            content={"message": "This instance is draining for a rollout, retry", "status": "error"},
+            status_code=503,
+        )
+    forwarded = await forward_bot_request(
+        request.meeting_url, await client_request.body(), client_request
+    )
+    if forwarded is not None:
+        return forwarded
+
     # Log local dev mode status
     if LOCAL_DEV_MODE:
         logger.info("🔍 Running in LOCAL_DEV_MODE - will prioritize ngrok URLs")
@@ -107,6 +123,9 @@ async def join_meeting(request: BotRequest, client_request: Request):
     websocket_url, temp_client_id = determine_websocket_url(
         request.websocket_url, client_request
     )
+    # Our own base URL gets this pod's prefix so the audio socket lands here.
+    if not request.websocket_url:
+        websocket_url = with_pod_prefix(websocket_url)
 
     logger.info(f"Starting bot for meeting {request.meeting_url}")
     logger.info(f"WebSocket URL: {websocket_url}")
@@ -534,7 +553,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
     public_base_url = build_public_base_url(
         client_request, configured_base_url=os.getenv("BASE_URL")
     )
-    webhook_url = f"{public_base_url}/webhook"
+    webhook_url = f"{with_pod_prefix(public_base_url)}/webhook"
     try:
         meetingbaas_bot_id = create_meeting_bot(
             meeting_url=request.meeting_url,
@@ -673,6 +692,16 @@ async def leave_bot(
             break
 
     if not client_id:
+        if is_forwarded(client_request):
+            return JSONResponse(
+                content={"message": "Bot is not hosted on this instance", "status": "error"},
+                status_code=404,
+            )
+        forwarded = await forward_leave_request(
+            meetingbaas_bot_id, await client_request.body(), client_request
+        )
+        if forwarded is not None:
+            return forwarded
         logger.warning(f"No client ID found for bot ID {meetingbaas_bot_id}")
 
     success = True
