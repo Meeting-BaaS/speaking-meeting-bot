@@ -318,6 +318,81 @@ MeetingBaasTranscriptionProvider = Literal[
     "gladia", "deepgram", "assemblyai", "speechmatics", "soniox"
 ]
 
+# BCP-47 tag such as en, en-NG, fr-FR, or Deepgram's "multi" for code-switching
+# between its multilingual set.
+LANGUAGE_PATTERN = r"^(multi|[a-z]{2,3}(-[A-Za-z0-9]{2,8})*)$"
+DEFAULT_BRIEFING_LANGUAGE = "en"
+
+
+def _validate_callback_url(value: str | None) -> str | None:
+    if value is None:
+        return value
+    normalized = value.strip()
+    parsed = urlparse(normalized)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("callback_url must be an http(s) URL with a host")
+    if parsed.scheme == "http" and not _is_private_or_local_http_url(normalized):
+        raise ValueError("callback_url must use https:// unless it is private or local")
+    return normalized
+
+
+class AuthorityConfig(BaseModel):
+    """What the bot may say on its owner's behalf, and what it must hand back.
+
+    Turns the persona into a representative: it introduces itself as an AI
+    attending for ``owner_name``, states only ``approved_positions``, raises an
+    escalation (and tells the room it is checking) for anything in
+    ``escalate_on``, and never does what ``forbidden`` lists. Spending,
+    commitments and deadline changes are escalated even when not listed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    owner_name: str = Field(
+        ..., min_length=1, max_length=120, description="Who the bot represents"
+    )
+    approved_positions: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Positions the bot may state, in the owner's words",
+    )
+    escalate_on: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Decisions that must go back to the owner before any answer",
+    )
+    forbidden: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Things the bot must never say or do, even if asked",
+    )
+
+    @field_validator("approved_positions", "escalate_on", "forbidden")
+    @classmethod
+    def validate_items(cls, items: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in items if item and item.strip()]
+        if any(len(item) > 500 for item in cleaned):
+            raise ValueError("each item must be at most 500 characters")
+        return cleaned
+
+
+class BriefingConfig(BaseModel):
+    """The post-meeting briefing, generated on the bot's own LLM key."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(True, description="Generate a briefing when the call ends")
+    language: str | None = Field(
+        None,
+        pattern=LANGUAGE_PATTERN,
+        description="Language the briefing is written in (BCP-47). Defaults to English.",
+    )
+    instructions: str | None = Field(
+        None,
+        max_length=2_000,
+        description="What the owner wants the briefing to focus on",
+    )
+
 
 class BotRequest(BaseModel):
     """Request model for creating a speaking bot in a meeting."""
@@ -347,6 +422,15 @@ class BotRequest(BaseModel):
                     }
                 ],
                 "speech_speed": 1.15,
+                "language": "en",
+                "callback_url": "https://app.example.com/hooks/speaking-bot",
+                "authority": {
+                    "owner_name": "Ada Okafor",
+                    "approved_positions": ["Ada supports option B for the vendor choice"],
+                    "escalate_on": ["any spending above 500 dollars"],
+                    "forbidden": ["agreeing to new deadlines"],
+                },
+                "briefing": {"language": "en"},
                 "mcp": {
                     "servers": [
                         {
@@ -494,8 +578,49 @@ class BotRequest(BaseModel):
         "gladia",
         description="MeetingBaas speech-to-text provider for that transcript.",
     )
+    language: str | None = Field(
+        None,
+        pattern=LANGUAGE_PATTERN,
+        description=(
+            "Language the bot listens for, as a BCP-47 tag (en, en-NG, fr), or "
+            "'multi' to let Deepgram switch between its multilingual set during "
+            "the call. Defaults to en-US."
+        ),
+    )
+    callback_url: str | None = Field(
+        None,
+        description=(
+            "Where this API posts the bot's own events: each utterance it speaks, "
+            "each escalation to its owner, and the end of the call with the usage "
+            "report and briefing. Signed with callback_secret when one is given."
+        ),
+    )
+    callback_secret: SecretStr | None = _secret_field(
+        "Shared secret used to sign callback_url deliveries "
+        "(x-speaking-bot-signature: sha256=<HMAC of the body>)."
+    )
+    authority: AuthorityConfig | None = Field(
+        None,
+        description=(
+            "Make the bot a representative: who it attends for, what it may say, "
+            "what it must escalate. Adds the escalate_to_owner tool and switches "
+            "off unprompted speech."
+        ),
+    )
+    briefing: BriefingConfig | None = Field(
+        None,
+        description=(
+            "Post-meeting briefing settings. Set (even empty) to get a briefing "
+            "in the call-end event and at GET /bots/{bot_id}/briefing."
+        ),
+    )
 
     # NOTE: streaming_audio_frequency is intentionally excluded and handled internally
+
+    @field_validator("callback_url")
+    @classmethod
+    def validate_callback_url(cls, value: str | None) -> str | None:
+        return _validate_callback_url(value)
 
     @field_validator("meeting_url")
     @classmethod
@@ -533,6 +658,97 @@ class LeaveResponse(BaseModel):
     """Response model for a bot leaving a meeting"""
 
     ok: bool
+
+
+class OwnerMessageRequest(BaseModel):
+    """Something the owner wants the bot to relay to the meeting now."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(..., min_length=1, max_length=2_000)
+
+
+EscalationDecision = Literal["approved", "declined", "deferred", "info"]
+
+
+class EscalationResponseRequest(BaseModel):
+    """The owner's answer to an escalation the bot raised."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    response: str = Field(..., min_length=1, max_length=2_000)
+    decision: EscalationDecision | None = Field(
+        None, description="How the owner decided, when it was a yes/no question"
+    )
+
+
+class AcceptedResponse(BaseModel):
+    """The message was queued for the bot."""
+
+    ok: bool = True
+    message_id: str
+
+
+class UsageReport(BaseModel):
+    """What one bot consumed on each provider, from Pipecat's usage metrics."""
+
+    model_config = ConfigDict(extra="allow")
+
+    bot_id: str
+    meetingbaas_bot_id: str | None = None
+    stt_provider: str
+    tts_provider: str
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    key_sources: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per provider: 'platform' (ran on the server's key) or 'caller'",
+    )
+    started_at: float
+    ended_at: float | None = None
+    duration_seconds: float
+    stt_audio_seconds: float
+    tts_characters: int
+    tts_requests: int
+    llm_turns: int
+    llm_prompt_tokens: int
+    llm_cached_prompt_tokens: int
+    llm_completion_tokens: int
+    llm_total_tokens: int
+
+
+class BriefingAction(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    owner: str | None = None
+    task: str | None = None
+    due: str | None = None
+
+
+class BriefingEscalation(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    question: str | None = None
+    status: str | None = None
+    answer: str | None = None
+
+
+class BriefingReport(BaseModel):
+    """The post-meeting briefing for the bot's owner."""
+
+    model_config = ConfigDict(extra="allow")
+
+    language: str = DEFAULT_BRIEFING_LANGUAGE
+    summary: str = ""
+    decisions: list[str] = Field(default_factory=list)
+    actions: list[BriefingAction] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+    what_the_representative_said: list[str] = Field(default_factory=list)
+    escalations: list[BriefingEscalation] = Field(default_factory=list)
+    coverage_notes: list[str] = Field(default_factory=list)
+    generated_at: float | None = None
+    llm_provider: str | None = None
+    llm_model: str | None = None
 
 
 class LeaveBotRequest(BaseModel):
