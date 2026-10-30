@@ -24,6 +24,9 @@ class PeerForwardingTest(unittest.TestCase):
         )
         self.assertTrue(never_reached_peer(refused))
         self.assertTrue(never_reached_peer(ConnectionRefusedError()))
+        # sock_connect expiring is also pre-delivery; a read timeout is not.
+        self.assertTrue(never_reached_peer(aiohttp.ConnectionTimeoutError()))
+        self.assertFalse(never_reached_peer(aiohttp.ServerTimeoutError()))
         self.assertFalse(never_reached_peer(asyncio.TimeoutError()))
         self.assertFalse(never_reached_peer(aiohttp.ClientPayloadError("cut")))
         self.assertEqual(FORWARD_TIMEOUT.sock_connect, 5)
@@ -80,6 +83,15 @@ class PeerForwardingTest(unittest.TestCase):
                         headers={"x-speaking-forwarded": "1"}, state=SimpleNamespace(api_key="k")
                     )
                     self.assertIsNone(await forward_scoped_request("GET", "/bots/b1/usage", None, forwarded))
+                # A peer that cannot be reached may be the one hosting the bot:
+                # that is a 502 to retry, not a 404.
+                with mock.patch.dict(os.environ, {**env, "SPEAKING_REPLICAS": "4"}), mock.patch(
+                    "app.peer_forwarding.peer_base_url",
+                    side_effect=lambda n: "http://127.0.0.1:9/dead" if n == 3 else f"http://127.0.0.1:{server.port}/peer{n}",
+                ):
+                    unsure = await forward_scoped_request("POST", "/bots/zz/messages", b"{}", request)
+                    self.assertIsNotNone(unsure)
+                    self.assertEqual(unsure.status_code, 502)
 
         asyncio.run(scenario())
 
