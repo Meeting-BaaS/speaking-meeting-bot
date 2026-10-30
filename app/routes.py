@@ -78,7 +78,12 @@ from utils.runtime import (
 from app.services.persona_detail_extraction import extract_persona_details_from_prompt
 from app.display_name import resolve_display_name
 from app.ownership import OWNER_DIGEST_KEY, key_digest, owned_by
-from app.peer_forwarding import forward_bot_request, forward_leave_request, is_forwarded
+from app.peer_forwarding import (
+    forward_bot_request,
+    forward_leave_request,
+    forward_scoped_request,
+    is_forwarded,
+)
 from core.drain import is_draining
 from utils.pod_routing import with_pod_prefix
 
@@ -1153,6 +1158,20 @@ def _without_owner(record: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in record.items() if k != OWNER_DIGEST_KEY}
 
 
+async def _or_peers(local, client_request: Request, method: str, path: str, body: bytes | None = None):
+    """A per-bot answer from this pod, or from the pod that hosts the bot.
+
+    With several replicas the bot's files and registration live on one pod;
+    a local 404 is only final once the peers have said 404 too.
+    """
+    if not (isinstance(local, JSONResponse) and local.status_code == 404):
+        return local
+    if is_forwarded(client_request):
+        return local
+    forwarded = await forward_scoped_request(method, path, body, client_request)
+    return forwarded if forwarded is not None else local
+
+
 def _not_found(bot_id: str) -> JSONResponse:
     return JSONResponse(
         content={"message": f"No live bot with id {bot_id}", "status": "error"},
@@ -1181,7 +1200,13 @@ async def send_owner_message(bot_id: str, request: OwnerMessageRequest, client_r
     """
     client_id = _owned_client_id(bot_id, client_request.state.api_key)
     if not client_id:
-        return _not_found(bot_id)
+        return await _or_peers(
+            _not_found(bot_id),
+            client_request,
+            "POST",
+            f"/bots/{bot_id}/messages",
+            request.model_dump_json().encode(),
+        )
     record = append_owner_message(get_state_dir(), client_id, request.text)
     logger.info(f"Owner message queued for bot {bot_id}")
     return AcceptedResponse(message_id=record["message_id"])
@@ -1203,7 +1228,9 @@ async def list_escalations(bot_id: str, client_request: Request):
     """
     client_id = _owned_client_id(bot_id, client_request.state.api_key)
     if not client_id:
-        return _not_found(bot_id)
+        return await _or_peers(
+            _not_found(bot_id), client_request, "GET", f"/bots/{bot_id}/escalations"
+        )
     return read_escalations(get_state_dir(), client_id)
 
 
@@ -1234,7 +1261,13 @@ async def answer_escalation(
     """
     client_id = _owned_client_id(bot_id, client_request.state.api_key)
     if not client_id:
-        return _not_found(bot_id)
+        return await _or_peers(
+            _not_found(bot_id),
+            client_request,
+            "POST",
+            f"/bots/{bot_id}/escalations/{escalation_id}/response",
+            request.model_dump_json().encode(),
+        )
     known = {item.get("escalation_id") for item in read_escalations(get_state_dir(), client_id)}
     if escalation_id not in known:
         return JSONResponse(
@@ -1280,9 +1313,14 @@ async def get_bot_usage(bot_id: str, client_request: Request):
         if usage is not None and not owned_by(usage, api_key):
             usage = None
     if usage is None:
-        return JSONResponse(
-            content={"message": f"No usage recorded for bot {bot_id}", "status": "error"},
-            status_code=404,
+        return await _or_peers(
+            JSONResponse(
+                content={"message": f"No usage recorded for bot {bot_id}", "status": "error"},
+                status_code=404,
+            ),
+            client_request,
+            "GET",
+            f"/bots/{bot_id}/usage",
         )
     return _without_owner(usage)
 
@@ -1304,9 +1342,14 @@ async def get_bot_briefing(bot_id: str, client_request: Request):
     if briefing is not None and not owned_by(briefing, client_request.state.api_key):
         briefing = None
     if briefing is None:
-        return JSONResponse(
-            content={"message": f"No briefing for bot {bot_id}", "status": "error"},
-            status_code=404,
+        return await _or_peers(
+            JSONResponse(
+                content={"message": f"No briefing for bot {bot_id}", "status": "error"},
+                status_code=404,
+            ),
+            client_request,
+            "GET",
+            f"/bots/{bot_id}/briefing",
         )
     return _without_owner(briefing)
 

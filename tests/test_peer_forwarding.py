@@ -1,13 +1,19 @@
 import asyncio
 import os
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from app.peer_forwarding import FORWARD_TIMEOUT, _payload, never_reached_peer
+from app.peer_forwarding import (
+    FORWARD_TIMEOUT,
+    _payload,
+    forward_scoped_request,
+    never_reached_peer,
+)
 from core.admin_server import admin_host
 
 
@@ -27,13 +33,53 @@ class PeerForwardingTest(unittest.TestCase):
             app = web.Application()
             app.router.add_get("/html", lambda r: web.Response(status=502, text="<html>bad gateway</html>"))
             app.router.add_get("/json", lambda r: web.json_response({"bot_id": "x"}))
+            app.router.add_get("/truncated", lambda r: web.Response(status=201, text='{"bot_id": "x'))
             async with TestServer(app) as server, aiohttp.ClientSession() as session:
                 async with session.get(server.make_url("/html")) as resp:
-                    body = await _payload(resp)
-                self.assertEqual(body["status"], "error")
-                self.assertIn("502", body["message"])
+                    body, status = await _payload(resp)
+                self.assertEqual((body["status"], status), ("error", 502))
                 async with session.get(server.make_url("/json")) as resp:
-                    self.assertEqual(await _payload(resp), {"bot_id": "x"})
+                    self.assertEqual(await _payload(resp), ({"bot_id": "x"}, 200))
+                # A 201 the caller cannot read is not a success: no bot id came back.
+                async with session.get(server.make_url("/truncated")) as resp:
+                    body, status = await _payload(resp)
+                self.assertEqual((body["status"], status), ("error", 502))
+
+        asyncio.run(scenario())
+
+    def test_per_bot_requests_are_asked_of_every_peer_until_one_knows_the_bot(self):
+        async def scenario():
+            asked = []
+
+            async def peer(request):
+                asked.append(request.match_info["ordinal"])
+                if request.match_info["ordinal"] == "2" and request.match_info["bot_id"] == "b1":
+                    return web.json_response({"tts_characters": 9}, status=200)
+                return web.json_response({"message": "No live bot"}, status=404)
+
+            app = web.Application()
+            app.router.add_route("*", "/peer{ordinal}/bots/{bot_id}/{rest:.*}", peer)
+            async with TestServer(app) as server:
+                env = {
+                    "POD_NAME": "speaking-bot-0",
+                    "SPEAKING_REPLICAS": "3",
+                    # Built by hand: yarl would percent-encode the braces.
+                    "SPEAKING_PEER_URL_TEMPLATE": f"http://127.0.0.1:{server.port}/peer{{ordinal}}",
+                }
+                request = SimpleNamespace(headers={}, state=SimpleNamespace(api_key="k"))
+                with mock.patch.dict(os.environ, env):
+                    answer = await forward_scoped_request("GET", "/bots/b1/usage", None, request)
+                    self.assertIsNotNone(answer)
+                    self.assertEqual(answer.status_code, 200)
+                    self.assertEqual(asked, ["1", "2"])
+                    asked.clear()
+                    nobody = await forward_scoped_request("POST", "/bots/zz/messages", b"{}", request)
+                    self.assertIsNone(nobody)
+                    self.assertEqual(asked, ["1", "2"])
+                    forwarded = SimpleNamespace(
+                        headers={"x-speaking-forwarded": "1"}, state=SimpleNamespace(api_key="k")
+                    )
+                    self.assertIsNone(await forward_scoped_request("GET", "/bots/b1/usage", None, forwarded))
 
         asyncio.run(scenario())
 

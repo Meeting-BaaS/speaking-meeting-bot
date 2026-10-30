@@ -41,7 +41,11 @@ def private_urls_allowed() -> bool:
 
 
 class CallbackRefused(ValueError):
-    """The callback host is private, local or unresolvable."""
+    """The callback host is private or local: a permanent condition."""
+
+
+class CallbackUnresolved(OSError):
+    """The callback host did not resolve this time; the next event tries again."""
 
 
 async def resolve_callback(url: str) -> list[str] | None:
@@ -71,7 +75,7 @@ async def resolve_callback(url: str) -> list[str] | None:
             host, port, type=socket.SOCK_STREAM
         )
     except socket.gaierror as error:
-        raise CallbackRefused(f"could not resolve callback host {host}: {error}") from error
+        raise CallbackUnresolved(f"could not resolve callback host {host}: {error}") from error
     resolved: list[str] = []
     for address in addresses:
         ip = address[4][0]
@@ -140,7 +144,7 @@ async def post_event(
     if own_session:
         try:
             session = await open_session(url)
-        except CallbackRefused as error:
+        except (CallbackRefused, CallbackUnresolved) as error:
             if log:
                 log(f"[EVENTS] {envelope.get('event')} not sent: {error}")
             return False
@@ -218,9 +222,15 @@ class CustomerEventSink:
             try:
                 self._session = await open_session(self.url)
             except CallbackRefused as error:
+                # Private or local: will not change during the call.
                 if self._log:
                     self._log(f"[EVENTS] callback disabled: {error}")
                 self.url = None
+                return None
+            except CallbackUnresolved as error:
+                # DNS hiccup: drop this event, try again on the next one.
+                if self._log:
+                    self._log(f"[EVENTS] {event} dropped: {error}")
                 return None
         task = asyncio.create_task(
             post_event(
