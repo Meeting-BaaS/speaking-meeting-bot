@@ -45,12 +45,26 @@ def never_reached_peer(error: BaseException) -> bool:
     return isinstance(error, _PRE_DELIVERY_ERRORS)
 
 
-def _peer_unsure_response(what: str) -> JSONResponse:
-    """A peer that may hold the bot did not answer: not a 404, an error to retry."""
+def _peer_unsure_response(method: str, path: str) -> JSONResponse:
+    """A peer that may hold the bot did not answer: not a 404, and not a 'retry'.
+
+    A read can simply be repeated. A write may already have been applied by
+    the pod whose answer was lost (a message queued, an escalation answered),
+    and repeating it would apply it twice, so the caller is told the outcome
+    is unknown and where to look before sending it again.
+    """
+    if method.upper() in ("GET", "HEAD"):
+        advice = "Try again."
+    else:
+        advice = (
+            "The outcome is unknown: it may have been applied. Check the bot's "
+            "escalations or transcript before sending it again."
+        )
     return JSONResponse(
         content={
-            "message": f"A pod that may host this bot did not answer; {what} could not be confirmed. Try again.",
+            "message": f"A pod that may host this bot did not answer {method} {path}. {advice}",
             "status": "error",
+            "outcome": "unknown",
         },
         status_code=502,
     )
@@ -189,7 +203,7 @@ async def forward_scoped_request(
                     unsure.append(ordinal)
     except aiohttp.ClientError as e:
         logger.warning(f"Peer lookup for {method} {path} failed: {e}")
-        return _peer_unsure_response(f"{method} {path}")
+        return _peer_unsure_response(method, path)
     if unsure:
-        return _peer_unsure_response(f"{method} {path}")
+        return _peer_unsure_response(method, path)
     return None

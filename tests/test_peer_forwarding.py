@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import unittest
 from types import SimpleNamespace
@@ -92,6 +93,11 @@ class PeerForwardingTest(unittest.TestCase):
                     unsure = await forward_scoped_request("POST", "/bots/zz/messages", b"{}", request)
                     self.assertIsNotNone(unsure)
                     self.assertEqual(unsure.status_code, 502)
+                    body = json.loads(unsure.body)
+                    self.assertEqual(body["outcome"], "unknown")
+                    self.assertNotIn("Try again", body["message"])
+                    read = await forward_scoped_request("GET", "/bots/zz/usage", None, request)
+                    self.assertIn("Try again", json.loads(read.body)["message"])
 
         asyncio.run(scenario())
 
