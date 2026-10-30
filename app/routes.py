@@ -15,11 +15,16 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from app.models import (
+    AcceptedResponse,
     BotRequest,
+    BriefingReport,
+    EscalationResponseRequest,
     JoinResponse,
     LeaveBotRequest,
+    OwnerMessageRequest,
     PersonaImageRequest,
     PersonaImageResponse,
+    UsageReport,
 )
 from app.services.image_service import image_service
 from app.services.prompt_context import (
@@ -28,10 +33,19 @@ from app.services.prompt_context import (
     merge_context_blocks,
 )
 from app.services.mcp_presets import resolve_mcp_config
+from utils.authority import (
+    MESSAGE_TYPE_ESCALATION_RESPONSE,
+    append_owner_message,
+    read_escalations,
+)
+from utils.briefing import generate_briefing, load_briefing, save_briefing
+from utils.customer_events import EVENT_ENDED, CustomerEventSink
 from utils.llm_config import (
+    PROVIDER_KEY_ENVS,
     missing_llm_provider_credential,
     resolve_llm_provider,
 )
+from utils.usage_meter import key_sources, load_usage, save_usage, usage_dir
 from utils.mcp_client import split_mcp_runtime_headers
 from config.persona_utils import persona_manager
 from core.connection import BOT_CREDENTIALS, MEETING_DETAILS, PIPECAT_PROCESSES
@@ -374,6 +388,10 @@ async def join_meeting(request: BotRequest, client_request: Request):
         logger.info(
             f"Caller supplied credentials for {', '.join(sorted(credentials))}"
         )
+    # Recorded before the callback secret joins the dict: it is not a provider key.
+    resolved_persona_data["key_sources"] = key_sources(credentials)
+    if request.callback_secret:
+        credentials["callback_secret"] = request.callback_secret.get_secret_value()
 
     missing_key_env = missing_llm_provider_credential(
         resolved_llm_provider, credentials.get("llm_api_key")
@@ -400,6 +418,14 @@ async def join_meeting(request: BotRequest, client_request: Request):
         resolved_persona_data["speech_emotion"] = request.speech_emotion
     if request.respond_mode != "always":
         resolved_persona_data["respond_mode"] = request.respond_mode
+    if request.language:
+        resolved_persona_data["language"] = request.language
+    if request.callback_url:
+        resolved_persona_data["callback_url"] = request.callback_url
+    if request.authority:
+        resolved_persona_data["authority"] = request.authority.model_dump()
+    if request.briefing:
+        resolved_persona_data["briefing"] = request.briefing.model_dump(exclude_none=True)
 
     # Store all relevant details in MEETING_DETAILS dictionary.
     # Index 5 carries the FULL resolved persona dict (prompt, voice, image…):
@@ -422,6 +448,8 @@ async def join_meeting(request: BotRequest, client_request: Request):
         bot_name_selected_persona,
     )
     logger.info(f"Display name in the call: {display_name}")
+    # The child introduces itself by this name (authority prompt), not the persona's.
+    resolved_persona_data["display_name"] = display_name
 
     MEETING_DETAILS[bot_client_id] = (
         request.meeting_url,
@@ -993,6 +1021,14 @@ async def meetingbaas_webhook(request: Request):
             # its pipeline and write the final transcript, which the summary
             # below then reads complete.
             failed = "failed" in event_type_lower or "failed" in status_code_lower
+            # Snapshot what the briefing and the call-end event need: shutdown
+            # forgets the bot, keys included.
+            details = MEETING_DETAILS.get(internal_client_id) or ()
+            persona = (
+                details[5] if len(details) > 5 and isinstance(details[5], dict) else {}
+            )
+            display_name = details[1] if len(details) > 1 and details[1] else "Bot"
+            credentials = dict(BOT_CREDENTIALS.get(internal_client_id) or {})
             await shutdown_bot(
                 internal_client_id,
                 reason=ShutdownReason.with_detail(
@@ -1013,7 +1049,24 @@ async def meetingbaas_webhook(request: Request):
                     transcript_file = candidate
                     break
 
-            if transcript_file and not os.getenv("OPENAI_API_KEY"):
+            briefing = None
+            if _wants_briefing(persona):
+                if transcript_file and _claim_summary(bot_id):
+                    briefing = await asyncio.to_thread(
+                        _generate_briefing_sync,
+                        transcript_file,
+                        bot_id,
+                        internal_client_id,
+                        persona,
+                        credentials,
+                        display_name,
+                        failed=failed,
+                        reason=event_type or status_code,
+                    )
+                elif not transcript_file:
+                    logger.warning(f"No transcript file found for bot {bot_id}")
+                briefing = briefing or load_briefing(get_state_dir(), bot_id)
+            elif transcript_file and not os.getenv("OPENAI_API_KEY"):
                 logger.info("No server OpenAI key: skipping the call summary")
             elif transcript_file and _claim_summary(bot_id):
                 # Summary generation makes a blocking OpenAI call; run it off the
@@ -1028,10 +1081,282 @@ async def meetingbaas_webhook(request: Request):
             elif not transcript_file:
                 logger.warning(f"No transcript file found for bot {bot_id}")
 
+            usage = _finalize_usage(internal_client_id, bot_id)
+            await _send_call_ended(
+                persona,
+                credentials,
+                internal_client_id,
+                bot_id,
+                failed=failed,
+                reason=event_type or status_code,
+                usage=usage,
+                briefing=briefing,
+            )
+
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Error processing webhook: {e}")
         return {"status": "error", "message": str(e)}
+
+
+def _live_client_id(meetingbaas_bot_id: str) -> str | None:
+    """Our client id for a MeetingBaas bot id, while the bot is registered."""
+    for client_id, details in MEETING_DETAILS.items():
+        if len(details) > 2 and details[2] == meetingbaas_bot_id:
+            return client_id
+    return None
+
+
+def _not_found(bot_id: str) -> JSONResponse:
+    return JSONResponse(
+        content={"message": f"No live bot with id {bot_id}", "status": "error"},
+        status_code=404,
+    )
+
+
+@router.post(
+    "/bots/{bot_id}/messages",
+    tags=["bots"],
+    response_model=AcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        202: {"description": "Queued; the bot relays it within a second or two"},
+        404: {"description": "No live bot with that ID"},
+    },
+)
+async def send_owner_message(bot_id: str, request: OwnerMessageRequest):
+    """
+    Have the bot relay a message from its owner to the meeting.
+
+    For things that come up while the owner is away: "tell them I'll join at
+    half past", "we can go with option B". The bot says it in its own words,
+    briefly, and the text appears in the transcript as its turn.
+    """
+    client_id = _live_client_id(bot_id)
+    if not client_id:
+        return _not_found(bot_id)
+    record = append_owner_message(get_state_dir(), client_id, request.text)
+    logger.info(f"Owner message queued for bot {bot_id}")
+    return AcceptedResponse(message_id=record["message_id"])
+
+
+@router.get(
+    "/bots/{bot_id}/escalations",
+    tags=["bots"],
+    response_model=list[dict[str, Any]],
+    responses={404: {"description": "No live bot with that ID"}},
+)
+async def list_escalations(bot_id: str):
+    """
+    The decisions the bot has handed back to its owner during this call.
+
+    Each entry carries the question, its category, who asked, and the owner's
+    answer once one was posted. The same list is in the call-end event.
+    """
+    client_id = _live_client_id(bot_id)
+    if not client_id:
+        return _not_found(bot_id)
+    return read_escalations(get_state_dir(), client_id)
+
+
+@router.post(
+    "/bots/{bot_id}/escalations/{escalation_id}/response",
+    tags=["bots"],
+    response_model=AcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        202: {"description": "Queued; the bot relays the answer to the meeting"},
+        404: {"description": "No live bot, or no such escalation"},
+    },
+)
+async def answer_escalation(
+    bot_id: str, escalation_id: str, request: EscalationResponseRequest
+):
+    """
+    Answer an escalation the bot raised.
+
+    The bot tells the participants the owner's answer, word for word in
+    substance, and the escalation is marked answered in the briefing. An
+    escalation that is never answered stays open and is reported as
+    unresolved; the bot never assumes approval.
+    """
+    client_id = _live_client_id(bot_id)
+    if not client_id:
+        return _not_found(bot_id)
+    known = {item.get("escalation_id") for item in read_escalations(get_state_dir(), client_id)}
+    if escalation_id not in known:
+        return JSONResponse(
+            content={"message": f"No escalation {escalation_id} on bot {bot_id}", "status": "error"},
+            status_code=404,
+        )
+    record = append_owner_message(
+        get_state_dir(),
+        client_id,
+        request.response,
+        message_type=MESSAGE_TYPE_ESCALATION_RESPONSE,
+        escalation_id=escalation_id,
+        decision=request.decision,
+    )
+    logger.info(f"Escalation {escalation_id} answered for bot {bot_id}")
+    return AcceptedResponse(message_id=record["message_id"])
+
+
+@router.get(
+    "/bots/{bot_id}/usage",
+    tags=["bots"],
+    response_model=UsageReport,
+    responses={404: {"description": "No usage recorded for that bot yet"}},
+)
+async def get_bot_usage(bot_id: str):
+    """
+    What the bot has consumed so far on speech-to-text, text-to-speech and the LLM.
+
+    Live while the bot is in the call, final once it has left. key_sources says
+    per provider whether the bot ran on the server's key (billed by Meeting
+    BaaS) or on one the request brought.
+    """
+    usage = load_usage(usage_dir(get_state_dir()), bot_id, _live_client_id(bot_id))
+    if usage is None:
+        return JSONResponse(
+            content={"message": f"No usage recorded for bot {bot_id}", "status": "error"},
+            status_code=404,
+        )
+    return usage
+
+
+@router.get(
+    "/bots/{bot_id}/briefing",
+    tags=["bots"],
+    response_model=BriefingReport,
+    responses={404: {"description": "No briefing for that bot (yet)"}},
+)
+async def get_bot_briefing(bot_id: str):
+    """
+    The post-meeting briefing: summary, decisions, actions, open items, what the
+    bot said and what it escalated. Written once the call ends, on the bot's own
+    LLM key; also delivered in the speaking_bot.ended event.
+    """
+    briefing = load_briefing(get_state_dir(), bot_id)
+    if briefing is None:
+        return JSONResponse(
+            content={"message": f"No briefing for bot {bot_id}", "status": "error"},
+            status_code=404,
+        )
+    return briefing
+
+
+def _wants_briefing(persona: Dict[str, Any]) -> bool:
+    """A briefing is on when asked for, or implied by authority/callback, unless disabled."""
+    config = persona.get("briefing")
+    if isinstance(config, dict):
+        return config.get("enabled", True) is not False
+    return bool(persona.get("authority") or persona.get("callback_url"))
+
+
+def _llm_key_for(persona: Dict[str, Any], credentials: Dict[str, str]) -> str | None:
+    """The key the bot itself ran on: the caller's, else the server's for that provider."""
+    try:
+        provider = resolve_llm_provider(persona)
+    except ValueError:
+        return None
+    return credentials.get("llm_api_key") or os.getenv(PROVIDER_KEY_ENVS[provider]) or None
+
+
+def _generate_briefing_sync(
+    transcript_file: str,
+    bot_id: str,
+    internal_client_id: str,
+    persona: Dict[str, Any],
+    credentials: Dict[str, str],
+    display_name: str,
+    *,
+    failed: bool,
+    reason: str,
+) -> Dict[str, Any] | None:
+    """Blocking briefing call, run off the event loop; None when it could not run."""
+    api_key = _llm_key_for(persona, credentials)
+    if not api_key:
+        logger.info(f"No LLM key for bot {bot_id}: skipping the briefing")
+        _release_summary_claim(bot_id)
+        return None
+    try:
+        with open(transcript_file) as handle:
+            transcript = json.load(handle)
+        messages = transcript.get("messages", [])
+        escalations = read_escalations(get_state_dir(), internal_client_id)
+        coverage = {
+            "call_ended_by": reason,
+            "bot_failed": failed,
+            "turns_captured": len(messages),
+            "open_escalations": sum(1 for item in escalations if item.get("status") != "answered"),
+        }
+        briefing = generate_briefing(
+            persona=persona,
+            api_key=api_key,
+            bot_name=display_name,
+            messages=messages,
+            escalations=escalations,
+            coverage=coverage,
+        )
+        briefing["bot_id"] = bot_id
+        briefing["escalations_raised"] = escalations
+        save_briefing(get_state_dir(), bot_id, briefing)
+        logger.info(f"[WEBHOOK] Briefing written for bot {bot_id}")
+        return briefing
+    except Exception as e:
+        logger.error(f"[WEBHOOK] Briefing failed for bot {bot_id}: {e}")
+        _release_summary_claim(bot_id)
+        return None
+
+
+def _finalize_usage(internal_client_id: str, bot_id: str) -> Dict[str, Any] | None:
+    """Close the child's usage ledger and file it under the MeetingBaas bot id too."""
+    directory = usage_dir(get_state_dir())
+    usage = load_usage(directory, internal_client_id)
+    if usage is None:
+        return None
+    usage["meetingbaas_bot_id"] = bot_id
+    if not usage.get("ended_at"):
+        usage["ended_at"] = datetime.now().timestamp()
+        usage["duration_seconds"] = round(
+            max(0.0, usage["ended_at"] - float(usage.get("started_at") or usage["ended_at"])), 3
+        )
+    save_usage(directory, bot_id, usage)
+    return usage
+
+
+async def _send_call_ended(
+    persona: Dict[str, Any],
+    credentials: Dict[str, str],
+    internal_client_id: str,
+    bot_id: str,
+    *,
+    failed: bool,
+    reason: str,
+    usage: Dict[str, Any] | None,
+    briefing: Dict[str, Any] | None,
+) -> None:
+    callback_url = persona.get("callback_url")
+    if not callback_url:
+        return
+    sink = CustomerEventSink(
+        callback_url,
+        credentials.get("callback_secret"),
+        bot_id=internal_client_id,
+        meetingbaas_bot_id=bot_id,
+        log=logger.info,
+    )
+    delivered = await sink.send(
+        EVENT_ENDED,
+        {
+            "status": "failed" if failed else "completed",
+            "reason": reason,
+            "usage": usage,
+            "briefing": briefing,
+            "escalations": read_escalations(get_state_dir(), internal_client_id),
+        },
+    )
+    logger.info(f"[EVENTS] {EVENT_ENDED} for bot {bot_id}: {'delivered' if delivered else 'not delivered'}")
 
 
 def _summary_claim_path(bot_id: str) -> str:

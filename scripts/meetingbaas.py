@@ -23,7 +23,14 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
-from pipecat.frames.frames import LLMMessagesAppendFrame, SystemFrame, TTSSpeakFrame
+from pipecat.frames.frames import (
+    LLMMessagesAppendFrame,
+    SystemFrame,
+    TTSSpeakFrame,
+    TTSStartedFrame,
+    TTSStoppedFrame,
+    TTSTextFrame,
+)
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import WorkerRunner
@@ -61,6 +68,23 @@ from pipecat.turns.user_turn_strategies import (
 
 from config.persona_utils import PersonaManager
 from meetingbaas_pipecat.utils.logger import configure_logger
+from utils.authority import (
+    ESCALATE_TOOL_NAME,
+    OwnerMessageReader,
+    build_authority_prompt,
+    escalation_reply_for_llm,
+    escalation_tool_schema,
+    new_escalation,
+    owner_message_for_llm,
+    owner_messages_path,
+    record_escalation,
+)
+from utils.customer_events import (
+    EVENT_ESCALATION,
+    EVENT_OWNER_MESSAGE_DELIVERED,
+    EVENT_UTTERANCE,
+    CustomerEventSink,
+)
 from utils.early_audio import hold_messages_until_started
 from utils.floor import floor_blocked_by_sibling
 from utils.idle_reengagement import IdleReengagementBudget, max_nudges_for
@@ -85,6 +109,7 @@ from utils.speakers import read_recent_speakers
 from utils.speech_activity import SpeechActivityTracker
 from utils.system_prompt import build_system_prompt
 from utils.turn_taking import resolve_turn_taking
+from utils.usage_meter import UsageLedger, UsageMeter, usage_dir
 
 # Import every LLM service the runtime can select at MODULE level, not lazily
 # inside build_llm_service(): the lazy `import anthropic` cost ~27s on a loaded
@@ -813,6 +838,64 @@ class SpeechInjectionProbe(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class UtteranceTap(FrameProcessor):
+    """Reports what the bot says, one event per reply, to the caller's callback.
+
+    Sits right after the TTS service. The TTS emits its text sentence by
+    sentence between started/stopped frames; the sentences of one reply are
+    coalesced (a reply's sentences follow each other within a second) so the
+    caller gets "what the bot said" at turn granularity, as a person would
+    quote it. The transcript file stays the complete record.
+    """
+
+    COALESCE_SECS = 1.0
+
+    def __init__(self, sink: CustomerEventSink, **kwargs):
+        super().__init__(**kwargs)
+        self._sink = sink
+        self._parts: list[str] = []
+        self._started_at: float | None = None
+        self._flush_task: asyncio.Task | None = None
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if self._sink.enabled:
+            if isinstance(frame, TTSStartedFrame):
+                self._cancel_flush()
+                if self._started_at is None:
+                    self._started_at = time.time()
+            elif isinstance(frame, TTSTextFrame):
+                text = (getattr(frame, "text", "") or "").strip()
+                if text:
+                    self._parts.append(text)
+            elif isinstance(frame, TTSStoppedFrame):
+                self._cancel_flush()
+                self._flush_task = asyncio.create_task(self._flush_later())
+        await self.push_frame(frame, direction)
+
+    def _cancel_flush(self) -> None:
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+        self._flush_task = None
+
+    async def _flush_later(self) -> None:
+        await asyncio.sleep(self.COALESCE_SECS)
+        await self.flush()
+
+    async def flush(self) -> None:
+        """Send what was collected so far as one utterance event."""
+        text = " ".join(self._parts).strip()
+        started_at = self._started_at
+        self._parts = []
+        self._started_at = None
+        if not text:
+            return
+        await self._sink.emit(
+            EVENT_UTTERANCE,
+            {"text": text, "started_at": started_at, "ended_at": time.time()},
+        )
+
+
 class FloorGate(FrameProcessor):
     """Holds LLM→TTS frames while a sibling bot is speaking in the meeting.
 
@@ -898,6 +981,7 @@ async def main(
     websocket_url: str = "",
     enable_tools: bool = True,
     persona_data: dict = None,
+    meetingbaas_bot_id: str = "",
 ):
     """
     Run the MeetingBaas bot with specified configurations
@@ -1045,9 +1129,40 @@ async def main(
     mcp_context = build_mcp_context_prompt(persona.get("mcp"))
     if mcp_context:
         log_and_flush(logging.INFO, "[MCP] Added MCP metadata to system context")
-    system_content = build_system_prompt(persona, persona_name, mcp_context)
+    # The name the meeting shows; the persona's own name is only a fallback.
+    bot_display_name = (
+        persona.get("display_name") or persona.get("name") or persona_name
+    )
+    authority = persona.get("authority") if isinstance(persona.get("authority"), dict) else None
+    owner_name = str((authority or {}).get("owner_name") or "the owner")
+    authority_context = build_authority_prompt(authority, bot_display_name)
+    if authority_context:
+        log_and_flush(logging.INFO, f"[AUTHORITY] Representing {owner_name}")
+    system_content = build_system_prompt(
+        persona, persona_name, mcp_context, authority_context
+    )
 
     llm = build_llm_service(persona, system_instruction=system_content)
+
+    # Where the bot's own events go (what it said, what it escalated), and the
+    # ledger of what it consumed on each provider.
+    sink = CustomerEventSink(
+        persona.get("callback_url"),
+        os.getenv("CUSTOMER_CALLBACK_SECRET"),
+        bot_id=bot_id,
+        meetingbaas_bot_id=meetingbaas_bot_id or None,
+        log=lambda message: log_and_flush(logging.WARNING, message),
+    )
+    if sink.enabled:
+        log_and_flush(logging.INFO, "[EVENTS] Posting bot events to the caller's callback_url")
+    llm_provider = resolve_llm_provider(persona)
+    ledger = UsageLedger(
+        bot_id=bot_id,
+        meetingbaas_bot_id=meetingbaas_bot_id or None,
+        llm_provider=llm_provider,
+        llm_model=resolve_llm_model(llm_provider, persona),
+        key_sources=dict(persona.get("key_sources") or {}),
+    )
 
     mcp_manager = None
     if enable_tools:
@@ -1117,14 +1232,49 @@ async def main(
 
         tool_schemas = [weather_function, time_function, save_call_summary_function]
         mcp_manager = await setup_mcp_tools(llm, tool_schemas, persona.get("mcp"))
-
-        # Create tools schema
-        tools = ToolsSchema(standard_tools=tool_schemas)
     else:
         log_and_flush(logging.INFO, "[TOOLS] Function tools are disabled")
-        tools = None
+        tool_schemas = []
 
-    language = persona.get("language_code", "en-US")
+    if authority:
+        # A representative always has its one tool, whatever enable_tools says:
+        # the prompt tells it to escalate instead of deciding, so it must be able to.
+        escalation_count = {"n": 0}
+
+        async def escalate_to_owner(params: FunctionCallParams):
+            arguments = params.arguments or {}
+            escalation_count["n"] += 1
+            number = escalation_count["n"]
+            escalation = new_escalation(
+                question=str(arguments.get("question") or ""),
+                category=str(arguments.get("category") or "other"),
+                context=arguments.get("context"),
+            )
+            escalation["number"] = number
+            try:
+                record_escalation(get_state_dir(), bot_id, escalation)
+            except OSError as e:
+                log_and_flush(logging.WARNING, f"[ESCALATION] Could not record escalation: {e}")
+            log_and_flush(
+                logging.INFO,
+                f"[ESCALATION] #{number} ({escalation['category']}): {escalation['question'][:160]}",
+            )
+            await sink.emit(EVENT_ESCALATION, escalation)
+            await params.result_callback(escalation_reply_for_llm(owner_name, number))
+
+        llm.register_function(ESCALATE_TOOL_NAME, escalate_to_owner)
+        tool_schemas.append(escalation_tool_schema())
+        log_and_flush(logging.INFO, f"[TOOLS] Registered {ESCALATE_TOOL_NAME}")
+
+    tools = ToolsSchema(standard_tools=tool_schemas) if tool_schemas else None
+
+    # Per-request language (BCP-47 or Deepgram's "multi"), then the persona's
+    # own, then US English as before.
+    language = (
+        clean_string(persona.get("language"))
+        or clean_string(persona.get("language_code"))
+        or "en-US"
+    )
     log_and_flush(logging.INFO, f"[PERSONA] Using language: {language}")
 
     deepgram_api_key = os.getenv("DEEPGRAM_API_KEY")
@@ -1288,7 +1438,9 @@ async def main(
     idle_budget = IdleReengagementBudget(
         idle_secs=_coerce_float(os.getenv("BOT_IDLE_REENGAGE_SECS"), 15.0),
         max_nudges=max_nudges_for(
-            respond_mode, int(_coerce_float(os.getenv("BOT_MAX_REENGAGE"), 3))
+            respond_mode,
+            int(_coerce_float(os.getenv("BOT_MAX_REENGAGE"), 3)),
+            represents_owner=authority is not None,
         ),
         last_activity=time.monotonic(),
     )
@@ -1301,6 +1453,8 @@ async def main(
         meeting_url=meeting_url,
         my_name=(persona.get("name") if persona else None) or persona_name,
     )
+    utterance_tap = UtteranceTap(sink)
+    usage_meter = UsageMeter(ledger)
     pipeline = Pipeline([
         audio_input,         # transport input, guarded against early audio
         stt,
@@ -1311,7 +1465,9 @@ async def main(
         floor_gate,
         tts,
         speech_probe,        # log outgoing TTS start/stop
+        utterance_tap,       # what the bot said, to the caller's callback
         assistant_aggregator,
+        usage_meter,         # STT seconds, TTS characters, LLM tokens
         transport.output(),  # Add transport output to send audio/data
     ])
 
@@ -1334,6 +1490,43 @@ async def main(
                 save_transcript(bot_id, persona_name, context.messages)
             except Exception as e:
                 log_and_flush(logging.ERROR, f"[TRANSCRIPT] Error saving transcript: {e}")
+            try:
+                ledger.save(usage_dir(get_state_dir()))
+            except Exception as e:
+                log_and_flush(logging.WARNING, f"[USAGE] Could not save usage: {e}")
+
+    # Messages from the owner (an instruction, or the answer to an escalation)
+    # arrive through the API in a per-bot file; relay each as soon as it lands.
+    owner_reader = OwnerMessageReader(owner_messages_path(get_state_dir(), bot_id))
+
+    async def relay_owner_messages():
+        while True:
+            await asyncio.sleep(1.0)
+            try:
+                records = owner_reader.poll()
+            except Exception as e:
+                log_and_flush(logging.WARNING, f"[OWNER] Could not read owner messages: {e}")
+                continue
+            for record in records:
+                log_and_flush(
+                    logging.INFO,
+                    f"[OWNER] Relaying {record.get('type')} {record.get('message_id')}",
+                )
+                idle_budget.record_speech(time.monotonic())
+                await task.queue_frames([
+                    LLMMessagesAppendFrame(
+                        messages=[{"role": "user", "content": owner_message_for_llm(record, owner_name)}],
+                        run_llm=True,
+                    )
+                ])
+                await sink.emit(
+                    EVENT_OWNER_MESSAGE_DELIVERED,
+                    {
+                        "message_id": record.get("message_id"),
+                        "type": record.get("type"),
+                        "escalation_id": record.get("escalation_id"),
+                    },
+                )
 
     # Entry message: prefer the per-request CLI arg (--entry-message), then the
     # persona's own entry message. This is what the bot should SAY (not a prompt).
@@ -1451,6 +1644,7 @@ async def main(
 
     # Start periodic transcript saving
     transcript_task = asyncio.create_task(periodic_transcript_save())
+    owner_task = asyncio.create_task(relay_owner_messages())
 
     try:
         log_and_flush(logging.INFO, "[RUN] Starting pipeline runner...")
@@ -1470,12 +1664,30 @@ async def main(
         await asyncio.gather(conversation_task, return_exceptions=True)
         # Cancel the periodic save task
         transcript_task.cancel()
+        owner_task.cancel()
+        await asyncio.gather(transcript_task, owner_task, return_exceptions=True)
         # Save final transcript
         try:
             save_transcript(bot_id, persona_name, context.messages)
             log_and_flush(logging.INFO, "[TRANSCRIPT] Final transcript saved on shutdown")
         except Exception as e:
             log_and_flush(logging.ERROR, f"[TRANSCRIPT] Error saving final transcript: {e}")
+        # Close the usage ledger and get the last events out before the process goes.
+        try:
+            ledger.ended_at = time.time()
+            ledger.save(usage_dir(get_state_dir()))
+            log_and_flush(
+                logging.INFO,
+                f"[USAGE] stt={ledger.stt_audio_seconds:.0f}s tts={ledger.tts_characters} chars "
+                f"llm={ledger.llm_total_tokens} tokens over {ledger.llm_turns} turns",
+            )
+        except Exception as e:
+            log_and_flush(logging.WARNING, f"[USAGE] Could not save final usage: {e}")
+        try:
+            await utterance_tap.flush()
+            await sink.close()
+        except Exception as e:
+            log_and_flush(logging.WARNING, f"[EVENTS] Error flushing events: {e}")
         if mcp_manager:
             try:
                 await mcp_manager.close()
@@ -1593,6 +1805,7 @@ def cli() -> None:
             websocket_url=args.websocket_url,
             enable_tools=args.enable_tools,
             persona_data=persona_data,
+            meetingbaas_bot_id=args.meetingbaas_bot_id or "",
         )
     )
 

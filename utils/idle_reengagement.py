@@ -3,13 +3,18 @@
 from dataclasses import dataclass
 
 
-def max_nudges_for(respond_mode: str, configured: int) -> int:
+def max_nudges_for(
+    respond_mode: str, configured: int, *, represents_owner: bool = False
+) -> int:
     """How many unprompted nudges a bot gets; none when it only answers when named.
 
     A bot in ``mentioned`` mode exists to stay quiet until addressed, and an
-    idle nudge is exactly the unprompted speech that mode rules out.
+    idle nudge is exactly the unprompted speech that mode rules out. The same
+    goes for a bot attending on someone's behalf: it never fills a silence.
     """
-    return 0 if (respond_mode or "").lower() == "mentioned" else max(0, configured)
+    if represents_owner or (respond_mode or "").lower() == "mentioned":
+        return 0
+    return max(0, configured)
 
 
 @dataclass
