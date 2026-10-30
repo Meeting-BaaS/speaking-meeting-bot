@@ -18,7 +18,28 @@ from utils.pod_routing import (
     replica_count,
 )
 
-FORWARD_TIMEOUT = aiohttp.ClientTimeout(total=30)
+# A dead pod must show up as a connection failure within seconds, so the
+# request can be hosted here; the total covers persona extraction and the
+# MeetingBaas call on the owner.
+FORWARD_TIMEOUT = aiohttp.ClientTimeout(total=30, sock_connect=5)
+
+
+def never_reached_peer(error: BaseException) -> bool:
+    """True when the request could not even be delivered to the peer.
+
+    Only then is hosting the bot here safe: after a timeout or a dropped
+    connection the owner may still finish creating the bot, and a second one
+    on this pod would double the customer's bots and bill.
+    """
+    return isinstance(error, (aiohttp.ClientConnectorError, ConnectionRefusedError))
+
+
+async def _payload(resp: aiohttp.ClientResponse) -> dict | list:
+    """The peer's JSON body, or a generic error body when it sent none."""
+    try:
+        return await resp.json(content_type=None)
+    except (ValueError, aiohttp.ClientPayloadError):
+        return {"message": f"peer answered {resp.status} without a JSON body", "status": "error"}
 
 
 def is_forwarded(request: Request) -> bool:
@@ -67,12 +88,21 @@ async def forward_bot_request(
                         f"Owner pod {owner} is draining; hosting the bot for {meeting_url} here"
                     )
                     return None
-                payload = await resp.json(content_type=None)
+                payload = await _payload(resp)
                 logger.info(f"Forwarded bot for {meeting_url} to pod {owner} ({resp.status})")
                 return JSONResponse(content=payload, status_code=resp.status)
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        logger.warning(f"Owner pod {owner} unreachable ({e}); hosting the bot here")
-        return None
+        if never_reached_peer(e):
+            logger.warning(f"Owner pod {owner} unreachable ({e}); hosting the bot here")
+            return None
+        logger.warning(f"Owner pod {owner} did not answer ({e}); asking the caller to retry")
+        return JSONResponse(
+            content={
+                "message": "The pod that owns this meeting did not answer; retry the request",
+                "status": "error",
+            },
+            status_code=504 if isinstance(e, asyncio.TimeoutError) else 502,
+        )
 
 
 async def forward_leave_request(
@@ -93,7 +123,7 @@ async def forward_leave_request(
                     ) as resp:
                         if resp.status == 404:
                             continue
-                        payload = await resp.json(content_type=None)
+                        payload = await _payload(resp)
                         logger.info(f"Pod {ordinal} removed bot {bot_id} ({resp.status})")
                         return JSONResponse(content=payload, status_code=resp.status)
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:

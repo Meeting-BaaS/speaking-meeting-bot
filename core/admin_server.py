@@ -67,14 +67,25 @@ def start_admin_server(port: int, host: str = "0.0.0.0") -> ThreadingHTTPServer:
     return server
 
 
+def admin_host() -> str:
+    """All interfaces inside a pod (the janitor calls the pod IP), loopback elsewhere.
+
+    The drain switch has no authentication. In a pod the network is the
+    boundary; in local dev or Docker with published ports it is not, and an
+    unexpected POST /drain would take the service out until a restart.
+    """
+    return "0.0.0.0" if os.getenv("POD_NAME") else "127.0.0.1"
+
+
 def start_admin_server_from_env() -> ThreadingHTTPServer | None:
     port = admin_port()
     if port <= 0:
         return None
+    host = admin_host()
     try:
-        server = start_admin_server(port)
+        server = start_admin_server(port, host=host)
     except OSError as e:
-        logger.warning(f"Admin server not started on port {port}: {e}")
+        logger.warning(f"Admin server not started on {host}:{port}: {e}")
         return None
-    logger.info(f"Admin server listening on port {port}")
+    logger.info(f"Admin server listening on {host}:{port}")
     return server

@@ -27,6 +27,7 @@ from utils.llm_config import (
 BRIEFINGS_DIRNAME = "briefings"
 DEFAULT_BRIEFING_LANGUAGE = "en"
 MAX_TRANSCRIPT_CHARS = 60_000
+LLM_TIMEOUT_SECS = 60.0
 
 BRIEFING_KEYS = (
     "summary",
@@ -150,7 +151,8 @@ def _complete(provider: str, model: str, api_key: str, system: str, user: str) -
     if provider == "anthropic":
         import anthropic
 
-        client = anthropic.Anthropic(api_key=api_key)
+        # Bounded: the call-end webhook waits for this before it answers.
+        client = anthropic.Anthropic(api_key=api_key, timeout=LLM_TIMEOUT_SECS, max_retries=1)
         response = client.messages.create(
             model=model,
             max_tokens=2048,
@@ -163,7 +165,7 @@ def _complete(provider: str, model: str, api_key: str, system: str, user: str) -
 
     import openai
 
-    kwargs: dict[str, Any] = {"api_key": api_key}
+    kwargs: dict[str, Any] = {"api_key": api_key, "timeout": LLM_TIMEOUT_SECS, "max_retries": 1}
     if provider == "zai":
         kwargs["base_url"] = os.getenv("ZAI_BASE_URL") or DEFAULT_ZAI_BASE_URL
     client = openai.OpenAI(**kwargs)

@@ -16,6 +16,7 @@ from utils.authority import new_escalation, read_escalations, record_escalation
 from utils.usage_meter import UsageLedger, usage_dir
 
 HEADERS = {"x-meeting-baas-api-key": "mb-key"}
+OTHER_HEADERS = {"x-meeting-baas-api-key": "someone-elses-key"}
 MEET = "https://meet.google.com/abc-defg-hij"
 
 
@@ -203,6 +204,63 @@ class RepresentativeApiTest(unittest.TestCase):
         self.assertEqual(data["usage"]["tts_characters"], 33)
         self.assertEqual(data["escalations"][0]["status"], "pending")
 
+    def test_only_the_creating_key_can_drive_or_read_a_bot(self):
+        bot_id, client_id = self._create(authority={"owner_name": "Ada"}, briefing={})
+        PIPECAT_PROCESSES[client_id] = FakeProcess()
+        UsageLedger(bot_id=client_id, tts_characters=5).save(usage_dir(self.state_dir.name))
+        escalation = new_escalation(question="Spend?", category="spending", context=None)
+        record_escalation(self.state_dir.name, client_id, escalation)
+        live_calls = (
+            ("post", f"/bots/{bot_id}/messages", {"text": "hi"}),
+            ("get", f"/bots/{bot_id}/escalations", None),
+            ("post", f"/bots/{bot_id}/escalations/{escalation['escalation_id']}/response", {"response": "no"}),
+            ("get", f"/bots/{bot_id}/usage", None),
+        )
+        for method, path, body in live_calls:
+            other = self.client.request(method.upper(), path, headers=OTHER_HEADERS, json=body)
+            self.assertEqual(other.status_code, 404, (path, other.text))
+            mine = self.client.request(method.upper(), path, headers=HEADERS, json=body)
+            self.assertIn(mine.status_code, (200, 202), (path, mine.text))
+
+        transcripts = os.path.join(self.state_dir.name, "transcripts")
+        os.makedirs(transcripts, exist_ok=True)
+        with open(os.path.join(transcripts, f"{client_id}.json"), "w") as handle:
+            json.dump({"bot_id": client_id, "persona_name": "RepMe", "messages": [
+                {"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]}, handle)
+        with mock.patch("app.routes.generate_briefing", return_value={"summary": "s", "generated_at": 1.0}):
+            self.client.post("/webhook", json={"event": "bot.completed", "data": {"bot_id": bot_id}})
+        for path in (f"/bots/{bot_id}/usage", f"/bots/{bot_id}/briefing"):
+            self.assertEqual(self.client.get(path, headers=OTHER_HEADERS).status_code, 404, path)
+            mine = self.client.get(path, headers=HEADERS)
+            self.assertEqual(mine.status_code, 200, (path, mine.text))
+            self.assertNotIn("owner_key_digest", mine.json())
+
+    def test_callback_alone_does_not_trigger_a_briefing(self):
+        bot_id, client_id = self._create(callback_url="https://app.example.com/hook")
+        PIPECAT_PROCESSES[client_id] = FakeProcess()
+        transcripts = os.path.join(self.state_dir.name, "transcripts")
+        os.makedirs(transcripts, exist_ok=True)
+        with open(os.path.join(transcripts, f"{client_id}.json"), "w") as handle:
+            json.dump({"bot_id": client_id, "persona_name": "RepMe", "messages": [
+                {"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]}, handle)
+        sent = []
+
+        async def fake_send(self, event, data):
+            sent.append(data)
+            return True
+
+        # The legacy call summary (pre-existing, server OpenAI key) is untouched
+        # here; only the briefing must stay off when it was not asked for.
+        with (
+            mock.patch("app.routes.generate_briefing") as briefing,
+            mock.patch("app.routes._generate_summary_sync"),
+            mock.patch("app.routes.CustomerEventSink.send", new=fake_send),
+        ):
+            self.client.post("/webhook", json={"event": "bot.completed", "data": {"bot_id": bot_id}})
+        briefing.assert_not_called()
+        self.assertEqual(len(sent), 1)
+        self.assertIsNone(sent[0]["briefing"])
+
     def test_call_end_without_a_representative_keeps_the_legacy_summary_path(self):
         bot_id, client_id = self._create()
         PIPECAT_PROCESSES[client_id] = FakeProcess()
@@ -219,6 +277,9 @@ class RepresentativeApiTest(unittest.TestCase):
         for bad in (
             {"language": "English"},
             {"callback_url": "http://public.example.com/hook"},
+            {"callback_url": "https://127.0.0.1/hook"},
+            {"callback_url": "https://localhost/hook"},
+            {"callback_url": "https://api.internal/hook"},
             {"authority": {"owner_name": "Ada", "extra": 1}},
             {"briefing": {"language": "x-"}},
         ):

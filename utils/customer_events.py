@@ -14,11 +14,16 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
+import socket
 import uuid
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
+
+from utils.ssrf import build_pinned_connector, is_private_ip
 
 SIGNATURE_HEADER = "x-speaking-bot-signature"
 EVENT_HEADER = "x-speaking-bot-event"
@@ -29,6 +34,58 @@ EVENT_UTTERANCE = "speaking_bot.utterance"
 EVENT_ESCALATION = "speaking_bot.escalation"
 EVENT_OWNER_MESSAGE_DELIVERED = "speaking_bot.owner_message_delivered"
 EVENT_ENDED = "speaking_bot.ended"
+
+
+def private_urls_allowed() -> bool:
+    return os.getenv("CALLBACK_ALLOW_PRIVATE_URLS", "").strip().lower() in {"1", "true", "yes"}
+
+
+class CallbackRefused(ValueError):
+    """The callback host is private, local or unresolvable."""
+
+
+async def resolve_callback(url: str) -> list[str] | None:
+    """Addresses the callback may be sent to, or None when any address is fine.
+
+    Mirrors the prompt-data and MCP checks: a literal private IP is refused
+    outright, a hostname is resolved here and every address checked, and the
+    returned list pins the connection so the request goes to a checked
+    address and nothing else.
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise CallbackRefused(f"callback_url is not an http(s) URL: {url}")
+    if private_urls_allowed():
+        return None
+    try:
+        if is_private_ip(host):
+            raise CallbackRefused(f"callback host is private or local: {host}")
+        return [host]
+    except ValueError as error:
+        if isinstance(error, CallbackRefused):
+            raise
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        addresses = await asyncio.get_running_loop().getaddrinfo(
+            host, port, type=socket.SOCK_STREAM
+        )
+    except socket.gaierror as error:
+        raise CallbackRefused(f"could not resolve callback host {host}: {error}") from error
+    resolved: list[str] = []
+    for address in addresses:
+        ip = address[4][0]
+        if is_private_ip(ip):
+            raise CallbackRefused(f"callback host {host} resolves to a private address")
+        if ip not in resolved:
+            resolved.append(ip)
+    return resolved
+
+
+async def open_session(url: str) -> aiohttp.ClientSession:
+    """A session whose connections to ``url`` are pinned to checked addresses."""
+    connector = build_pinned_connector(aiohttp, url, await resolve_callback(url))
+    return aiohttp.ClientSession(connector=connector)
 
 
 def sign_body(secret: str, body: bytes) -> str:
@@ -80,7 +137,13 @@ async def post_event(
         headers[SIGNATURE_HEADER] = sign_body(secret, body)
 
     own_session = session is None
-    session = session or aiohttp.ClientSession()
+    if own_session:
+        try:
+            session = await open_session(url)
+        except CallbackRefused as error:
+            if log:
+                log(f"[EVENTS] {envelope.get('event')} not sent: {error}")
+            return False
     try:
         for attempt in range(len(retry_delays) + 1):
             try:
@@ -89,11 +152,15 @@ async def post_event(
                     data=body,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECS),
+                    # A redirect would resend the signed body elsewhere; a 3xx
+                    # is therefore a failed delivery, not a hop to follow.
+                    allow_redirects=False,
                 ) as response:
                     if response.status < 500:
-                        if response.status >= 400 and log:
-                            log(f"[EVENTS] {envelope.get('event')} rejected with {response.status}")
-                        return response.status < 400
+                        accepted = 200 <= response.status < 300
+                        if not accepted and log:
+                            log(f"[EVENTS] {envelope.get('event')} not accepted ({response.status})")
+                        return accepted
                     if log:
                         log(f"[EVENTS] {envelope.get('event')} got {response.status}, retrying")
             except (TimeoutError, aiohttp.ClientError) as error:
@@ -148,7 +215,13 @@ class CustomerEventSink:
             return None
         envelope = self.envelope(event, data)
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            try:
+                self._session = await open_session(self.url)
+            except CallbackRefused as error:
+                if self._log:
+                    self._log(f"[EVENTS] callback disabled: {error}")
+                self.url = None
+                return None
         task = asyncio.create_task(
             post_event(
                 self.url, envelope, secret=self.secret, session=self._session, log=self._log

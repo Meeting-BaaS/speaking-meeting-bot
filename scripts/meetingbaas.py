@@ -1363,7 +1363,8 @@ async def main(
     # FIRST so it gates the other start strategies.
     respond_mode = str((persona or {}).get("respond_mode") or "always").lower()
     if respond_mode == "mentioned":
-        bot_display_name = (persona.get("name") if persona else None) or persona_name
+        # The name participants say is the one the meeting shows (bot_display_name,
+        # resolved above), not the persona's.
         wake_window = _coerce_float(os.getenv("RESPOND_MENTION_WINDOW_SECS"), 10.0)
         start_strategies.append(
             WakePhraseUserTurnStartStrategy(
@@ -1429,7 +1430,7 @@ async def main(
     # reply while a sibling is speaking (see FloorGate / utils/floor.py).
     floor_gate = FloorGate(
         meeting_url=meeting_url,
-        my_name=(persona.get("name") if persona else None) or persona_name,
+        my_name=bot_display_name,
     )
 
     # Deterministic log of when THIS bot injects audio (grep "[SPEECH-INJECT]").
@@ -1451,7 +1452,7 @@ async def main(
     # it only hears turns within a window after someone says the bot's name.
     speaker_labeler = SpeakerLabeler(
         meeting_url=meeting_url,
-        my_name=(persona.get("name") if persona else None) or persona_name,
+        my_name=bot_display_name,
     )
     utterance_tap = UtteranceTap(sink)
     usage_meter = UsageMeter(ledger)

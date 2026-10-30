@@ -169,7 +169,7 @@
           "bots"
         ],
         "summary": "Send Owner Message",
-        "description": "Have the bot relay a message from its owner to the meeting.\n\nFor things that come up while the owner is away: \"tell them I'll join at\nhalf past\", \"we can go with option B\". The bot says it in its own words,\nbriefly, and the text appears in the transcript as its turn.",
+        "description": "Have the bot relay a message from its owner to the meeting.\n\nFor things that come up while the owner is away: \"tell them I'll join at\nhalf past\", \"we can go with option B\". The bot says it in its own words,\nbriefly, and the text appears in the transcript as its turn. Only the API\nkey that created the bot may use this.",
         "operationId": "send_owner_message_bots__bot_id__messages_post",
         "parameters": [
           {
@@ -225,7 +225,7 @@
           "bots"
         ],
         "summary": "List Escalations",
-        "description": "The decisions the bot has handed back to its owner during this call.\n\nEach entry carries the question, its category, who asked, and the owner's\nanswer once one was posted. The same list is in the call-end event.",
+        "description": "The decisions the bot has handed back to its owner during this call.\n\nEach entry carries the question, its category, who asked, and the owner's\nanswer once one was posted. The same list is in the call-end event. Only\nthe API key that created the bot may read it.",
         "operationId": "list_escalations_bots__bot_id__escalations_get",
         "parameters": [
           {
@@ -276,7 +276,7 @@
           "bots"
         ],
         "summary": "Answer Escalation",
-        "description": "Answer an escalation the bot raised.\n\nThe bot tells the participants the owner's answer, word for word in\nsubstance, and the escalation is marked answered in the briefing. An\nescalation that is never answered stays open and is reported as\nunresolved; the bot never assumes approval.",
+        "description": "Answer an escalation the bot raised.\n\nThe bot tells the participants the owner's answer, word for word in\nsubstance, and the escalation is marked answered in the briefing. An\nescalation that is never answered stays open and is reported as\nunresolved; the bot never assumes approval. Only the API key that created\nthe bot may answer.",
         "operationId": "answer_escalation_bots__bot_id__escalations__escalation_id__response_post",
         "parameters": [
           {
@@ -341,7 +341,7 @@
           "bots"
         ],
         "summary": "Get Bot Usage",
-        "description": "What the bot has consumed so far on speech-to-text, text-to-speech and the LLM.\n\nLive while the bot is in the call, final once it has left. key_sources says\nper provider whether the bot ran on the server's key (billed by Meeting\nBaaS) or on one the request brought.",
+        "description": "What the bot has consumed so far on speech-to-text, text-to-speech and the LLM.\n\nLive while the bot is in the call, final once it has left. key_sources says\nper provider whether the bot ran on the server's key (billed by Meeting\nBaaS) or on one the request brought. Only the API key that created the bot\nmay read it.",
         "operationId": "get_bot_usage_bots__bot_id__usage_get",
         "parameters": [
           {
@@ -387,7 +387,7 @@
           "bots"
         ],
         "summary": "Get Bot Briefing",
-        "description": "The post-meeting briefing: summary, decisions, actions, open items, what the\nbot said and what it escalated. Written once the call ends, on the bot's own\nLLM key; also delivered in the speaking_bot.ended event.",
+        "description": "The post-meeting briefing: summary, decisions, actions, open items, what the\nbot said and what it escalated. Written once the call ends, on the bot's own\nLLM key; also delivered in the speaking_bot.ended event. Only the API key\nthat created the bot may read it.",
         "operationId": "get_bot_briefing_bots__bot_id__briefing_get",
         "parameters": [
           {
@@ -853,7 +853,7 @@
               }
             ],
             "title": "Callback Url",
-            "description": "Where this API posts the bot's own events: each utterance it speaks, each escalation to its owner, and the end of the call with the usage report and briefing. Signed with callback_secret when one is given."
+            "description": "Where this API posts the bot's own events: each utterance it speaks, each escalation to its owner, and the end of the call with the usage report and briefing. An https URL on a public host; signed with callback_secret when one is given. Redirects are not followed."
           },
           "callback_secret": {
             "anyOf": [
@@ -892,7 +892,7 @@
                 "type": "null"
               }
             ],
-            "description": "Post-meeting briefing settings. Set (even empty) to get a briefing in the call-end event and at GET /bots/{bot_id}/briefing."
+            "description": "Post-meeting briefing settings. Only bots that set this (even empty) get a briefing, in the call-end event and at GET /bots/{bot_id}/briefing."
           }
         },
         "additionalProperties": false,

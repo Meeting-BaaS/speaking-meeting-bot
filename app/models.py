@@ -1,11 +1,14 @@
 """Data models for the Speaking Meeting Bot API."""
 
+import os
 from datetime import datetime
 from ipaddress import ip_address
 from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+
+from utils.ssrf import is_private_ip
 
 
 def _validate_meeting_url(value: str) -> str:
@@ -324,15 +327,41 @@ LANGUAGE_PATTERN = r"^(multi|[a-z]{2,3}(-[A-Za-z0-9]{2,8})*)$"
 DEFAULT_BRIEFING_LANGUAGE = "en"
 
 
+def callback_private_urls_allowed() -> bool:
+    """CALLBACK_ALLOW_PRIVATE_URLS=1: local development against a callback on this machine."""
+    return os.getenv("CALLBACK_ALLOW_PRIVATE_URLS", "").strip().lower() in {"1", "true", "yes"}
+
+
 def _validate_callback_url(value: str | None) -> str | None:
+    """An https URL to a public host, unless the operator allows private ones.
+
+    The API posts to this address with the caller's secret and from inside the
+    cluster, so loopback, private and link-local destinations are refused by
+    default (the admin drain port, for one, must not be reachable this way).
+    Resolved addresses are checked again at send time (utils/customer_events).
+    """
     if value is None:
         return value
     normalized = value.strip()
     parsed = urlparse(normalized)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise ValueError("callback_url must be an http(s) URL with a host")
-    if parsed.scheme == "http" and not _is_private_or_local_http_url(normalized):
-        raise ValueError("callback_url must use https:// unless it is private or local")
+    if callback_private_urls_allowed():
+        return normalized
+    if parsed.scheme != "https":
+        raise ValueError("callback_url must use https://")
+    host = parsed.hostname
+    try:
+        private_literal = is_private_ip(host)
+    except ValueError:
+        # A hostname, not an IP literal: resolved and checked again at send time.
+        private_literal = False
+    if (
+        private_literal
+        or host == "localhost"
+        or host.endswith((".localhost", ".local", ".internal"))
+    ):
+        raise ValueError("callback_url must point to a public host")
     return normalized
 
 
@@ -592,7 +621,8 @@ class BotRequest(BaseModel):
         description=(
             "Where this API posts the bot's own events: each utterance it speaks, "
             "each escalation to its owner, and the end of the call with the usage "
-            "report and briefing. Signed with callback_secret when one is given."
+            "report and briefing. An https URL on a public host; signed with "
+            "callback_secret when one is given. Redirects are not followed."
         ),
     )
     callback_secret: SecretStr | None = _secret_field(
@@ -610,8 +640,8 @@ class BotRequest(BaseModel):
     briefing: BriefingConfig | None = Field(
         None,
         description=(
-            "Post-meeting briefing settings. Set (even empty) to get a briefing "
-            "in the call-end event and at GET /bots/{bot_id}/briefing."
+            "Post-meeting briefing settings. Only bots that set this (even empty) "
+            "get a briefing, in the call-end event and at GET /bots/{bot_id}/briefing."
         ),
     )
 

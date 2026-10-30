@@ -1,6 +1,8 @@
 import asyncio
 import json
+import os
 import unittest
+from unittest import mock
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -49,8 +51,52 @@ class _Receiver:
 
 
 class DeliveryTest(unittest.TestCase):
+    def setUp(self):
+        # The test receiver lives on loopback, which deliveries refuse by default.
+        self.env = mock.patch.dict(os.environ, {"CALLBACK_ALLOW_PRIVATE_URLS": "1"})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+
     def _run(self, coroutine):
         return asyncio.run(coroutine)
+
+    def test_private_destinations_are_refused_by_default(self):
+        async def scenario():
+            with mock.patch.dict(os.environ, {"CALLBACK_ALLOW_PRIVATE_URLS": ""}):
+                for url in ("http://127.0.0.1:7015/drain", "https://10.0.0.5/hook", "https://localhost/hook"):
+                    ok = await post_event(url, build_event("x", {}, bot_id="c1"), retry_delays=())
+                    self.assertFalse(ok, url)
+                sink = CustomerEventSink("http://127.0.0.1:7015/drain", bot_id="c1")
+                self.assertIsNone(await sink.emit("x", {}))
+                self.assertFalse(sink.enabled)
+
+        self._run(scenario())
+
+    def test_redirects_are_not_followed(self):
+        async def scenario():
+            hops = []
+
+            async def redirect(request):
+                hops.append(request.path)
+                return web.Response(status=307, headers={"Location": "/elsewhere"})
+
+            async def elsewhere(request):
+                hops.append(request.path)
+                return web.Response(status=204)
+
+            app = web.Application()
+            app.router.add_post("/hook", redirect)
+            app.router.add_post("/elsewhere", elsewhere)
+            async with TestServer(app) as server:
+                ok = await post_event(
+                    str(server.make_url("/hook")), build_event("x", {}, bot_id="c1"), secret="s", retry_delays=()
+                )
+                self.assertFalse(ok)
+                self.assertEqual(hops, ["/hook"])
+
+        self._run(scenario())
 
     def test_posts_signed_body_and_retries_server_errors(self):
         async def scenario():

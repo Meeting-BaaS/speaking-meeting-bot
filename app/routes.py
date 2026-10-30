@@ -77,6 +77,7 @@ from utils.runtime import (
 # Import the new persona detail extraction service
 from app.services.persona_detail_extraction import extract_persona_details_from_prompt
 from app.display_name import resolve_display_name
+from app.ownership import OWNER_DIGEST_KEY, key_digest, owned_by
 from app.peer_forwarding import forward_bot_request, forward_leave_request, is_forwarded
 from core.drain import is_draining
 from utils.pod_routing import with_pod_prefix
@@ -469,6 +470,8 @@ async def join_meeting(request: BotRequest, client_request: Request):
     logger.info(f"Display name in the call: {display_name}")
     # The child introduces itself by this name (authority prompt), not the persona's.
     resolved_persona_data["display_name"] = display_name
+    # Only the creating key may drive or read this bot through the per-bot routes.
+    resolved_persona_data[OWNER_DIGEST_KEY] = key_digest(api_key)
 
     MEETING_DETAILS[bot_client_id] = (
         request.meeting_url,
@@ -1110,7 +1113,7 @@ async def meetingbaas_webhook(request: Request):
             elif not transcript_file:
                 logger.warning(f"No transcript file found for bot {bot_id}")
 
-            usage = _finalize_usage(internal_client_id, bot_id)
+            usage = _finalize_usage(internal_client_id, bot_id, persona)
             await _send_call_ended(
                 persona,
                 credentials,
@@ -1136,6 +1139,20 @@ def _live_client_id(meetingbaas_bot_id: str) -> str | None:
     return None
 
 
+def _owned_client_id(meetingbaas_bot_id: str, api_key: str | None) -> str | None:
+    """The live bot's client id, only for the key that created it."""
+    client_id = _live_client_id(meetingbaas_bot_id)
+    if client_id is None:
+        return None
+    details = MEETING_DETAILS.get(client_id) or ()
+    persona = details[5] if len(details) > 5 and isinstance(details[5], dict) else {}
+    return client_id if owned_by(persona, api_key) else None
+
+
+def _without_owner(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in record.items() if k != OWNER_DIGEST_KEY}
+
+
 def _not_found(bot_id: str) -> JSONResponse:
     return JSONResponse(
         content={"message": f"No live bot with id {bot_id}", "status": "error"},
@@ -1153,15 +1170,16 @@ def _not_found(bot_id: str) -> JSONResponse:
         404: {"description": "No live bot with that ID"},
     },
 )
-async def send_owner_message(bot_id: str, request: OwnerMessageRequest):
+async def send_owner_message(bot_id: str, request: OwnerMessageRequest, client_request: Request):
     """
     Have the bot relay a message from its owner to the meeting.
 
     For things that come up while the owner is away: "tell them I'll join at
     half past", "we can go with option B". The bot says it in its own words,
-    briefly, and the text appears in the transcript as its turn.
+    briefly, and the text appears in the transcript as its turn. Only the API
+    key that created the bot may use this.
     """
-    client_id = _live_client_id(bot_id)
+    client_id = _owned_client_id(bot_id, client_request.state.api_key)
     if not client_id:
         return _not_found(bot_id)
     record = append_owner_message(get_state_dir(), client_id, request.text)
@@ -1175,14 +1193,15 @@ async def send_owner_message(bot_id: str, request: OwnerMessageRequest):
     response_model=list[dict[str, Any]],
     responses={404: {"description": "No live bot with that ID"}},
 )
-async def list_escalations(bot_id: str):
+async def list_escalations(bot_id: str, client_request: Request):
     """
     The decisions the bot has handed back to its owner during this call.
 
     Each entry carries the question, its category, who asked, and the owner's
-    answer once one was posted. The same list is in the call-end event.
+    answer once one was posted. The same list is in the call-end event. Only
+    the API key that created the bot may read it.
     """
-    client_id = _live_client_id(bot_id)
+    client_id = _owned_client_id(bot_id, client_request.state.api_key)
     if not client_id:
         return _not_found(bot_id)
     return read_escalations(get_state_dir(), client_id)
@@ -1199,7 +1218,10 @@ async def list_escalations(bot_id: str):
     },
 )
 async def answer_escalation(
-    bot_id: str, escalation_id: str, request: EscalationResponseRequest
+    bot_id: str,
+    escalation_id: str,
+    request: EscalationResponseRequest,
+    client_request: Request,
 ):
     """
     Answer an escalation the bot raised.
@@ -1207,9 +1229,10 @@ async def answer_escalation(
     The bot tells the participants the owner's answer, word for word in
     substance, and the escalation is marked answered in the briefing. An
     escalation that is never answered stays open and is reported as
-    unresolved; the bot never assumes approval.
+    unresolved; the bot never assumes approval. Only the API key that created
+    the bot may answer.
     """
-    client_id = _live_client_id(bot_id)
+    client_id = _owned_client_id(bot_id, client_request.state.api_key)
     if not client_id:
         return _not_found(bot_id)
     known = {item.get("escalation_id") for item in read_escalations(get_state_dir(), client_id)}
@@ -1236,21 +1259,32 @@ async def answer_escalation(
     response_model=UsageReport,
     responses={404: {"description": "No usage recorded for that bot yet"}},
 )
-async def get_bot_usage(bot_id: str):
+async def get_bot_usage(bot_id: str, client_request: Request):
     """
     What the bot has consumed so far on speech-to-text, text-to-speech and the LLM.
 
     Live while the bot is in the call, final once it has left. key_sources says
     per provider whether the bot ran on the server's key (billed by Meeting
-    BaaS) or on one the request brought.
+    BaaS) or on one the request brought. Only the API key that created the bot
+    may read it.
     """
-    usage = load_usage(usage_dir(get_state_dir()), bot_id, _live_client_id(bot_id))
+    api_key = client_request.state.api_key
+    directory = usage_dir(get_state_dir())
+    client_id = _owned_client_id(bot_id, api_key)
+    if client_id:
+        # Live: ownership comes from the registered bot, the file may predate
+        # the final report and carry no digest yet.
+        usage = load_usage(directory, client_id, bot_id)
+    else:
+        usage = load_usage(directory, bot_id)
+        if usage is not None and not owned_by(usage, api_key):
+            usage = None
     if usage is None:
         return JSONResponse(
             content={"message": f"No usage recorded for bot {bot_id}", "status": "error"},
             status_code=404,
         )
-    return usage
+    return _without_owner(usage)
 
 
 @router.get(
@@ -1259,27 +1293,28 @@ async def get_bot_usage(bot_id: str):
     response_model=BriefingReport,
     responses={404: {"description": "No briefing for that bot (yet)"}},
 )
-async def get_bot_briefing(bot_id: str):
+async def get_bot_briefing(bot_id: str, client_request: Request):
     """
     The post-meeting briefing: summary, decisions, actions, open items, what the
     bot said and what it escalated. Written once the call ends, on the bot's own
-    LLM key; also delivered in the speaking_bot.ended event.
+    LLM key; also delivered in the speaking_bot.ended event. Only the API key
+    that created the bot may read it.
     """
     briefing = load_briefing(get_state_dir(), bot_id)
+    if briefing is not None and not owned_by(briefing, client_request.state.api_key):
+        briefing = None
     if briefing is None:
         return JSONResponse(
             content={"message": f"No briefing for bot {bot_id}", "status": "error"},
             status_code=404,
         )
-    return briefing
+    return _without_owner(briefing)
 
 
 def _wants_briefing(persona: Dict[str, Any]) -> bool:
-    """A briefing is on when asked for, or implied by authority/callback, unless disabled."""
+    """Only a bot that asked for a briefing gets one: it is an LLM call on a key."""
     config = persona.get("briefing")
-    if isinstance(config, dict):
-        return config.get("enabled", True) is not False
-    return bool(persona.get("authority") or persona.get("callback_url"))
+    return isinstance(config, dict) and config.get("enabled", True) is not False
 
 
 def _llm_key_for(persona: Dict[str, Any], credentials: Dict[str, str]) -> str | None:
@@ -1329,6 +1364,7 @@ def _generate_briefing_sync(
         )
         briefing["bot_id"] = bot_id
         briefing["escalations_raised"] = escalations
+        briefing[OWNER_DIGEST_KEY] = persona.get(OWNER_DIGEST_KEY)
         save_briefing(get_state_dir(), bot_id, briefing)
         logger.info(f"[WEBHOOK] Briefing written for bot {bot_id}")
         return briefing
@@ -1338,13 +1374,16 @@ def _generate_briefing_sync(
         return None
 
 
-def _finalize_usage(internal_client_id: str, bot_id: str) -> Dict[str, Any] | None:
+def _finalize_usage(
+    internal_client_id: str, bot_id: str, persona: Dict[str, Any]
+) -> Dict[str, Any] | None:
     """Close the child's usage ledger and file it under the MeetingBaas bot id too."""
     directory = usage_dir(get_state_dir())
     usage = load_usage(directory, internal_client_id)
     if usage is None:
         return None
     usage["meetingbaas_bot_id"] = bot_id
+    usage[OWNER_DIGEST_KEY] = persona.get(OWNER_DIGEST_KEY)
     if not usage.get("ended_at"):
         usage["ended_at"] = datetime.now().timestamp()
         usage["duration_seconds"] = round(
@@ -1380,8 +1419,8 @@ async def _send_call_ended(
         {
             "status": "failed" if failed else "completed",
             "reason": reason,
-            "usage": usage,
-            "briefing": briefing,
+            "usage": _without_owner(usage) if usage else None,
+            "briefing": _without_owner(briefing) if briefing else None,
             "escalations": read_escalations(get_state_dir(), internal_client_id),
         },
     )
