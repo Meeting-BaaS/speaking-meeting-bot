@@ -8,6 +8,8 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from utils.customer_events import (
+    CallbackRefused,
+    CallbackUnresolved,
     EVENT_HEADER,
     EVENT_UTTERANCE,
     SIGNATURE_HEADER,
@@ -71,6 +73,27 @@ class DeliveryTest(unittest.TestCase):
                 sink = CustomerEventSink("http://127.0.0.1:7015/drain", bot_id="c1")
                 self.assertIsNone(await sink.emit("x", {}))
                 self.assertFalse(sink.enabled)
+
+        self._run(scenario())
+
+    def test_an_unresolvable_host_drops_the_event_but_keeps_the_sink(self):
+        # Resolution is mocked: some resolvers answer NXDOMAIN with a private
+        # address, which would turn this into the permanent case.
+        async def scenario():
+            sink = CustomerEventSink("https://hook.example.com/x", bot_id="c1")
+            with mock.patch(
+                "utils.customer_events.resolve_callback",
+                new=mock.AsyncMock(side_effect=CallbackUnresolved("dns down")),
+            ):
+                self.assertIsNone(await sink.emit("x", {}))
+            self.assertTrue(sink.enabled)
+            with mock.patch(
+                "utils.customer_events.resolve_callback",
+                new=mock.AsyncMock(side_effect=CallbackRefused("private")),
+            ):
+                self.assertIsNone(await sink.emit("x", {}))
+            self.assertFalse(sink.enabled)
+            await sink.close()
 
         self._run(scenario())
 

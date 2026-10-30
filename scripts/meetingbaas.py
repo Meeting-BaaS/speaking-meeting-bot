@@ -1324,8 +1324,10 @@ async def main(
     # deprecated since pipecat 1.9 and stops working in 2.0.
     messages = []
 
-    # Create the context object - with or without tools
-    if enable_tools and tools:
+    # Create the context object - with or without tools. enable_tools already
+    # decided what went into the schema list; a representative's escalation
+    # tool is in it regardless, and the model must see it.
+    if tools:
         context = LLMContext(messages, tools)
     else:
         context = LLMContext(messages)
