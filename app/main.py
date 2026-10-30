@@ -16,6 +16,9 @@ from app.websockets import websocket_router
 from meetingbaas_pipecat.utils.logger import configure_logger
 from utils.runtime import build_public_base_url, parse_cors_origins
 from utils.ngrok import load_ngrok_urls
+from core.admin_server import start_admin_server_from_env
+from core.drain import is_draining
+from utils.pod_routing import pod_name
 
 # Configure logging with the prettier logger
 logger = configure_logger()
@@ -96,6 +99,10 @@ def create_app() -> FastAPI:
         from core.process import start_pipecat_warmup
 
         start_pipecat_warmup()
+
+    @app.on_event("startup")
+    async def _serve_rollout_admin() -> None:
+        start_admin_server_from_env()
 
     # Set the server URL for the OpenAPI schema
     app.openapi_schema = None  # Clear any existing schema
@@ -228,6 +235,7 @@ def create_app() -> FastAPI:
             "status": "ok",
             "service": "speaking-meeting-bot",
             "version": APP_VERSION,
+            "pod": pod_name(),
             "public_base_url": public_base_url,
             "endpoints": [
                 {
@@ -267,10 +275,23 @@ def create_app() -> FastAPI:
     @app.get("/ready", tags=["system"], include_in_schema=False)
     async def ready(request: Request):
         """Readiness endpoint with externally visible base URL resolution."""
+        # Draining: the Service must stop sending new bots here while the
+        # live ones finish, so readiness fails on purpose.
+        if is_draining():
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "status": "draining",
+                    "service": "speaking-meeting-bot",
+                    "version": APP_VERSION,
+                    "pod": pod_name(),
+                },
+            )
         return {
             "status": "ready",
             "service": "speaking-meeting-bot",
             "version": APP_VERSION,
+            "pod": pod_name(),
             "public_base_url": build_public_base_url(
                 request, configured_base_url=os.getenv("BASE_URL")
             ),
