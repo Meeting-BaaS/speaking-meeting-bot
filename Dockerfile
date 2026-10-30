@@ -49,4 +49,8 @@ ENV PORT=7014
 
 EXPOSE ${PORT}
 
-CMD poetry run uvicorn app:app --host 0.0.0.0 --port ${PORT:-7014} --ws-ping-interval 20 --ws-ping-timeout 60
+# exec so uvicorn is PID 1 and receives SIGTERM. Under the shell form the
+# signal stopped at /bin/sh, uvicorn never shut down, and a pod being replaced
+# sat in Terminating for the whole grace period (four hours on the
+# StatefulSet chart) while the service had no ready endpoint.
+CMD exec poetry run uvicorn app:app --host 0.0.0.0 --port ${PORT:-7014} --ws-ping-interval 20 --ws-ping-timeout 60
