@@ -82,6 +82,52 @@ environment), never written to the state dir, never logged, and never echoed —
 a 422 on a bad body omits the input. Omit a key to use the server's own. If the
 API restarts mid-call, a respawned pipeline falls back to the server keys.
 
+### Send a bot on someone's behalf (representative mode)
+
+`authority` turns the persona into a representative: it introduces itself as an AI attending for `owner_name`, states only `approved_positions`, and calls its `escalate_to_owner` tool for anything in `escalate_on` (spending, commitments and deadlines are escalated even when not listed). `callback_url` receives the bot's own events, `briefing` asks for a post-meeting briefing, `language` sets what it listens for.
+
+```bash
+curl -s -X POST "$BASE/bots" -H "x-meeting-baas-api-key: $KEY" -H 'content-type: application/json' -d '{
+  "meeting_url": "https://meet.google.com/abc-defg-hij",
+  "bot_name": "RepMe",
+  "prompt": "You attend team meetings for Ada Okafor.",
+  "respond_mode": "mentioned",
+  "language": "en",
+  "authority": {
+    "owner_name": "Ada Okafor",
+    "approved_positions": ["Ada supports option B for the vendor choice"],
+    "escalate_on": ["any spending above 500 dollars"],
+    "forbidden": ["agreeing to new deadlines"]
+  },
+  "briefing": {"language": "en"},
+  "callback_url": "https://app.example.com/hooks/speaking-bot",
+  "callback_secret": "<shared secret>"
+}'
+```
+
+Events posted to `callback_url` (JSON, header `x-speaking-bot-event`, and `x-speaking-bot-signature: sha256=<HMAC-SHA256 of the body with callback_secret>`):
+
+| Event | When | `data` |
+|---|---|---|
+| `speaking_bot.utterance` | each reply the bot spoke | `text`, `started_at`, `ended_at` |
+| `speaking_bot.escalation` | the bot handed a decision back | `escalation_id`, `question`, `category`, `context` |
+| `speaking_bot.owner_message_delivered` | an owner message or answer was relayed | `message_id`, `type`, `escalation_id` |
+| `speaking_bot.ended` | the call is over | `status`, `reason`, `usage`, `briefing`, `escalations` |
+
+While the bot is in the call:
+
+```bash
+# relay something from the owner ("tell them I'll join at half past")
+curl -s -X POST "$BASE/bots/$BOT/messages" -H "x-meeting-baas-api-key: $KEY" -H 'content-type: application/json' -d '{"text": "Go with option B"}'
+# what it escalated, and answer one (the bot relays the answer; unanswered ones stay open, never assumed approved)
+curl -s "$BASE/bots/$BOT/escalations" -H "x-meeting-baas-api-key: $KEY"
+curl -s -X POST "$BASE/bots/$BOT/escalations/$ESCALATION/response" -H "x-meeting-baas-api-key: $KEY" -H 'content-type: application/json' -d '{"response": "No, hold at 500", "decision": "declined"}'
+# provider usage so far: STT seconds, TTS characters, LLM tokens, and whose key each ran on
+curl -s "$BASE/bots/$BOT/usage" -H "x-meeting-baas-api-key: $KEY"
+```
+
+After the call, `GET /bots/{bot_id}/briefing` returns the briefing (summary, decisions, actions, unresolved, what the representative said, escalations, coverage notes), written on the bot's own LLM key, and `GET /bots/{bot_id}/usage` the final usage report. Files land under the state dir in `usage/`, `briefings/`, `escalations/` and `owner_messages/`.
+
 ## Remove a bot — `DELETE /bots/{bot_id}`
 
 Leaves the call, closes the socket, kills the pipeline process.

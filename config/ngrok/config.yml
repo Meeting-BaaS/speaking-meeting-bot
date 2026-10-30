@@ -4,6 +4,8 @@ tunnels:
   proxy1:
     proto: http
     addr: 7014
+  # Two public URLs so two bots fit the free tier; both reach the one server,
+  # which tells bots apart by client_id.
   proxy2:
     proto: http
-    addr: 7015
+    addr: 7014

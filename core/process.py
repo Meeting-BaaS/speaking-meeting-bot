@@ -173,6 +173,11 @@ def start_pipecat_process(
     child_env = os.environ.copy()
     if mcp_runtime_headers:
         child_env["MCP_RUNTIME_HEADERS_JSON"] = json.dumps(mcp_runtime_headers)
+    # The callback secret travels with the provider keys: memory only in the
+    # API, environment only in the child, never in the persona payload file.
+    callback_secret = (credentials or {}).get("callback_secret")
+    if callback_secret:
+        child_env["CUSTOMER_CALLBACK_SECRET"] = callback_secret
     if credentials:
         # Caller-supplied keys override the server's for this child only. The
         # runner keeps reading the same env vars, so it needs no change.

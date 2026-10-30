@@ -15,11 +15,16 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from app.models import (
+    AcceptedResponse,
     BotRequest,
+    BriefingReport,
+    EscalationResponseRequest,
     JoinResponse,
     LeaveBotRequest,
+    OwnerMessageRequest,
     PersonaImageRequest,
     PersonaImageResponse,
+    UsageReport,
 )
 from app.services.image_service import image_service
 from app.services.prompt_context import (
@@ -28,15 +33,24 @@ from app.services.prompt_context import (
     merge_context_blocks,
 )
 from app.services.mcp_presets import resolve_mcp_config
+from utils.authority import (
+    MESSAGE_TYPE_ESCALATION_RESPONSE,
+    append_owner_message,
+    read_escalations,
+)
+from utils.briefing import generate_briefing, load_briefing, save_briefing
+from utils.customer_events import EVENT_ENDED, CustomerEventSink
 from utils.llm_config import (
+    PROVIDER_KEY_ENVS,
     missing_llm_provider_credential,
     resolve_llm_provider,
 )
+from utils.usage_meter import key_sources, load_usage, save_usage, usage_dir
 from utils.mcp_client import split_mcp_runtime_headers
 from config.persona_utils import persona_manager
-from core.connection import BOT_CREDENTIALS, MEETING_DETAILS, PIPECAT_PROCESSES, registry
-from core.process import start_pipecat_process, terminate_process_gracefully
-from core.router import router as message_router
+from core.connection import BOT_CREDENTIALS, MEETING_DETAILS, PIPECAT_PROCESSES
+from core.lifecycle import ShutdownReason, shutdown_bot
+from core.process import start_pipecat_process
 
 # Import from the app module (will be defined in __init__.py)
 from meetingbaas_pipecat.utils.logger import logger
@@ -52,7 +66,6 @@ from utils.ngrok import (
     LOCAL_DEV_MODE,
     determine_websocket_url,
     log_ngrok_status,
-    release_ngrok_url,
     update_ngrok_client_id,
 )
 from utils.runtime import (
@@ -64,6 +77,15 @@ from utils.runtime import (
 # Import the new persona detail extraction service
 from app.services.persona_detail_extraction import extract_persona_details_from_prompt
 from app.display_name import resolve_display_name
+from app.ownership import OWNER_DIGEST_KEY, key_digest, owned_by
+from app.peer_forwarding import (
+    forward_bot_request,
+    forward_leave_request,
+    forward_scoped_request,
+    is_forwarded,
+)
+from core.drain import is_draining
+from utils.pod_routing import with_pod_prefix
 
 router = APIRouter()
 
@@ -98,6 +120,19 @@ async def join_meeting(request: BotRequest, client_request: Request):
     # Get API key from request state (set by middleware)
     api_key = client_request.state.api_key
 
+    # A pod being rolled out takes no new bots; the owner pod of a meeting
+    # takes every bot sent to it, so sibling bots share one floor file.
+    if is_draining():
+        return JSONResponse(
+            content={"message": "This instance is draining for a rollout, retry", "status": "error"},
+            status_code=503,
+        )
+    forwarded = await forward_bot_request(
+        request.meeting_url, await client_request.body(), client_request
+    )
+    if forwarded is not None:
+        return forwarded
+
     # Log local dev mode status
     if LOCAL_DEV_MODE:
         logger.info("🔍 Running in LOCAL_DEV_MODE - will prioritize ngrok URLs")
@@ -108,6 +143,9 @@ async def join_meeting(request: BotRequest, client_request: Request):
     websocket_url, temp_client_id = determine_websocket_url(
         request.websocket_url, client_request
     )
+    # Our own base URL gets this pod's prefix so the audio socket lands here.
+    if not request.websocket_url:
+        websocket_url = with_pod_prefix(websocket_url)
 
     logger.info(f"Starting bot for meeting {request.meeting_url}")
     logger.info(f"WebSocket URL: {websocket_url}")
@@ -171,16 +209,26 @@ async def join_meeting(request: BotRequest, client_request: Request):
                 f"Dynamically created persona '{persona_name_for_logging}' from prompt."
             )
         else:
-            # Fallback if prompt details extraction fails or returns unexpected type
-            logger.warning(
-                "Failed to extract persona details from custom prompt or received unexpected type. Falling back to default bot persona."
-            )
-            resolved_persona_data = persona_manager.get_persona("baas_onboarder")
-            resolved_persona_data["is_temporary"] = (
-                False  # Ensure fallback is not marked temporary
-            )
-            persona_name_for_logging = resolved_persona_data.get(
-                "name", "baas_onboarder"
+            # No server OpenAI key, or the extraction failed: the caller still
+            # gets the persona they wrote. Falling back to the onboarder persona
+            # here used to put a random character in the meeting.
+            prompt_derived_details = None
+            resolved_persona_data = {
+                "name": (request.bot_name or "").strip() or "Assistant",
+                "prompt": request.prompt,
+                "description": request.prompt,
+                "gender": "neutral",
+                "characteristics": [],
+                "image": None,
+                "cartesia_voice_id": None,
+                "relevant_links": [],
+                "additional_content": None,
+                "is_temporary": True,
+            }
+            persona_name_for_logging = resolved_persona_data["name"]
+            logger.info(
+                f"Persona '{persona_name_for_logging}' taken from the prompt as written "
+                "(no persona extraction)"
             )
 
     else:  # Case 2: No custom prompt, use pre-defined persona
@@ -266,20 +314,28 @@ async def join_meeting(request: BotRequest, client_request: Request):
                     f"Failed to generate image for '{persona_name_for_logging}': {e}"
                 )
 
-    # Populate voice ID if not present
+    # Populate voice ID if not present. Matching a voice to the persona is a
+    # server-side OpenAI call; without that key the bot speaks with the
+    # server's default voice (CARTESIA_VOICE_ID) instead of failing to start.
     if not resolved_persona_data.get("cartesia_voice_id"):
-        from config.voice_utils import (
-            VoiceUtils,
-        )  # Import here to avoid circular dependency issues
+        if os.getenv("OPENAI_API_KEY"):
+            from config.voice_utils import (
+                VoiceUtils,
+            )  # Import here to avoid circular dependency issues
 
-        voice_utils = VoiceUtils()
-        cartesia_voice_id = await voice_utils.match_voice_to_persona(
-            persona_details=resolved_persona_data
-        )  # Pass the whole dict
-        resolved_persona_data["cartesia_voice_id"] = cartesia_voice_id
-        logger.info(
-            f"Resolved Cartesia voice ID for '{persona_name_for_logging}': {cartesia_voice_id}"
-        )
+            try:
+                cartesia_voice_id = await VoiceUtils().match_voice_to_persona(
+                    persona_details=resolved_persona_data
+                )
+            except Exception as e:
+                logger.warning(f"Voice matching failed, using the default voice: {e}")
+                cartesia_voice_id = None
+            resolved_persona_data["cartesia_voice_id"] = cartesia_voice_id
+            logger.info(
+                f"Resolved Cartesia voice ID for '{persona_name_for_logging}': {cartesia_voice_id}"
+            )
+        else:
+            logger.info("No server OpenAI key: using the default voice")
 
     logger.info("Final resolved persona data for Pipecat process:")
     logger.info(f"  Name: {resolved_persona_data.get('name')}")
@@ -357,6 +413,10 @@ async def join_meeting(request: BotRequest, client_request: Request):
         logger.info(
             f"Caller supplied credentials for {', '.join(sorted(credentials))}"
         )
+    # Recorded before the callback secret joins the dict: it is not a provider key.
+    resolved_persona_data["key_sources"] = key_sources(credentials)
+    if request.callback_secret:
+        credentials["callback_secret"] = request.callback_secret.get_secret_value()
 
     missing_key_env = missing_llm_provider_credential(
         resolved_llm_provider, credentials.get("llm_api_key")
@@ -366,8 +426,9 @@ async def join_meeting(request: BotRequest, client_request: Request):
         return JSONResponse(
             content={
                 "message": (
-                    f"LLM provider '{resolved_llm_provider}' is not configured "
-                    f"on this server; missing {missing_key_env}"
+                    f"This server has no {resolved_llm_provider} key ({missing_key_env} "
+                    "is unset). Pass your own in credentials.llm_api_key, or choose "
+                    "a provider the server has a key for."
                 ),
                 "status": "error",
             },
@@ -376,6 +437,20 @@ async def join_meeting(request: BotRequest, client_request: Request):
 
     if request.speech_speed is not None:
         resolved_persona_data["speech_speed"] = request.speech_speed
+    if request.speech_volume is not None:
+        resolved_persona_data["speech_volume"] = request.speech_volume
+    if request.speech_emotion is not None:
+        resolved_persona_data["speech_emotion"] = request.speech_emotion
+    if request.respond_mode != "always":
+        resolved_persona_data["respond_mode"] = request.respond_mode
+    if request.language:
+        resolved_persona_data["language"] = request.language
+    if request.callback_url:
+        resolved_persona_data["callback_url"] = request.callback_url
+    if request.authority:
+        resolved_persona_data["authority"] = request.authority.model_dump()
+    if request.briefing:
+        resolved_persona_data["briefing"] = request.briefing.model_dump(exclude_none=True)
 
     # Store all relevant details in MEETING_DETAILS dictionary.
     # Index 5 carries the FULL resolved persona dict (prompt, voice, image…):
@@ -398,6 +473,10 @@ async def join_meeting(request: BotRequest, client_request: Request):
         bot_name_selected_persona,
     )
     logger.info(f"Display name in the call: {display_name}")
+    # The child introduces itself by this name (authority prompt), not the persona's.
+    resolved_persona_data["display_name"] = display_name
+    # Only the creating key may drive or read this bot through the per-bot routes.
+    resolved_persona_data[OWNER_DIGEST_KEY] = key_digest(api_key)
 
     MEETING_DETAILS[bot_client_id] = (
         request.meeting_url,
@@ -510,7 +589,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
     public_base_url = build_public_base_url(
         client_request, configured_base_url=os.getenv("BASE_URL")
     )
-    webhook_url = f"{public_base_url}/webhook"
+    webhook_url = f"{with_pod_prefix(public_base_url)}/webhook"
     try:
         meetingbaas_bot_id = create_meeting_bot(
             meeting_url=request.meeting_url,
@@ -649,6 +728,16 @@ async def leave_bot(
             break
 
     if not client_id:
+        if is_forwarded(client_request):
+            return JSONResponse(
+                content={"message": "Bot is not hosted on this instance", "status": "error"},
+                status_code=404,
+            )
+        forwarded = await forward_leave_request(
+            meetingbaas_bot_id, await client_request.body(), client_request
+        )
+        if forwarded is not None:
+            return forwarded
         logger.warning(f"No client ID found for bot ID {meetingbaas_bot_id}")
 
     success = True
@@ -668,66 +757,13 @@ async def leave_bot(
     else:
         logger.warning("No MeetingBaas bot ID or API key found, skipping API call")
 
-    # 2. Close WebSocket connections if they exist
+    # 2 + 3. Close the sockets, let the child exit (or make it), forget the bot.
     if client_id:
-        # Mark the client as closing to prevent further messages
-        message_router.mark_closing(client_id)
-
-        # Close Pipecat WebSocket first
-        if client_id in registry.pipecat_connections:
-            try:
-                await registry.disconnect(client_id, is_pipecat=True)
-                logger.info(f"Closed Pipecat WebSocket for client {client_id}")
-            except Exception as e:
-                success = False
-                logger.error(f"Error closing Pipecat WebSocket: {e}")
-
-        # Then close client WebSocket if it exists
-        if client_id in registry.active_connections:
-            try:
-                await registry.disconnect(client_id, is_pipecat=False)
-                logger.info(f"Closed client WebSocket for client {client_id}")
-            except Exception as e:
-                success = False
-                logger.error(f"Error closing client WebSocket: {e}")
-
-        # Add a small delay to allow for clean disconnection
-        await asyncio.sleep(0.5)
-
-    # 3. Terminate the Pipecat process after WebSockets are closed
-    if client_id and client_id in PIPECAT_PROCESSES:
-        process = PIPECAT_PROCESSES[client_id]
-        if process and process.poll() is None:  # If process is still running
-            try:
-                if terminate_process_gracefully(process, timeout=3.0):
-                    logger.info(
-                        f"Gracefully terminated Pipecat process for client {client_id}"
-                    )
-                else:
-                    logger.warning(
-                        f"Had to forcefully kill Pipecat process for client {client_id}"
-                    )
-            except Exception as e:
-                success = False
-                logger.error(f"Error terminating Pipecat process: {e}")
-
-        # Remove from our storage
-        PIPECAT_PROCESSES.pop(client_id, None)
-
-        # Drop any meeting audio buffered for a child that will never connect
-        message_router.drop_pending_audio(client_id)
-
-        # Clean up meeting details
-        if client_id in MEETING_DETAILS:
-            MEETING_DETAILS.pop(client_id, None)
-        BOT_CREDENTIALS.pop(client_id, None)
-
-        # Release ngrok URL if in local dev mode
-        if LOCAL_DEV_MODE and client_id:
-            release_ngrok_url(client_id)
-            log_ngrok_status()
-    else:
-        logger.warning(f"No Pipecat process found for client {client_id}")
+        try:
+            await shutdown_bot(client_id, reason=ShutdownReason.REMOVED_BY_CALLER)
+        except Exception as e:
+            success = False
+            logger.error(f"Error shutting down bot {client_id}: {e}")
 
     return {
         "message": "Bot removal request processed",
@@ -904,7 +940,13 @@ async def _poll_bot_admission(
                             if bot_status in _TERMINAL_STATUSES:
                                 logger.info(
                                     f"Bot {meetingbaas_bot_id} reached terminal status "
-                                    f"'{bot_status}' before admission — stopping poll"
+                                    f"'{bot_status}' before admission — shutting it down"
+                                )
+                                await shutdown_bot(
+                                    client_id,
+                                    reason=ShutdownReason.with_detail(
+                                        ShutdownReason.NEVER_ADMITTED, bot_status
+                                    ),
                                 )
                                 return
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:
@@ -999,8 +1041,10 @@ async def meetingbaas_webhook(request: Request):
                 f.write(datetime.now().isoformat())
             logger.info(f"Created ready signal for client {internal_client_id}")
 
-        # Check for call ended events
-        end_events = ["call_ended", "bot_left", "meeting_ended", "complete"]
+        # Events after which this bot will never be in the call again. "failed"
+        # was missing: a bot that never got in (lobby timeout, bad URL) kept its
+        # child alive until the next deploy.
+        end_events = ["call_ended", "bot_left", "meeting_ended", "complete", "failed"]
 
         # Check both event_type and status_code for end events
         is_end_event = any(end in event_type_lower for end in end_events) or any(
@@ -1008,8 +1052,26 @@ async def meetingbaas_webhook(request: Request):
         )
 
         if is_end_event:
-            logger.info(
-                f"Call ended event detected for bot {bot_id}, generating summary..."
+            logger.info(f"Call over for bot {bot_id} ({event_type or status_code})")
+
+            # Tear the bot down first: closing its socket makes the child end
+            # its pipeline and write the final transcript, which the summary
+            # below then reads complete.
+            failed = "failed" in event_type_lower or "failed" in status_code_lower
+            # Snapshot what the briefing and the call-end event need: shutdown
+            # forgets the bot, keys included.
+            details = MEETING_DETAILS.get(internal_client_id) or ()
+            persona = (
+                details[5] if len(details) > 5 and isinstance(details[5], dict) else {}
+            )
+            display_name = details[1] if len(details) > 1 and details[1] else "Bot"
+            credentials = dict(BOT_CREDENTIALS.get(internal_client_id) or {})
+            await shutdown_bot(
+                internal_client_id,
+                reason=ShutdownReason.with_detail(
+                    ShutdownReason.BOT_FAILED if failed else ShutdownReason.CALL_ENDED,
+                    event_type or status_code,
+                ),
             )
 
             # Locate this bot's own transcript — keyed by the MeetingBaas
@@ -1024,7 +1086,26 @@ async def meetingbaas_webhook(request: Request):
                     transcript_file = candidate
                     break
 
-            if transcript_file and _claim_summary(bot_id):
+            briefing = None
+            if _wants_briefing(persona):
+                if transcript_file and _claim_summary(bot_id):
+                    briefing = await asyncio.to_thread(
+                        _generate_briefing_sync,
+                        transcript_file,
+                        bot_id,
+                        internal_client_id,
+                        persona,
+                        credentials,
+                        display_name,
+                        failed=failed,
+                        reason=event_type or status_code,
+                    )
+                elif not transcript_file:
+                    logger.warning(f"No transcript file found for bot {bot_id}")
+                briefing = briefing or load_briefing(get_state_dir(), bot_id)
+            elif transcript_file and not os.getenv("OPENAI_API_KEY"):
+                logger.info("No server OpenAI key: skipping the call summary")
+            elif transcript_file and _claim_summary(bot_id):
                 # Summary generation makes a blocking OpenAI call; run it off the
                 # event loop so it can't stall floor refresh / admission polling
                 # (and so a slow model can't make MeetingBaas retry the webhook).
@@ -1037,10 +1118,356 @@ async def meetingbaas_webhook(request: Request):
             elif not transcript_file:
                 logger.warning(f"No transcript file found for bot {bot_id}")
 
+            usage = _finalize_usage(internal_client_id, bot_id, persona)
+            await _send_call_ended(
+                persona,
+                credentials,
+                internal_client_id,
+                bot_id,
+                failed=failed,
+                reason=event_type or status_code,
+                usage=usage,
+                briefing=briefing,
+            )
+
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Error processing webhook: {e}")
         return {"status": "error", "message": str(e)}
+
+
+def _live_client_id(meetingbaas_bot_id: str) -> str | None:
+    """Our client id for a MeetingBaas bot id, while the bot is registered."""
+    for client_id, details in MEETING_DETAILS.items():
+        if len(details) > 2 and details[2] == meetingbaas_bot_id:
+            return client_id
+    return None
+
+
+def _owned_client_id(meetingbaas_bot_id: str, api_key: str | None) -> str | None:
+    """The live bot's client id, only for the key that created it."""
+    client_id = _live_client_id(meetingbaas_bot_id)
+    if client_id is None:
+        return None
+    details = MEETING_DETAILS.get(client_id) or ()
+    persona = details[5] if len(details) > 5 and isinstance(details[5], dict) else {}
+    return client_id if owned_by(persona, api_key) else None
+
+
+def _without_owner(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in record.items() if k != OWNER_DIGEST_KEY}
+
+
+async def _or_peers(local, client_request: Request, method: str, path: str, body: bytes | None = None):
+    """A per-bot answer from this pod, or from the pod that hosts the bot.
+
+    With several replicas the bot's files and registration live on one pod;
+    a local 404 is only final once the peers have said 404 too.
+    """
+    if not (isinstance(local, JSONResponse) and local.status_code == 404):
+        return local
+    if is_forwarded(client_request):
+        return local
+    forwarded = await forward_scoped_request(method, path, body, client_request)
+    return forwarded if forwarded is not None else local
+
+
+def _not_found(bot_id: str) -> JSONResponse:
+    return JSONResponse(
+        content={"message": f"No live bot with id {bot_id}", "status": "error"},
+        status_code=404,
+    )
+
+
+@router.post(
+    "/bots/{bot_id}/messages",
+    tags=["bots"],
+    response_model=AcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        202: {"description": "Queued; the bot relays it within a second or two"},
+        404: {"description": "No live bot with that ID"},
+    },
+)
+async def send_owner_message(bot_id: str, request: OwnerMessageRequest, client_request: Request):
+    """
+    Have the bot relay a message from its owner to the meeting.
+
+    For things that come up while the owner is away: "tell them I'll join at
+    half past", "we can go with option B". The bot says it in its own words,
+    briefly, and the text appears in the transcript as its turn. Only the API
+    key that created the bot may use this.
+    """
+    client_id = _owned_client_id(bot_id, client_request.state.api_key)
+    if not client_id:
+        return await _or_peers(
+            _not_found(bot_id),
+            client_request,
+            "POST",
+            f"/bots/{bot_id}/messages",
+            request.model_dump_json().encode(),
+        )
+    record = append_owner_message(get_state_dir(), client_id, request.text)
+    logger.info(f"Owner message queued for bot {bot_id}")
+    return AcceptedResponse(message_id=record["message_id"])
+
+
+@router.get(
+    "/bots/{bot_id}/escalations",
+    tags=["bots"],
+    response_model=list[dict[str, Any]],
+    responses={404: {"description": "No live bot with that ID"}},
+)
+async def list_escalations(bot_id: str, client_request: Request):
+    """
+    The decisions the bot has handed back to its owner during this call.
+
+    Each entry carries the question, its category, who asked, and the owner's
+    answer once one was posted. The same list is in the call-end event. Only
+    the API key that created the bot may read it.
+    """
+    client_id = _owned_client_id(bot_id, client_request.state.api_key)
+    if not client_id:
+        return await _or_peers(
+            _not_found(bot_id), client_request, "GET", f"/bots/{bot_id}/escalations"
+        )
+    return read_escalations(get_state_dir(), client_id)
+
+
+@router.post(
+    "/bots/{bot_id}/escalations/{escalation_id}/response",
+    tags=["bots"],
+    response_model=AcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        202: {"description": "Queued; the bot relays the answer to the meeting"},
+        404: {"description": "No live bot, or no such escalation"},
+    },
+)
+async def answer_escalation(
+    bot_id: str,
+    escalation_id: str,
+    request: EscalationResponseRequest,
+    client_request: Request,
+):
+    """
+    Answer an escalation the bot raised.
+
+    The bot tells the participants the owner's answer, word for word in
+    substance, and the escalation is marked answered in the briefing. An
+    escalation that is never answered stays open and is reported as
+    unresolved; the bot never assumes approval. Only the API key that created
+    the bot may answer.
+    """
+    client_id = _owned_client_id(bot_id, client_request.state.api_key)
+    if not client_id:
+        return await _or_peers(
+            _not_found(bot_id),
+            client_request,
+            "POST",
+            f"/bots/{bot_id}/escalations/{escalation_id}/response",
+            request.model_dump_json().encode(),
+        )
+    known = {item.get("escalation_id") for item in read_escalations(get_state_dir(), client_id)}
+    if escalation_id not in known:
+        return JSONResponse(
+            content={"message": f"No escalation {escalation_id} on bot {bot_id}", "status": "error"},
+            status_code=404,
+        )
+    record = append_owner_message(
+        get_state_dir(),
+        client_id,
+        request.response,
+        message_type=MESSAGE_TYPE_ESCALATION_RESPONSE,
+        escalation_id=escalation_id,
+        decision=request.decision,
+    )
+    logger.info(f"Escalation {escalation_id} answered for bot {bot_id}")
+    return AcceptedResponse(message_id=record["message_id"])
+
+
+@router.get(
+    "/bots/{bot_id}/usage",
+    tags=["bots"],
+    response_model=UsageReport,
+    responses={404: {"description": "No usage recorded for that bot yet"}},
+)
+async def get_bot_usage(bot_id: str, client_request: Request):
+    """
+    What the bot has consumed so far on speech-to-text, text-to-speech and the LLM.
+
+    Live while the bot is in the call, final once it has left. key_sources says
+    per provider whether the bot ran on the server's key (billed by Meeting
+    BaaS) or on one the request brought. Only the API key that created the bot
+    may read it.
+    """
+    api_key = client_request.state.api_key
+    directory = usage_dir(get_state_dir())
+    client_id = _owned_client_id(bot_id, api_key)
+    if client_id:
+        # Live: ownership comes from the registered bot, the file may predate
+        # the final report and carry no digest yet.
+        usage = load_usage(directory, client_id, bot_id)
+    else:
+        usage = load_usage(directory, bot_id)
+        if usage is not None and not owned_by(usage, api_key):
+            usage = None
+    if usage is None:
+        return await _or_peers(
+            JSONResponse(
+                content={"message": f"No usage recorded for bot {bot_id}", "status": "error"},
+                status_code=404,
+            ),
+            client_request,
+            "GET",
+            f"/bots/{bot_id}/usage",
+        )
+    return _without_owner(usage)
+
+
+@router.get(
+    "/bots/{bot_id}/briefing",
+    tags=["bots"],
+    response_model=BriefingReport,
+    responses={404: {"description": "No briefing for that bot (yet)"}},
+)
+async def get_bot_briefing(bot_id: str, client_request: Request):
+    """
+    The post-meeting briefing: summary, decisions, actions, open items, what the
+    bot said and what it escalated. Written once the call ends, on the bot's own
+    LLM key; also delivered in the speaking_bot.ended event. Only the API key
+    that created the bot may read it.
+    """
+    briefing = load_briefing(get_state_dir(), bot_id)
+    if briefing is not None and not owned_by(briefing, client_request.state.api_key):
+        briefing = None
+    if briefing is None:
+        return await _or_peers(
+            JSONResponse(
+                content={"message": f"No briefing for bot {bot_id}", "status": "error"},
+                status_code=404,
+            ),
+            client_request,
+            "GET",
+            f"/bots/{bot_id}/briefing",
+        )
+    return _without_owner(briefing)
+
+
+def _wants_briefing(persona: Dict[str, Any]) -> bool:
+    """Only a bot that asked for a briefing gets one: it is an LLM call on a key."""
+    config = persona.get("briefing")
+    return isinstance(config, dict) and config.get("enabled", True) is not False
+
+
+def _llm_key_for(persona: Dict[str, Any], credentials: Dict[str, str]) -> str | None:
+    """The key the bot itself ran on: the caller's, else the server's for that provider."""
+    try:
+        provider = resolve_llm_provider(persona)
+    except ValueError:
+        return None
+    return credentials.get("llm_api_key") or os.getenv(PROVIDER_KEY_ENVS[provider]) or None
+
+
+def _generate_briefing_sync(
+    transcript_file: str,
+    bot_id: str,
+    internal_client_id: str,
+    persona: Dict[str, Any],
+    credentials: Dict[str, str],
+    display_name: str,
+    *,
+    failed: bool,
+    reason: str,
+) -> Dict[str, Any] | None:
+    """Blocking briefing call, run off the event loop; None when it could not run."""
+    api_key = _llm_key_for(persona, credentials)
+    if not api_key:
+        logger.info(f"No LLM key for bot {bot_id}: skipping the briefing")
+        _release_summary_claim(bot_id)
+        return None
+    try:
+        with open(transcript_file) as handle:
+            transcript = json.load(handle)
+        messages = transcript.get("messages", [])
+        escalations = read_escalations(get_state_dir(), internal_client_id)
+        coverage = {
+            "call_ended_by": reason,
+            "bot_failed": failed,
+            "turns_captured": len(messages),
+            "open_escalations": sum(1 for item in escalations if item.get("status") != "answered"),
+        }
+        briefing = generate_briefing(
+            persona=persona,
+            api_key=api_key,
+            bot_name=display_name,
+            messages=messages,
+            escalations=escalations,
+            coverage=coverage,
+        )
+        briefing["bot_id"] = bot_id
+        briefing["escalations_raised"] = escalations
+        briefing[OWNER_DIGEST_KEY] = persona.get(OWNER_DIGEST_KEY)
+        save_briefing(get_state_dir(), bot_id, briefing)
+        logger.info(f"[WEBHOOK] Briefing written for bot {bot_id}")
+        return briefing
+    except Exception as e:
+        logger.error(f"[WEBHOOK] Briefing failed for bot {bot_id}: {e}")
+        _release_summary_claim(bot_id)
+        return None
+
+
+def _finalize_usage(
+    internal_client_id: str, bot_id: str, persona: Dict[str, Any]
+) -> Dict[str, Any] | None:
+    """Close the child's usage ledger and file it under the MeetingBaas bot id too."""
+    directory = usage_dir(get_state_dir())
+    usage = load_usage(directory, internal_client_id)
+    if usage is None:
+        return None
+    usage["meetingbaas_bot_id"] = bot_id
+    usage[OWNER_DIGEST_KEY] = persona.get(OWNER_DIGEST_KEY)
+    if not usage.get("ended_at"):
+        usage["ended_at"] = datetime.now().timestamp()
+        usage["duration_seconds"] = round(
+            max(0.0, usage["ended_at"] - float(usage.get("started_at") or usage["ended_at"])), 3
+        )
+    save_usage(directory, bot_id, usage)
+    return usage
+
+
+async def _send_call_ended(
+    persona: Dict[str, Any],
+    credentials: Dict[str, str],
+    internal_client_id: str,
+    bot_id: str,
+    *,
+    failed: bool,
+    reason: str,
+    usage: Dict[str, Any] | None,
+    briefing: Dict[str, Any] | None,
+) -> None:
+    callback_url = persona.get("callback_url")
+    if not callback_url:
+        return
+    sink = CustomerEventSink(
+        callback_url,
+        credentials.get("callback_secret"),
+        bot_id=internal_client_id,
+        meetingbaas_bot_id=bot_id,
+        log=logger.info,
+    )
+    delivered = await sink.send(
+        EVENT_ENDED,
+        {
+            "status": "failed" if failed else "completed",
+            "reason": reason,
+            "usage": _without_owner(usage) if usage else None,
+            "briefing": _without_owner(briefing) if briefing else None,
+            "escalations": read_escalations(get_state_dir(), internal_client_id),
+        },
+    )
+    logger.info(f"[EVENTS] {EVENT_ENDED} for bot {bot_id}: {'delivered' if delivered else 'not delivered'}")
 
 
 def _summary_claim_path(bot_id: str) -> str:

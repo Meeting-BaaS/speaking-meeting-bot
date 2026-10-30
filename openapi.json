@@ -162,10 +162,338 @@
           }
         }
       }
+    },
+    "/bots/{bot_id}/messages": {
+      "post": {
+        "tags": [
+          "bots"
+        ],
+        "summary": "Send Owner Message",
+        "description": "Have the bot relay a message from its owner to the meeting.\n\nFor things that come up while the owner is away: \"tell them I'll join at\nhalf past\", \"we can go with option B\". The bot says it in its own words,\nbriefly, and the text appears in the transcript as its turn. Only the API\nkey that created the bot may use this.",
+        "operationId": "send_owner_message_bots__bot_id__messages_post",
+        "parameters": [
+          {
+            "name": "bot_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bot Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Queued; the bot relays it within a second or two",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live bot with that ID"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bots/{bot_id}/escalations": {
+      "get": {
+        "tags": [
+          "bots"
+        ],
+        "summary": "List Escalations",
+        "description": "The decisions the bot has handed back to its owner during this call.\n\nEach entry carries the question, its category, who asked, and the owner's\nanswer once one was posted. The same list is in the call-end event. Only\nthe API key that created the bot may read it.",
+        "operationId": "list_escalations_bots__bot_id__escalations_get",
+        "parameters": [
+          {
+            "name": "bot_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bot Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "title": "Response List Escalations Bots  Bot Id  Escalations Get"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live bot with that ID"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bots/{bot_id}/escalations/{escalation_id}/response": {
+      "post": {
+        "tags": [
+          "bots"
+        ],
+        "summary": "Answer Escalation",
+        "description": "Answer an escalation the bot raised.\n\nThe bot tells the participants the owner's answer, word for word in\nsubstance, and the escalation is marked answered in the briefing. An\nescalation that is never answered stays open and is reported as\nunresolved; the bot never assumes approval. Only the API key that created\nthe bot may answer.",
+        "operationId": "answer_escalation_bots__bot_id__escalations__escalation_id__response_post",
+        "parameters": [
+          {
+            "name": "bot_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bot Id"
+            }
+          },
+          {
+            "name": "escalation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Escalation Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EscalationResponseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Queued; the bot relays the answer to the meeting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live bot, or no such escalation"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bots/{bot_id}/usage": {
+      "get": {
+        "tags": [
+          "bots"
+        ],
+        "summary": "Get Bot Usage",
+        "description": "What the bot has consumed so far on speech-to-text, text-to-speech and the LLM.\n\nLive while the bot is in the call, final once it has left. key_sources says\nper provider whether the bot ran on the server's key (billed by Meeting\nBaaS) or on one the request brought. Only the API key that created the bot\nmay read it.",
+        "operationId": "get_bot_usage_bots__bot_id__usage_get",
+        "parameters": [
+          {
+            "name": "bot_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bot Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageReport"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No usage recorded for that bot yet"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bots/{bot_id}/briefing": {
+      "get": {
+        "tags": [
+          "bots"
+        ],
+        "summary": "Get Bot Briefing",
+        "description": "The post-meeting briefing: summary, decisions, actions, open items, what the\nbot said and what it escalated. Written once the call ends, on the bot's own\nLLM key; also delivered in the speaking_bot.ended event. Only the API key\nthat created the bot may read it.",
+        "operationId": "get_bot_briefing_bots__bot_id__briefing_get",
+        "parameters": [
+          {
+            "name": "bot_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bot Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BriefingReport"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No briefing for that bot (yet)"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "AcceptedResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "message_id": {
+            "type": "string",
+            "title": "Message Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message_id"
+        ],
+        "title": "AcceptedResponse",
+        "description": "The message was queued for the bot."
+      },
+      "AuthorityConfig": {
+        "properties": {
+          "owner_name": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Owner Name",
+            "description": "Who the bot represents"
+          },
+          "approved_positions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "title": "Approved Positions",
+            "description": "Positions the bot may state, in the owner's words"
+          },
+          "escalate_on": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "title": "Escalate On",
+            "description": "Decisions that must go back to the owner before any answer"
+          },
+          "forbidden": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "title": "Forbidden",
+            "description": "Things the bot must never say or do, even if asked"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "owner_name"
+        ],
+        "title": "AuthorityConfig",
+        "description": "What the bot may say on its owner's behalf, and what it must hand back.\n\nTurns the persona into a representative: it introduces itself as an AI\nattending for ``owner_name``, states only ``approved_positions``, raises an\nescalation (and tells the room it is checking) for anything in\n``escalate_on``, and never does what ``forbidden`` lists. Spending,\ncommitments and deadline changes are escalated even when not listed."
+      },
       "BotCredentials": {
         "properties": {
           "llm_api_key": {
@@ -432,7 +760,45 @@
               }
             ],
             "title": "Speech Speed",
-            "description": "TTS speaking speed multiplier. Honored range is 0.6-1.5 (the runner clamps to it); values outside are rejected. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default."
+            "description": "TTS speaking speed multiplier between 0.6 and 1.5; values outside are rejected. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default."
+          },
+          "speech_volume": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 2.0,
+                "minimum": 0.5
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speech Volume",
+            "description": "TTS loudness multiplier. Honored range is 0.5-2.0 (Cartesia sonic-3). Omit for the provider default."
+          },
+          "speech_emotion": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 60,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speech Emotion",
+            "description": "Emotion tag guiding the TTS tone (Cartesia sonic-3, experimental; 60+ tags such as 'excited', 'calm'). Omit to let the model infer tone from the text, which Cartesia recommends."
+          },
+          "respond_mode": {
+            "type": "string",
+            "enum": [
+              "always",
+              "mentioned"
+            ],
+            "title": "Respond Mode",
+            "description": "When the bot replies. 'always': every completed turn gets an answer (good for 1:1 calls). 'mentioned': the bot only hears turns within a short window after someone says its name \u2014 the mode for multi-party meetings where it should stay quiet until addressed.",
+            "default": "always"
           },
           "credentials": {
             "anyOf": [
@@ -463,6 +829,70 @@
             "title": "Transcription Provider",
             "description": "MeetingBaas speech-to-text provider for that transcript.",
             "default": "gladia"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(multi|[a-z]{2,3}(-[A-Za-z0-9]{2,8})*)$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language",
+            "description": "Language the bot listens for, as a BCP-47 tag (en, en-NG, fr), or 'multi' to let Deepgram switch between its multilingual set during the call. Defaults to en-US."
+          },
+          "callback_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Callback Url",
+            "description": "Where this API posts the bot's own events: each utterance it speaks, each escalation to its owner, and the end of the call with the usage report and briefing. An https URL on a public host; signed with callback_secret when one is given. Redirects are not followed."
+          },
+          "callback_secret": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "format": "password",
+            "title": "Callback Secret",
+            "description": "Shared secret used to sign callback_url deliveries (x-speaking-bot-signature: sha256=<HMAC of the body>).",
+            "writeOnly": true
+          },
+          "authority": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AuthorityConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Make the bot a representative: who it attends for, what it may say, what it must escalate. Adds the escalate_to_owner tool and switches off unprompted speech."
+          },
+          "briefing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BriefingConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Post-meeting briefing settings. Only bots that set this (even empty) get a briefing, in the call-end event and at GET /bots/{bot_id}/briefing."
           }
         },
         "additionalProperties": false,
@@ -473,14 +903,31 @@
         "title": "BotRequest",
         "description": "Request model for creating a speaking bot in a meeting.",
         "example": {
+          "authority": {
+            "approved_positions": [
+              "Ada supports option B for the vendor choice"
+            ],
+            "escalate_on": [
+              "any spending above 500 dollars"
+            ],
+            "forbidden": [
+              "agreeing to new deadlines"
+            ],
+            "owner_name": "Ada Okafor"
+          },
           "bot_image": "https://example.com/bot-avatar.png",
           "bot_name": "Meeting Assistant",
+          "briefing": {
+            "language": "en"
+          },
+          "callback_url": "https://app.example.com/hooks/speaking-bot",
           "enable_tools": true,
           "entry_message": "Hello! I'm here to assist with the meeting.",
           "extra": {
             "company": "ACME Corp",
             "meeting_purpose": "Weekly sync"
           },
+          "language": "en",
           "llm_model": "claude-opus-4-8",
           "llm_provider": "anthropic",
           "mcp": {
@@ -519,6 +966,254 @@
           "speech_speed": 1.15,
           "websocket_url": "wss://bots.example.com"
         }
+      },
+      "BriefingAction": {
+        "properties": {
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          },
+          "task": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task"
+          },
+          "due": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Due"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "BriefingAction"
+      },
+      "BriefingConfig": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "description": "Generate a briefing when the call ends",
+            "default": true
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(multi|[a-z]{2,3}(-[A-Za-z0-9]{2,8})*)$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language",
+            "description": "Language the briefing is written in (BCP-47). Defaults to English."
+          },
+          "instructions": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instructions",
+            "description": "What the owner wants the briefing to focus on"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "BriefingConfig",
+        "description": "The post-meeting briefing, generated on the bot's own LLM key."
+      },
+      "BriefingEscalation": {
+        "properties": {
+          "question": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "answer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "BriefingEscalation"
+      },
+      "BriefingReport": {
+        "properties": {
+          "language": {
+            "type": "string",
+            "title": "Language",
+            "default": "en"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "decisions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Decisions"
+          },
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/BriefingAction"
+            },
+            "type": "array",
+            "title": "Actions"
+          },
+          "unresolved": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unresolved"
+          },
+          "what_the_representative_said": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "What The Representative Said"
+          },
+          "escalations": {
+            "items": {
+              "$ref": "#/components/schemas/BriefingEscalation"
+            },
+            "type": "array",
+            "title": "Escalations"
+          },
+          "coverage_notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Coverage Notes"
+          },
+          "generated_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generated At"
+          },
+          "llm_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Provider"
+          },
+          "llm_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Model"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "BriefingReport",
+        "description": "The post-meeting briefing for the bot's owner."
+      },
+      "EscalationResponseRequest": {
+        "properties": {
+          "response": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Response"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "approved",
+                  "declined",
+                  "deferred",
+                  "info"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision",
+            "description": "How the owner decided, when it was a yes/no question"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "response"
+        ],
+        "title": "EscalationResponseRequest",
+        "description": "The owner's answer to an escalation the bot raised."
       },
       "HTTPValidationError": {
         "properties": {
@@ -724,6 +1419,23 @@
         "title": "MCPServerConfig",
         "description": "MCP server metadata and optional live connection details."
       },
+      "OwnerMessageRequest": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "OwnerMessageRequest",
+        "description": "Something the owner wants the bot to relay to the meeting now."
+      },
       "PersonaImageRequest": {
         "type": "object",
         "required": [
@@ -884,7 +1596,7 @@
               }
             ],
             "title": "Start Secs",
-            "description": "Sustained speech (seconds) before a turn registers"
+            "description": "Sustained speech (seconds) before a turn registers while the bot is silent; while it speaks, min_interrupt_words decides"
           },
           "stop_secs": {
             "anyOf": [
@@ -898,7 +1610,7 @@
               }
             ],
             "title": "Stop Secs",
-            "description": "Silence (seconds) before the bot considers the speaker done and replies"
+            "description": "Silence (seconds) before the bot checks whether the speaker is done; it replies right away when they are"
           },
           "min_volume": {
             "anyOf": [
@@ -913,12 +1625,167 @@
             ],
             "title": "Min Volume",
             "description": "Minimum input volume for VAD"
+          },
+          "unfinished_pause_secs": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 10.0,
+                "minimum": 0.2
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unfinished Pause Secs",
+            "description": "When the speaker sounds mid-thought, silence (seconds) after which the bot replies anyway"
+          },
+          "min_interrupt_words": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 20.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Interrupt Words",
+            "description": "Words someone must say before they interrupt the bot mid-sentence; coughs and 'uh-huh's stay below it. 0 interrupts on any speech"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "TurnConfig",
-        "description": "Per-bot voice-activity / turn-taking tuning.\n\nAll fields optional; unset fields fall back to the VAD_* env vars, then\npipecat defaults. Human-facing bots want snappy turn-taking (low\nstop_secs); bot-vs-bot meetings want patience (higher stop_secs and\nstart_secs) so the bots stop barging in on each other."
+        "description": "Per-bot turn-taking tuning.\n\nAll fields optional; unset fields fall back to the VAD_* / TURN_* env\nvars, then the server defaults (0.2 s stop, 1.5 s unfinished pause). A\nlocal end-of-turn model decides whether the speaker has finished once the\nVAD reports a pause, so stop_secs only needs to catch the pause.\nHuman-facing bots want the defaults; bot-vs-bot meetings want patience\n(higher start_secs and unfinished_pause_secs) so the bots stop barging in\non each other."
+      },
+      "UsageReport": {
+        "properties": {
+          "bot_id": {
+            "type": "string",
+            "title": "Bot Id"
+          },
+          "meetingbaas_bot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meetingbaas Bot Id"
+          },
+          "stt_provider": {
+            "type": "string",
+            "title": "Stt Provider"
+          },
+          "tts_provider": {
+            "type": "string",
+            "title": "Tts Provider"
+          },
+          "llm_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Provider"
+          },
+          "llm_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Model"
+          },
+          "key_sources": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Key Sources",
+            "description": "Per provider: 'platform' (ran on the server's key) or 'caller'"
+          },
+          "started_at": {
+            "type": "number",
+            "title": "Started At"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "duration_seconds": {
+            "type": "number",
+            "title": "Duration Seconds"
+          },
+          "stt_audio_seconds": {
+            "type": "number",
+            "title": "Stt Audio Seconds"
+          },
+          "tts_characters": {
+            "type": "integer",
+            "title": "Tts Characters"
+          },
+          "tts_requests": {
+            "type": "integer",
+            "title": "Tts Requests"
+          },
+          "llm_turns": {
+            "type": "integer",
+            "title": "Llm Turns"
+          },
+          "llm_prompt_tokens": {
+            "type": "integer",
+            "title": "Llm Prompt Tokens"
+          },
+          "llm_cached_prompt_tokens": {
+            "type": "integer",
+            "title": "Llm Cached Prompt Tokens"
+          },
+          "llm_completion_tokens": {
+            "type": "integer",
+            "title": "Llm Completion Tokens"
+          },
+          "llm_total_tokens": {
+            "type": "integer",
+            "title": "Llm Total Tokens"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "bot_id",
+          "stt_provider",
+          "tts_provider",
+          "started_at",
+          "duration_seconds",
+          "stt_audio_seconds",
+          "tts_characters",
+          "tts_requests",
+          "llm_turns",
+          "llm_prompt_tokens",
+          "llm_cached_prompt_tokens",
+          "llm_completion_tokens",
+          "llm_total_tokens"
+        ],
+        "title": "UsageReport",
+        "description": "What one bot consumed on each provider, from Pipecat's usage metrics."
       },
       "ValidationError": {
         "properties": {

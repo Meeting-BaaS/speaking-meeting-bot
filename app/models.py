@@ -1,11 +1,14 @@
 """Data models for the Speaking Meeting Bot API."""
 
+import os
 from datetime import datetime
 from ipaddress import ip_address
 from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+
+from utils.ssrf import is_private_ip
 
 
 def _validate_meeting_url(value: str) -> str:
@@ -60,12 +63,15 @@ def _validate_header_transport(url: str | None, headers: dict[str, str] | None) 
 
 
 class TurnConfig(BaseModel):
-    """Per-bot voice-activity / turn-taking tuning.
+    """Per-bot turn-taking tuning.
 
-    All fields optional; unset fields fall back to the VAD_* env vars, then
-    pipecat defaults. Human-facing bots want snappy turn-taking (low
-    stop_secs); bot-vs-bot meetings want patience (higher stop_secs and
-    start_secs) so the bots stop barging in on each other.
+    All fields optional; unset fields fall back to the VAD_* / TURN_* env
+    vars, then the server defaults (0.2 s stop, 1.5 s unfinished pause). A
+    local end-of-turn model decides whether the speaker has finished once the
+    VAD reports a pause, so stop_secs only needs to catch the pause.
+    Human-facing bots want the defaults; bot-vs-bot meetings want patience
+    (higher start_secs and unfinished_pause_secs) so the bots stop barging in
+    on each other.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -77,16 +83,40 @@ class TurnConfig(BaseModel):
         None,
         ge=0.05,
         le=5.0,
-        description="Sustained speech (seconds) before a turn registers",
+        description=(
+            "Sustained speech (seconds) before a turn registers while the bot is "
+            "silent; while it speaks, min_interrupt_words decides"
+        ),
     )
     stop_secs: float | None = Field(
         None,
         ge=0.1,
         le=10.0,
-        description="Silence (seconds) before the bot considers the speaker done and replies",
+        description=(
+            "Silence (seconds) before the bot checks whether the speaker is done; "
+            "it replies right away when they are"
+        ),
     )
     min_volume: float | None = Field(
         None, ge=0.0, le=1.0, description="Minimum input volume for VAD"
+    )
+    unfinished_pause_secs: float | None = Field(
+        None,
+        ge=0.2,
+        le=10.0,
+        description=(
+            "When the speaker sounds mid-thought, silence (seconds) after which "
+            "the bot replies anyway"
+        ),
+    )
+    min_interrupt_words: int | None = Field(
+        None,
+        ge=0,
+        le=20,
+        description=(
+            "Words someone must say before they interrupt the bot mid-sentence; "
+            "coughs and 'uh-huh's stay below it. 0 interrupts on any speech"
+        ),
     )
 
 
@@ -291,6 +321,107 @@ MeetingBaasTranscriptionProvider = Literal[
     "gladia", "deepgram", "assemblyai", "speechmatics", "soniox"
 ]
 
+# BCP-47 tag such as en, en-NG, fr-FR, or Deepgram's "multi" for code-switching
+# between its multilingual set.
+LANGUAGE_PATTERN = r"^(multi|[a-z]{2,3}(-[A-Za-z0-9]{2,8})*)$"
+DEFAULT_BRIEFING_LANGUAGE = "en"
+
+
+def callback_private_urls_allowed() -> bool:
+    """CALLBACK_ALLOW_PRIVATE_URLS=1: local development against a callback on this machine."""
+    return os.getenv("CALLBACK_ALLOW_PRIVATE_URLS", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _validate_callback_url(value: str | None) -> str | None:
+    """An https URL to a public host, unless the operator allows private ones.
+
+    The API posts to this address with the caller's secret and from inside the
+    cluster, so loopback, private and link-local destinations are refused by
+    default (the admin drain port, for one, must not be reachable this way).
+    Resolved addresses are checked again at send time (utils/customer_events).
+    """
+    if value is None:
+        return value
+    normalized = value.strip()
+    parsed = urlparse(normalized)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("callback_url must be an http(s) URL with a host")
+    if callback_private_urls_allowed():
+        return normalized
+    if parsed.scheme != "https":
+        raise ValueError("callback_url must use https://")
+    host = parsed.hostname
+    try:
+        private_literal = is_private_ip(host)
+    except ValueError:
+        # A hostname, not an IP literal: resolved and checked again at send time.
+        private_literal = False
+    if (
+        private_literal
+        or host == "localhost"
+        or host.endswith((".localhost", ".local", ".internal"))
+    ):
+        raise ValueError("callback_url must point to a public host")
+    return normalized
+
+
+class AuthorityConfig(BaseModel):
+    """What the bot may say on its owner's behalf, and what it must hand back.
+
+    Turns the persona into a representative: it introduces itself as an AI
+    attending for ``owner_name``, states only ``approved_positions``, raises an
+    escalation (and tells the room it is checking) for anything in
+    ``escalate_on``, and never does what ``forbidden`` lists. Spending,
+    commitments and deadline changes are escalated even when not listed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    owner_name: str = Field(
+        ..., min_length=1, max_length=120, description="Who the bot represents"
+    )
+    approved_positions: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Positions the bot may state, in the owner's words",
+    )
+    escalate_on: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Decisions that must go back to the owner before any answer",
+    )
+    forbidden: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Things the bot must never say or do, even if asked",
+    )
+
+    @field_validator("approved_positions", "escalate_on", "forbidden")
+    @classmethod
+    def validate_items(cls, items: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in items if item and item.strip()]
+        if any(len(item) > 500 for item in cleaned):
+            raise ValueError("each item must be at most 500 characters")
+        return cleaned
+
+
+class BriefingConfig(BaseModel):
+    """The post-meeting briefing, generated on the bot's own LLM key."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(True, description="Generate a briefing when the call ends")
+    language: str | None = Field(
+        None,
+        pattern=LANGUAGE_PATTERN,
+        description="Language the briefing is written in (BCP-47). Defaults to English.",
+    )
+    instructions: str | None = Field(
+        None,
+        max_length=2_000,
+        description="What the owner wants the briefing to focus on",
+    )
+
 
 class BotRequest(BaseModel):
     """Request model for creating a speaking bot in a meeting."""
@@ -320,6 +451,15 @@ class BotRequest(BaseModel):
                     }
                 ],
                 "speech_speed": 1.15,
+                "language": "en",
+                "callback_url": "https://app.example.com/hooks/speaking-bot",
+                "authority": {
+                    "owner_name": "Ada Okafor",
+                    "approved_positions": ["Ada supports option B for the vendor choice"],
+                    "escalate_on": ["any spending above 500 dollars"],
+                    "forbidden": ["agreeing to new deadlines"],
+                },
+                "briefing": {"language": "en"},
                 "mcp": {
                     "servers": [
                         {
@@ -412,9 +552,38 @@ class BotRequest(BaseModel):
         ge=0.6,
         le=1.5,
         description=(
-            "TTS speaking speed multiplier. Honored range is 0.6-1.5 (the "
-            "runner clamps to it); values outside are rejected. Defaults to "
-            "CARTESIA_TTS_SPEED, TTS_SPEED, SPEECH_SPEED, or the runner default."
+            "TTS speaking speed multiplier between 0.6 and 1.5; values outside "
+            "are rejected. Defaults to CARTESIA_TTS_SPEED, TTS_SPEED, "
+            "SPEECH_SPEED, or the runner default."
+        ),
+    )
+    speech_volume: float | None = Field(
+        None,
+        ge=0.5,
+        le=2.0,
+        description=(
+            "TTS loudness multiplier. Honored range is 0.5-2.0 (Cartesia "
+            "sonic-3). Omit for the provider default."
+        ),
+    )
+    speech_emotion: str | None = Field(
+        None,
+        min_length=1,
+        max_length=60,
+        description=(
+            "Emotion tag guiding the TTS tone (Cartesia sonic-3, experimental; "
+            "60+ tags such as 'excited', 'calm'). Omit to let the model infer "
+            "tone from the text, which Cartesia recommends."
+        ),
+    )
+    respond_mode: Literal["always", "mentioned"] = Field(
+        "always",
+        description=(
+            "When the bot replies. 'always': every completed turn gets an "
+            "answer (good for 1:1 calls). 'mentioned': the bot only hears "
+            "turns within a short window after someone says its name — the "
+            "mode for multi-party meetings where it should stay quiet until "
+            "addressed."
         ),
     )
     credentials: BotCredentials | None = Field(
@@ -438,8 +607,50 @@ class BotRequest(BaseModel):
         "gladia",
         description="MeetingBaas speech-to-text provider for that transcript.",
     )
+    language: str | None = Field(
+        None,
+        pattern=LANGUAGE_PATTERN,
+        description=(
+            "Language the bot listens for, as a BCP-47 tag (en, en-NG, fr), or "
+            "'multi' to let Deepgram switch between its multilingual set during "
+            "the call. Defaults to en-US."
+        ),
+    )
+    callback_url: str | None = Field(
+        None,
+        description=(
+            "Where this API posts the bot's own events: each utterance it speaks, "
+            "each escalation to its owner, and the end of the call with the usage "
+            "report and briefing. An https URL on a public host; signed with "
+            "callback_secret when one is given. Redirects are not followed."
+        ),
+    )
+    callback_secret: SecretStr | None = _secret_field(
+        "Shared secret used to sign callback_url deliveries "
+        "(x-speaking-bot-signature: sha256=<HMAC of the body>)."
+    )
+    authority: AuthorityConfig | None = Field(
+        None,
+        description=(
+            "Make the bot a representative: who it attends for, what it may say, "
+            "what it must escalate. Adds the escalate_to_owner tool and switches "
+            "off unprompted speech."
+        ),
+    )
+    briefing: BriefingConfig | None = Field(
+        None,
+        description=(
+            "Post-meeting briefing settings. Only bots that set this (even empty) "
+            "get a briefing, in the call-end event and at GET /bots/{bot_id}/briefing."
+        ),
+    )
 
     # NOTE: streaming_audio_frequency is intentionally excluded and handled internally
+
+    @field_validator("callback_url")
+    @classmethod
+    def validate_callback_url(cls, value: str | None) -> str | None:
+        return _validate_callback_url(value)
 
     @field_validator("meeting_url")
     @classmethod
@@ -477,6 +688,97 @@ class LeaveResponse(BaseModel):
     """Response model for a bot leaving a meeting"""
 
     ok: bool
+
+
+class OwnerMessageRequest(BaseModel):
+    """Something the owner wants the bot to relay to the meeting now."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(..., min_length=1, max_length=2_000)
+
+
+EscalationDecision = Literal["approved", "declined", "deferred", "info"]
+
+
+class EscalationResponseRequest(BaseModel):
+    """The owner's answer to an escalation the bot raised."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    response: str = Field(..., min_length=1, max_length=2_000)
+    decision: EscalationDecision | None = Field(
+        None, description="How the owner decided, when it was a yes/no question"
+    )
+
+
+class AcceptedResponse(BaseModel):
+    """The message was queued for the bot."""
+
+    ok: bool = True
+    message_id: str
+
+
+class UsageReport(BaseModel):
+    """What one bot consumed on each provider, from Pipecat's usage metrics."""
+
+    model_config = ConfigDict(extra="allow")
+
+    bot_id: str
+    meetingbaas_bot_id: str | None = None
+    stt_provider: str
+    tts_provider: str
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    key_sources: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per provider: 'platform' (ran on the server's key) or 'caller'",
+    )
+    started_at: float
+    ended_at: float | None = None
+    duration_seconds: float
+    stt_audio_seconds: float
+    tts_characters: int
+    tts_requests: int
+    llm_turns: int
+    llm_prompt_tokens: int
+    llm_cached_prompt_tokens: int
+    llm_completion_tokens: int
+    llm_total_tokens: int
+
+
+class BriefingAction(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    owner: str | None = None
+    task: str | None = None
+    due: str | None = None
+
+
+class BriefingEscalation(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    question: str | None = None
+    status: str | None = None
+    answer: str | None = None
+
+
+class BriefingReport(BaseModel):
+    """The post-meeting briefing for the bot's owner."""
+
+    model_config = ConfigDict(extra="allow")
+
+    language: str = DEFAULT_BRIEFING_LANGUAGE
+    summary: str = ""
+    decisions: list[str] = Field(default_factory=list)
+    actions: list[BriefingAction] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+    what_the_representative_said: list[str] = Field(default_factory=list)
+    escalations: list[BriefingEscalation] = Field(default_factory=list)
+    coverage_notes: list[str] = Field(default_factory=list)
+    generated_at: float | None = None
+    llm_provider: str | None = None
+    llm_model: str | None = None
 
 
 class LeaveBotRequest(BaseModel):

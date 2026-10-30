@@ -179,3 +179,6 @@ call_summaries/*
 .ci/home
 .ci/tmp-validate
 .ci/deployment
+
+# Runtime state written by the API in a checkout (tests included)
+meeting_details/
