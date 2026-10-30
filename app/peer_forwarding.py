@@ -55,6 +55,11 @@ def _peer_unsure_response(method: str, path: str) -> JSONResponse:
     """
     if method.upper() in ("GET", "HEAD"):
         advice = "Try again."
+    elif method.upper() == "DELETE":
+        advice = (
+            "The outcome is unknown: the bot may have left. Check its status on "
+            "the MeetingBaas API (GET /v2/bots/{bot_id}/status) before removing it again."
+        )
     else:
         advice = (
             "The outcome is unknown: it may have been applied. Check the bot's "

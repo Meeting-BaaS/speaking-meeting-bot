@@ -98,6 +98,8 @@ class PeerForwardingTest(unittest.TestCase):
                     self.assertNotIn("Try again", body["message"])
                     read = await forward_scoped_request("GET", "/bots/zz/usage", None, request)
                     self.assertIn("Try again", json.loads(read.body)["message"])
+                    gone = await forward_scoped_request("DELETE", "/bots/zz", b"{}", request)
+                    self.assertIn("/v2/bots/{bot_id}/status", json.loads(gone.body)["message"])
 
         asyncio.run(scenario())
 
