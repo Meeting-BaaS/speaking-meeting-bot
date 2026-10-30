@@ -56,9 +56,11 @@ def _peer_unsure_response(method: str, path: str) -> JSONResponse:
     if method.upper() in ("GET", "HEAD"):
         advice = "Try again."
     elif method.upper() == "DELETE":
+        parts = path.strip("/").split("/")
+        bot_id = parts[1] if len(parts) > 1 and parts[0] == "bots" else "{bot_id}"
         advice = (
             "The outcome is unknown: the bot may have left. Check its status on "
-            "the MeetingBaas API (GET /v2/bots/{bot_id}/status) before removing it again."
+            f"the MeetingBaas API (GET /v2/bots/{bot_id}/status) before removing it again."
         )
     else:
         advice = (
