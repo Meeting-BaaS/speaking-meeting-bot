@@ -50,11 +50,28 @@ def bounded_transcript(lines: Sequence[str]) -> tuple[str, int]:
     joined = "\n".join(lines)
     if len(joined) <= MAX_TRANSCRIPT_CHARS:
         return joined, 0
-    head_len = MAX_TRANSCRIPT_CHARS // 3
-    tail_len = MAX_TRANSCRIPT_CHARS - head_len
-    omitted = len(joined) - head_len - tail_len
-    marker = f"\n[… {omitted} characters from the middle of the meeting are not in this record …]\n"
-    return joined[:head_len] + marker + joined[-tail_len:], omitted
+    # Cut between turns, never inside one, so every kept line keeps its speaker.
+    head_budget = MAX_TRANSCRIPT_CHARS // 3
+    tail_budget = MAX_TRANSCRIPT_CHARS - head_budget
+    head: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > head_budget:
+            break
+        head.append(line)
+        used += len(line) + 1
+    tail: list[str] = []
+    used = 0
+    for line in reversed(lines[len(head) :]):
+        if used + len(line) + 1 > tail_budget:
+            break
+        tail.append(line)
+        used += len(line) + 1
+    tail.reverse()
+    middle = lines[len(head) : len(lines) - len(tail)]
+    omitted = sum(len(line) + 1 for line in middle)
+    marker = f"[… {omitted} characters ({len(middle)} turns) from the middle of the meeting are not in this record …]"
+    return "\n".join([*head, marker, *tail]), omitted
 
 
 def transcript_lines(
