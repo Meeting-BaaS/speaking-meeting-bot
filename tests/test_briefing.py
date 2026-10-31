@@ -115,19 +115,24 @@ class GenerateBriefingTest(unittest.TestCase):
 
 
 class LongMeetingTest(unittest.TestCase):
-    def test_long_logs_keep_the_opening_and_the_end_and_say_what_is_missing(self):
+    """Briefings of meetings whose record exceeds the transcript budget."""
+
+    def test_bounded_transcript_over_budget_keeps_opening_and_end_on_turn_boundaries(self):
         from utils.briefing import MAX_TRANSCRIPT_CHARS, bounded_transcript, transcript_lines
 
         heard = [{"kind": "human", "text": f"Alice: opening decision {n} " + "x" * 200} for n in range(600)]
         lines = transcript_lines([], "Atlas", heard)
         text, omitted = bounded_transcript(lines)
         self.assertGreater(omitted, 0)
-        self.assertTrue(text.startswith("Alice: opening decision 0 "))
-        self.assertTrue(text.rstrip().endswith("x" * 50))
-        self.assertIn(f"[… {omitted} characters from the middle of the meeting are not in this record …]", text)
+        kept = [line for line in text.splitlines() if not line.startswith("[…")]
+        # Every kept line is a whole turn with its speaker label.
+        self.assertTrue(all(line.startswith("Alice: opening decision ") for line in kept))
+        self.assertEqual(kept[0], lines[0])
+        self.assertEqual(kept[-1], lines[-1])
+        self.assertIn(f"[… {omitted} characters (", text)
         self.assertLessEqual(len(text), MAX_TRANSCRIPT_CHARS + 200)
 
-    def test_truncation_is_reported_to_the_briefing_as_coverage(self):
+    def test_generate_briefing_truncated_record_reports_coverage(self):
         captured = {}
 
         def fake_complete(provider, model, api_key, system, user):
