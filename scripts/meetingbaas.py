@@ -966,8 +966,9 @@ class UtteranceTap(FrameProcessor):
         if not text:
             return
         if self._memory is not None:
+            # Recorded, not "delivered": speech heard while the bot talked is
+            # still owed to the model at the next wake.
             self._memory.add(f"{self._bot_name}: {text}", kind="bot", at=started_at)
-            self._memory.mark_delivered()
         await self._sink.emit(
             EVENT_UTTERANCE,
             {"text": text, "started_at": started_at, "ended_at": time.time()},
@@ -1766,6 +1767,12 @@ async def main(
         transcript_task.cancel()
         owner_task.cancel()
         await asyncio.gather(transcript_task, owner_task, return_exceptions=True)
+        # The bot's last reply may still be in the utterance tap; get it into
+        # the memory before the final snapshot.
+        try:
+            await utterance_tap.flush()
+        except Exception as e:
+            log_and_flush(logging.WARNING, f"[EVENTS] Error flushing the last utterance: {e}")
         # Save final transcript
         try:
             save_transcript(bot_id, persona_name, context.messages, memory.as_records())
@@ -1784,7 +1791,6 @@ async def main(
         except Exception as e:
             log_and_flush(logging.WARNING, f"[USAGE] Could not save final usage: {e}")
         try:
-            await utterance_tap.flush()
             await sink.close()
         except Exception as e:
             log_and_flush(logging.WARNING, f"[EVENTS] Error flushing events: {e}")

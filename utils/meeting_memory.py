@@ -25,13 +25,29 @@ MAX_LOG_ENTRIES = 4_000
 
 @dataclass
 class HeardEntry:
+    """One thing said in the meeting.
+
+    Attributes:
+        at: Unix time in seconds (``time.time()``) when it was said; for a bot
+            turn, when the bot started speaking.
+        text: The words, with the speaker label the pipeline attached
+            (``Name: text``) when it knew who spoke.
+        kind: ``"human"`` for a transcription, ``"bot"`` for the bot's own turn.
+    """
+
     at: float
     text: str
-    kind: str = "human"  # or "bot"
+    kind: str = "human"
 
 
 @dataclass
 class MeetingMemory:
+    """Everything heard in one meeting, and what the model has not seen yet.
+
+    Attributes:
+        log: Every entry in arrival order, bounded to ``MAX_LOG_ENTRIES``.
+    """
+
     log: list[HeardEntry] = field(default_factory=list)
     _pending_from: int = 0
 
@@ -59,22 +75,30 @@ class MeetingMemory:
         return kept, len(entries) - len(kept)
 
     def mark_delivered(self) -> None:
-        """The pending turns are now in the model's context."""
+        """Everything logged so far is now in the model's context.
+
+        Called only when turns actually reached the model (a wake, or every
+        turn in always mode), never when the bot merely spoke: speech heard
+        during the bot's reply must stay pending for the next wake.
+        """
         self._pending_from = len(self.log)
 
     def wake_text(self, addressed: str) -> str:
-        """The addressed sentence, preceded by what was said since the bot last spoke."""
+        """The addressed sentence, preceded by what was said since the model last heard."""
         pending, omitted = self.pending()
         self.mark_delivered()
-        if not pending:
+        if not pending and not omitted:
             return addressed
-        earlier = "\n".join(e.text for e in pending)
         note = f" ({omitted} earlier turns omitted)" if omitted else ""
+        earlier = "\n".join(e.text for e in pending) if pending else "(nothing that fits)"
         return (
-            f"Said in the meeting since you last spoke, not addressed to you{note}:\n"
+            f"Said in the meeting since you last heard, not addressed to you{note}:\n"
             f"{earlier}\n\n"
             f"Now said to you:\n{addressed}"
         )
 
     def as_records(self) -> list[dict]:
-        return [{"at": e.at, "kind": e.kind, "text": e.text} for e in self.log]
+        """The log in time order (a bot turn is stamped at its start, so it may
+        have been appended after speech heard during it)."""
+        ordered = sorted(enumerate(self.log), key=lambda pair: (pair[1].at, pair[0]))
+        return [{"at": e.at, "kind": e.kind, "text": e.text} for _, e in ordered]

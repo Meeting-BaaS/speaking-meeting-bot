@@ -13,10 +13,10 @@ class MeetingMemoryTest(unittest.TestCase):
         self.assertIn("Alice: we should go with option B", text)
         self.assertIn("Bob: fine, but not above five hundred", text)
         self.assertTrue(text.endswith("Now said to you:\nAmr: Atlas, what did we agree?"))
-        # Delivered once: the next wake carries only what came after.
+        # Delivered once: the next wake carries only what came after, and
+        # speech heard while the bot was replying is not lost.
+        memory.add("Carol: and the deadline moves to Friday", at=3.5)
         memory.add("Atlas: You agreed on option B.", kind="bot", at=3)
-        memory.mark_delivered()
-        memory.add("Carol: and the deadline moves to Friday", at=4)
         again = memory.wake_text("Amr: Atlas, anything else?")
         self.assertNotIn("option B", again.split("Now said to you")[0])
         self.assertIn("Carol: and the deadline moves to Friday", again)
@@ -35,11 +35,19 @@ class MeetingMemoryTest(unittest.TestCase):
         self.assertEqual(omitted, 200 - len(pending))
         self.assertIn(f"({omitted} earlier turns omitted)", memory.wake_text("Atlas, recap"))
 
-    def test_records_keep_bot_and_human_turns_in_order(self):
+    def test_records_are_exported_in_time_order(self):
         memory = MeetingMemory()
         memory.add("Alice: hi", at=1)
-        memory.add("Atlas: hello", kind="bot", at=2)
+        memory.add("Bob: wait", at=2.5)
+        memory.add("Atlas: hello", kind="bot", at=2)  # appended late, started earlier
         memory.add("   ", at=3)
         records = memory.as_records()
-        self.assertEqual([r["kind"] for r in records], ["human", "bot"])
-        self.assertEqual(records[1]["text"], "Atlas: hello")
+        self.assertEqual([r["text"] for r in records], ["Alice: hi", "Atlas: hello", "Bob: wait"])
+
+    def test_omission_is_announced_even_when_nothing_fits(self):
+        memory = MeetingMemory()
+        memory.add("Alice: " + "x" * (MAX_PENDING_CHARS + 10), at=1)
+        text = memory.wake_text("Atlas, recap")
+        self.assertIn("(1 earlier turns omitted)", text)
+        self.assertIn("(nothing that fits)", text)
+        self.assertTrue(text.endswith("Now said to you:\nAtlas, recap"))
