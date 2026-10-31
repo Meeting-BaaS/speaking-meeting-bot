@@ -443,6 +443,8 @@ async def join_meeting(request: BotRequest, client_request: Request):
         resolved_persona_data["speech_emotion"] = request.speech_emotion
     if request.respond_mode != "always":
         resolved_persona_data["respond_mode"] = request.respond_mode
+    if request.wake_phrases:
+        resolved_persona_data["wake_phrases"] = request.wake_phrases
     if request.language:
         resolved_persona_data["language"] = request.language
     if request.callback_url:

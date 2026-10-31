@@ -110,6 +110,7 @@ from utils.speech_activity import SpeechActivityTracker
 from utils.system_prompt import build_system_prompt
 from utils.turn_taking import resolve_turn_taking
 from utils.usage_meter import UsageLedger, UsageMeter, usage_dir
+from utils.wake_phrases import keyterms_for, wake_phrases_for
 
 # Import every LLM service the runtime can select at MODULE level, not lazily
 # inside build_llm_service(): the lazy `import anthropic` cost ~27s on a loaded
@@ -807,6 +808,8 @@ class SpeakerLabeler(FrameProcessor):
             ]
             if len(candidates) == 1 and not frame.text.startswith(f"{candidates[0]}:"):
                 frame.text = f"{candidates[0]}: {frame.text}"
+            # What the bot heard, as the wake-phrase and the model see it.
+            log_and_flush(logging.INFO, f"[HEARD] {frame.text[:200]}")
         await self.push_frame(frame, direction)
 
 
@@ -1296,6 +1299,12 @@ async def main(
         )
     else:
         stt_settings_kwargs: dict = {"language": language}
+        # The bot's name is rarely a dictionary word; boost it so a mention is
+        # transcribed as written and the wake phrase can match it.
+        keyterms = keyterms_for(bot_display_name, persona.get("wake_phrases"))
+        if keyterms:
+            stt_settings_kwargs["keyterm"] = keyterms
+            log_and_flush(logging.INFO, f"[STT] Boosting key terms: {keyterms}")
         # How many ms of silence Deepgram waits before finalizing a transcript.
         # Lower = faster final transcripts = faster replies; too low splits
         # sentences. Unset = Deepgram's default.
@@ -1368,16 +1377,17 @@ async def main(
         # The name participants say is the one the meeting shows (bot_display_name,
         # resolved above), not the persona's.
         wake_window = _coerce_float(os.getenv("RESPOND_MENTION_WINDOW_SECS"), 10.0)
+        wake_phrases = wake_phrases_for(bot_display_name, persona.get("wake_phrases"))
         start_strategies.append(
             WakePhraseUserTurnStartStrategy(
-                phrases=[bot_display_name],
+                phrases=wake_phrases,
                 timeout=wake_window,
                 single_activation=True,
             )
         )
         log_and_flush(
             logging.INFO,
-            f"[RESPOND] mentioned-only mode: wake phrase '{bot_display_name}', "
+            f"[RESPOND] mentioned-only mode: wake phrases {wake_phrases}, "
             f"window {wake_window}s",
         )
     if turn.min_interrupt_words > 0:
