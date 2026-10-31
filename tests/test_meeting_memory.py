@@ -44,13 +44,28 @@ class MeetingMemoryTest(unittest.TestCase):
         records = memory.as_records()
         self.assertEqual([r["text"] for r in records], ["Alice: hi", "Atlas: hello", "Bob: wait"])
 
-    def test_omission_is_announced_even_when_nothing_fits(self):
+    def test_omission_is_announced_when_turns_were_cut(self):
         memory = MeetingMemory()
-        memory.add("Alice: " + "x" * (MAX_PENDING_CHARS + 10), at=1)
+        for n in range(30):
+            memory.add(f"Alice: turn {n} " + "x" * 1_500, at=n)
         text = memory.wake_text("Atlas, recap")
-        self.assertIn("(1 earlier turns omitted)", text)
-        self.assertIn("(nothing that fits)", text)
+        pending_count = text.split("Now said to you")[0].count("Alice: turn ")
+        self.assertLess(pending_count, 30)
+        self.assertIn(f"({30 - pending_count} earlier turns omitted)", text)
         self.assertTrue(text.endswith("Now said to you:\nAtlas, recap"))
+
+
+class EntryCapTest(unittest.TestCase):
+    """A runaway transcription cannot crowd the record."""
+
+    def test_add_oversized_text_is_cut_with_its_label_kept(self):
+        from utils.meeting_memory import MAX_ENTRY_CHARS
+
+        memory = MeetingMemory()
+        memory.add("Alice: " + "q" * (MAX_ENTRY_CHARS * 3), at=1)
+        text = memory.as_records()[0]["text"]
+        self.assertEqual(len(text), MAX_ENTRY_CHARS)
+        self.assertTrue(text.startswith("Alice: ") and text.endswith("…"))
 
 
 class LogRetentionTest(unittest.TestCase):

@@ -126,10 +126,22 @@ class LongMeetingTest(unittest.TestCase):
         self.assertGreater(omitted, 0)
         kept = [line for line in text.splitlines() if not line.startswith("[…")]
         # Every kept line is a whole turn with its speaker label.
-        self.assertTrue(all(line.startswith("Alice: opening decision ") for line in kept))
+        self.assertTrue(all(line.startswith("Alice: ") for line in kept))
         self.assertEqual(kept[0], lines[0])
         self.assertEqual(kept[-1], lines[-1])
         self.assertIn(f"[… {omitted} characters (", text)
+        self.assertLessEqual(len(text), MAX_TRANSCRIPT_CHARS + 200)
+
+    def test_bounded_transcript_oversized_turn_keeps_a_labelled_fragment(self):
+        from utils.briefing import MAX_TRANSCRIPT_CHARS, bounded_transcript
+
+        huge = "Bob: " + "z" * (MAX_TRANSCRIPT_CHARS + 500)
+        text, omitted = bounded_transcript(["Alice: first", huge, "Carol: last"])
+        kept = [line for line in text.splitlines() if not line.startswith("[…")]
+        self.assertEqual(kept[0], "Alice: first")
+        self.assertTrue(any(line.startswith("Bob: ") for line in kept))
+        self.assertEqual(kept[-1], "Carol: last")
+        self.assertGreater(omitted, 0)
         self.assertLessEqual(len(text), MAX_TRANSCRIPT_CHARS + 200)
 
     def test_generate_briefing_truncated_record_reports_coverage(self):
