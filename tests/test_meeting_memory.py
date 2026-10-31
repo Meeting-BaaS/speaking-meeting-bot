@@ -56,16 +56,21 @@ class MeetingMemoryTest(unittest.TestCase):
 
 
 class EntryCapTest(unittest.TestCase):
-    """A runaway transcription cannot crowd the record."""
+    """A very long entry is kept whole in the log and trimmed only for the wake context."""
 
-    def test_add_oversized_text_is_cut_with_its_label_kept(self):
+    def test_add_oversized_text_is_kept_whole_and_trimmed_for_wake_context(self):
         from utils.meeting_memory import MAX_ENTRY_CHARS
 
         memory = MeetingMemory()
-        memory.add("Alice: " + "q" * (MAX_ENTRY_CHARS * 3), at=1)
-        text = memory.as_records()[0]["text"]
-        self.assertEqual(len(text), MAX_ENTRY_CHARS)
-        self.assertTrue(text.startswith("Alice: ") and text.endswith("…"))
+        full = "Alice: " + "q" * (MAX_ENTRY_CHARS * 3)
+        memory.add(full, at=1)
+        self.assertEqual(memory.as_records()[0]["text"], full)
+        pending, omitted = memory.pending()
+        self.assertEqual(omitted, 0)
+        self.assertEqual(len(pending[0].text), MAX_ENTRY_CHARS)
+        self.assertTrue(pending[0].text.startswith("Alice: ") and pending[0].text.endswith("…"))
+        # The log entry itself is untouched by the wake trim.
+        self.assertEqual(memory.as_records()[0]["text"], full)
 
 
 class LogRetentionTest(unittest.TestCase):
