@@ -19,8 +19,9 @@ from dataclasses import dataclass, field
 # small enough not to bloat every turn.
 MAX_PENDING_CHARS = 12_000
 MAX_PENDING_ENTRIES = 200
-# One final transcription is a sentence or two; anything longer is a runaway
-# recogniser output and is cut here so no single turn can crowd the record.
+# One entry handed to the model at wake time is at most this long; the log
+# itself keeps the full text, since a coalesced bot reply or an unusually long
+# transcription still belongs in the transcript and the briefing.
 MAX_ENTRY_CHARS = 2_000
 
 # The full log kept for the transcript and briefing. Bounded only against a
@@ -72,8 +73,6 @@ class MeetingMemory:
         cleaned = " ".join((text or "").split())
         if not cleaned:
             return
-        if len(cleaned) > MAX_ENTRY_CHARS:
-            cleaned = cleaned[: MAX_ENTRY_CHARS - 1] + "…"
         self.log.append(HeardEntry(at=at if at is not None else time.time(), text=cleaned, kind=kind))
         if len(self.log) > MAX_LOG_ENTRIES:
             overflow = len(self.log) - MAX_LOG_ENTRIES
@@ -86,10 +85,13 @@ class MeetingMemory:
         total = 0
         kept: list[HeardEntry] = []
         for entry in reversed(entries):
-            total += len(entry.text) + 1
+            text = entry.text
+            if len(text) > MAX_ENTRY_CHARS:
+                text = text[: MAX_ENTRY_CHARS - 1] + "…"
+            total += len(text) + 1
             if total > MAX_PENDING_CHARS or len(kept) >= MAX_PENDING_ENTRIES:
                 break
-            kept.append(entry)
+            kept.append(HeardEntry(at=entry.at, text=text, kind=entry.kind))
         kept.reverse()
         return kept, len(entries) - len(kept)
 
