@@ -19,6 +19,10 @@ from dataclasses import dataclass, field
 # small enough not to bloat every turn.
 MAX_PENDING_CHARS = 12_000
 MAX_PENDING_ENTRIES = 200
+# One final transcription is a sentence or two; anything longer is a runaway
+# recogniser output and is cut here so no single turn can crowd the record.
+MAX_ENTRY_CHARS = 2_000
+
 # The full log kept for the transcript and briefing. Bounded only against a
 # runaway process: a day of continuous speech is a few thousand turns, and the
 # export must keep a meeting's opening, so nothing a real meeting produces is
@@ -68,6 +72,8 @@ class MeetingMemory:
         cleaned = " ".join((text or "").split())
         if not cleaned:
             return
+        if len(cleaned) > MAX_ENTRY_CHARS:
+            cleaned = cleaned[: MAX_ENTRY_CHARS - 1] + "…"
         self.log.append(HeardEntry(at=at if at is not None else time.time(), text=cleaned, kind=kind))
         if len(self.log) > MAX_LOG_ENTRIES:
             overflow = len(self.log) - MAX_LOG_ENTRIES

@@ -55,8 +55,16 @@ def bounded_transcript(lines: Sequence[str]) -> tuple[str, int]:
     tail_budget = MAX_TRANSCRIPT_CHARS - head_budget
     head: list[str] = []
     used = 0
+    cut_chars = 0
     for line in lines:
         if used + len(line) + 1 > head_budget:
+            # A turn too long for what is left is kept as a labelled fragment
+            # rather than dropped whole; the rest counts as omitted.
+            room = head_budget - used - 2
+            if room > 40:
+                head.append(line[:room] + "…")
+                cut_chars += len(line) - room
+                used = head_budget
             break
         head.append(line)
         used += len(line) + 1
@@ -64,12 +72,22 @@ def bounded_transcript(lines: Sequence[str]) -> tuple[str, int]:
     used = 0
     for line in reversed(lines[len(head) :]):
         if used + len(line) + 1 > tail_budget:
+            room = tail_budget - used - 2
+            if room > 40:
+                label_end = line.find(": ")
+                label = line[: label_end + 2] if 0 < label_end < 80 else ""
+                keep = room - len(label)
+                if keep > 20:
+                    tail.append(label + "…" + line[-keep:])
+                    cut_chars += len(line) - keep
+                    used = tail_budget
             break
         tail.append(line)
         used += len(line) + 1
     tail.reverse()
-    middle = lines[len(head) : len(lines) - len(tail)]
-    omitted = sum(len(line) + 1 for line in middle)
+    kept_full = len(head) + len(tail)
+    middle = lines[len(head) : len(lines) - len(tail)] if kept_full < len(lines) else []
+    omitted = sum(len(line) + 1 for line in middle) + cut_chars
     marker = f"[… {omitted} characters ({len(middle)} turns) from the middle of the meeting are not in this record …]"
     return "\n".join([*head, marker, *tail]), omitted
 
