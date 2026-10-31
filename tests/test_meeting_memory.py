@@ -29,9 +29,11 @@ class MeetingMemoryTest(unittest.TestCase):
         memory = MeetingMemory()
         for n in range(200):
             memory.add(f"Alice: sentence number {n} " + "x" * 100, at=n)
-        pending = memory.pending()
+        pending, omitted = memory.pending()
         self.assertLessEqual(sum(len(e.text) + 1 for e in pending), MAX_PENDING_CHARS)
         self.assertTrue(pending[-1].text.startswith("Alice: sentence number 199"))
+        self.assertEqual(omitted, 200 - len(pending))
+        self.assertIn(f"({omitted} earlier turns omitted)", memory.wake_text("Atlas, recap"))
 
     def test_records_keep_bot_and_human_turns_in_order(self):
         memory = MeetingMemory()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from config.prompts import DEFAULT_SYSTEM_PROMPT, VOICE_STYLE_PROMPT
+from config.prompts import DEFAULT_SYSTEM_PROMPT, MENTIONED_MODE_PROMPT, VOICE_STYLE_PROMPT
 
 
 def build_system_prompt(
@@ -29,6 +29,8 @@ def build_system_prompt(
             f"responses:\n\n{additional}"
         )
     parts.append(VOICE_STYLE_PROMPT)
+    if str(persona.get("respond_mode") or "").lower() == "mentioned":
+        parts.append(MENTIONED_MODE_PROMPT)
     if mcp_context:
         parts.append(mcp_context)
     if authority_context:

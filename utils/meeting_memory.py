@@ -17,8 +17,8 @@ from dataclasses import dataclass, field
 
 # What is handed to the model at wake time: enough for "what was just decided",
 # small enough not to bloat every turn.
-MAX_PENDING_CHARS = 4_000
-MAX_PENDING_ENTRIES = 40
+MAX_PENDING_CHARS = 12_000
+MAX_PENDING_ENTRIES = 200
 # The full log kept for the transcript and briefing.
 MAX_LOG_ENTRIES = 4_000
 
@@ -45,18 +45,18 @@ class MeetingMemory:
             del self.log[:overflow]
             self._pending_from = max(0, self._pending_from - overflow)
 
-    def pending(self) -> list[HeardEntry]:
-        """Human turns heard since the bot last spoke or was last briefed."""
+    def pending(self) -> tuple[list[HeardEntry], int]:
+        """Human turns heard since the bot last spoke, and how many older ones were cut."""
         entries = [e for e in self.log[self._pending_from :] if e.kind == "human"]
-        entries = entries[-MAX_PENDING_ENTRIES:]
         total = 0
         kept: list[HeardEntry] = []
         for entry in reversed(entries):
             total += len(entry.text) + 1
-            if total > MAX_PENDING_CHARS:
+            if total > MAX_PENDING_CHARS or len(kept) >= MAX_PENDING_ENTRIES:
                 break
             kept.append(entry)
-        return list(reversed(kept))
+        kept.reverse()
+        return kept, len(entries) - len(kept)
 
     def mark_delivered(self) -> None:
         """The pending turns are now in the model's context."""
@@ -64,13 +64,14 @@ class MeetingMemory:
 
     def wake_text(self, addressed: str) -> str:
         """The addressed sentence, preceded by what was said since the bot last spoke."""
-        pending = self.pending()
+        pending, omitted = self.pending()
         self.mark_delivered()
         if not pending:
             return addressed
         earlier = "\n".join(e.text for e in pending)
+        note = f" ({omitted} earlier turns omitted)" if omitted else ""
         return (
-            "Said in the meeting since you last spoke (not addressed to you):\n"
+            f"Said in the meeting since you last spoke, not addressed to you{note}:\n"
             f"{earlier}\n\n"
             f"Now said to you:\n{addressed}"
         )
