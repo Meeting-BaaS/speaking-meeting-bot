@@ -19,8 +19,11 @@ from dataclasses import dataclass, field
 # small enough not to bloat every turn.
 MAX_PENDING_CHARS = 12_000
 MAX_PENDING_ENTRIES = 200
-# The full log kept for the transcript and briefing.
-MAX_LOG_ENTRIES = 4_000
+# The full log kept for the transcript and briefing. Bounded only against a
+# runaway process: a day of continuous speech is a few thousand turns, and the
+# export must keep a meeting's opening, so nothing a real meeting produces is
+# ever dropped.
+MAX_LOG_ENTRIES = 50_000
 
 
 @dataclass
@@ -52,6 +55,16 @@ class MeetingMemory:
     _pending_from: int = 0
 
     def add(self, text: str, *, kind: str = "human", at: float | None = None) -> None:
+        """Record one thing said.
+
+        Args:
+            text: The words, with the speaker label when known. Blank or
+                whitespace-only text is ignored.
+            kind: ``"human"`` for a transcription, ``"bot"`` for the bot's
+                own turn.
+            at: Unix time in seconds; defaults to now. A bot turn passes its
+                speech start time.
+        """
         cleaned = " ".join((text or "").split())
         if not cleaned:
             return

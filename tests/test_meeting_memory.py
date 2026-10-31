@@ -51,3 +51,13 @@ class MeetingMemoryTest(unittest.TestCase):
         self.assertIn("(1 earlier turns omitted)", text)
         self.assertIn("(nothing that fits)", text)
         self.assertTrue(text.endswith("Now said to you:\nAtlas, recap"))
+
+
+class LogRetentionTest(unittest.TestCase):
+    def test_a_long_meeting_keeps_its_opening_for_export(self):
+        memory = MeetingMemory()
+        for n in range(5_000):
+            memory.add(f"Alice: turn {n}", at=n)
+        records = memory.as_records()
+        self.assertEqual(records[0]["text"], "Alice: turn 0")
+        self.assertEqual(len(records), 5_000)
