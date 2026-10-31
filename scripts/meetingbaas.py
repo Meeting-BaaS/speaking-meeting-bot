@@ -110,7 +110,7 @@ from utils.speech_activity import SpeechActivityTracker
 from utils.system_prompt import build_system_prompt
 from utils.turn_taking import resolve_turn_taking
 from utils.usage_meter import UsageLedger, UsageMeter, usage_dir
-from utils.wake_phrases import keyterms_for, wake_phrases_for
+from utils.wake_phrases import keyterms_for, matches_wake_phrase, wake_phrases_for
 
 # Import every LLM service the runtime can select at MODULE level, not lazily
 # inside build_llm_service(): the lazy `import anthropic` cost ~27s on a loaded
@@ -793,10 +793,35 @@ class SpeakerLabeler(FrameProcessor):
     speakers, stale file): leave the text unlabeled rather than guess.
     """
 
-    def __init__(self, meeting_url: str, my_name: str, **kwargs):
+    # The label is prepended before the wake-phrase check runs, so a speaker
+    # whose own name contains a wake phrase would wake the bot just by being
+    # labelled. Such speakers are left unlabelled.
+    def __init__(
+        self, meeting_url: str, my_name: str, wake_phrases: list[str] | None = None, **kwargs
+    ):
         super().__init__(**kwargs)
         self._meeting_url = meeting_url
         self._my_name = (my_name or "").strip().lower()
+        self._wake_phrases = list(wake_phrases or [])
+        self._unlabelled: set[str] = set()
+        # Final transcriptions carry other people's speech; they reach the log
+        # only when an operator asks for it (SPEAKING_LOG_HEARD=1), else at DEBUG.
+        self._heard_level = (
+            logging.INFO
+            if os.getenv("SPEAKING_LOG_HEARD", "").strip().lower() in ("1", "true", "yes")
+            else logging.DEBUG
+        )
+
+    def _labelled(self, name: str, text: str) -> str:
+        if matches_wake_phrase(name, self._wake_phrases):
+            if name not in self._unlabelled:
+                self._unlabelled.add(name)
+                log_and_flush(
+                    logging.INFO,
+                    f"[LABEL] Not labelling speaker {name!r}: the name contains a wake phrase",
+                )
+            return text
+        return text if text.startswith(f"{name}:") else f"{name}: {text}"
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
@@ -806,10 +831,10 @@ class SpeakerLabeler(FrameProcessor):
                 for name in read_recent_speakers(self._meeting_url)
                 if name.strip().lower() != self._my_name
             ]
-            if len(candidates) == 1 and not frame.text.startswith(f"{candidates[0]}:"):
-                frame.text = f"{candidates[0]}: {frame.text}"
+            if len(candidates) == 1:
+                frame.text = self._labelled(candidates[0], frame.text)
             # What the bot heard, as the wake-phrase and the model see it.
-            log_and_flush(logging.INFO, f"[HEARD] {frame.text[:200]}")
+            log_and_flush(self._heard_level, f"[HEARD] {frame.text[:200]}")
         await self.push_frame(frame, direction)
 
 
@@ -1284,9 +1309,19 @@ async def main(
     log_and_flush(logging.INFO, f"[STT] Deepgram API key present: {bool(deepgram_api_key)}")
     log_and_flush(logging.INFO, f"[STT] Deepgram config: encoding=linear16, sample_rate={output_sample_rate}, language={language}")
 
+    # The bot's name is rarely a dictionary word; boost it so a mention is
+    # transcribed as written and the wake phrase can match it. Both Deepgram
+    # services take the same keyterm setting.
+    keyterms = keyterms_for(bot_display_name, persona.get("wake_phrases"))
+    if keyterms:
+        log_and_flush(logging.INFO, f"[STT] Boosting key terms: {keyterms}")
+    wake_phrases = wake_phrases_for(bot_display_name, persona.get("wake_phrases"))
     if speculative_turns_enabled():
         # Flux is the Deepgram service that emits eager end-of-turn
         # predictions; the Eager turn strategies below depend on them.
+        flux_kwargs: dict = {}
+        if keyterms:
+            flux_kwargs["settings"] = DeepgramFluxSTTService.Settings(keyterm=keyterms)
         stt = DeepgramFluxSTTService(
             api_key=deepgram_api_key,
             # Flux takes 16-bit PCM at any supported rate; the rate rides in
@@ -1296,15 +1331,12 @@ async def main(
             # Without this Flux emits no eager end-of-turn predictions and the
             # Eager strategies below never speculate.
             enable_eager_end_of_turn=True,
+            **flux_kwargs,
         )
     else:
         stt_settings_kwargs: dict = {"language": language}
-        # The bot's name is rarely a dictionary word; boost it so a mention is
-        # transcribed as written and the wake phrase can match it.
-        keyterms = keyterms_for(bot_display_name, persona.get("wake_phrases"))
         if keyterms:
             stt_settings_kwargs["keyterm"] = keyterms
-            log_and_flush(logging.INFO, f"[STT] Boosting key terms: {keyterms}")
         # How many ms of silence Deepgram waits before finalizing a transcript.
         # Lower = faster final transcripts = faster replies; too low splits
         # sentences. Unset = Deepgram's default.
@@ -1377,7 +1409,6 @@ async def main(
         # The name participants say is the one the meeting shows (bot_display_name,
         # resolved above), not the persona's.
         wake_window = _coerce_float(os.getenv("RESPOND_MENTION_WINDOW_SECS"), 10.0)
-        wake_phrases = wake_phrases_for(bot_display_name, persona.get("wake_phrases"))
         start_strategies.append(
             WakePhraseUserTurnStartStrategy(
                 phrases=wake_phrases,
@@ -1465,6 +1496,7 @@ async def main(
     speaker_labeler = SpeakerLabeler(
         meeting_url=meeting_url,
         my_name=bot_display_name,
+        wake_phrases=wake_phrases if respond_mode == "mentioned" else None,
     )
     utterance_tap = UtteranceTap(sink)
     usage_meter = UsageMeter(ledger)
