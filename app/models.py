@@ -576,6 +576,17 @@ class BotRequest(BaseModel):
             "tone from the text, which Cartesia recommends."
         ),
     )
+    wake_phrases: list[str] | None = Field(
+        None,
+        max_length=10,
+        description=(
+            "Other ways the bot's name may be heard, for respond_mode 'mentioned': "
+            "spellings, nicknames, how the speech-to-text tends to write it. The "
+            "name itself, split and joined variants of it, and these are all "
+            "accepted, and all are boosted in the recogniser. Up to 10 phrases "
+            "of at most 40 characters each."
+        ),
+    )
     respond_mode: Literal["always", "mentioned"] = Field(
         "always",
         description=(
@@ -651,6 +662,16 @@ class BotRequest(BaseModel):
     @classmethod
     def validate_callback_url(cls, value: str | None) -> str | None:
         return _validate_callback_url(value)
+
+    @field_validator("wake_phrases")
+    @classmethod
+    def validate_wake_phrases(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return value
+        cleaned = [item.strip() for item in value if item and item.strip()]
+        if any(len(item) > 40 for item in cleaned):
+            raise ValueError("each wake phrase must be at most 40 characters")
+        return cleaned or None
 
     @field_validator("meeting_url")
     @classmethod
