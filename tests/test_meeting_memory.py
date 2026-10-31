@@ -9,7 +9,7 @@ class MeetingMemoryTest(unittest.TestCase):
         memory.add("Alice: we should go with option B", at=1)
         memory.add("Bob: fine, but not above five hundred", at=2)
         text = memory.wake_text("Amr: Atlas, what did we agree?")
-        self.assertIn("Said in the meeting since you last spoke", text)
+        self.assertIn("Said in the meeting since you last heard", text)
         self.assertIn("Alice: we should go with option B", text)
         self.assertIn("Bob: fine, but not above five hundred", text)
         self.assertTrue(text.endswith("Now said to you:\nAmr: Atlas, what did we agree?"))
