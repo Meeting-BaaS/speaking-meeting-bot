@@ -40,9 +40,49 @@ BRIEFING_KEYS = (
 )
 
 
-def transcript_text(messages: Sequence[Mapping[str, Any]], bot_name: str) -> str:
-    """One line per turn: ``Name: text`` for the room, ``<bot>: text`` for the bot."""
-    lines = []
+def bounded_transcript(lines: Sequence[str]) -> tuple[str, int]:
+    """Join the lines; past the limit keep the opening and the end, and say so.
+
+    Returns the text and how many characters of the middle were left out. The
+    opening is kept because that is where a meeting's decisions tend to be
+    framed; the end because that is what a question at the end is about.
+    """
+    joined = "\n".join(lines)
+    if len(joined) <= MAX_TRANSCRIPT_CHARS:
+        return joined, 0
+    head_len = MAX_TRANSCRIPT_CHARS // 3
+    tail_len = MAX_TRANSCRIPT_CHARS - head_len
+    omitted = len(joined) - head_len - tail_len
+    marker = f"\n[… {omitted} characters from the middle of the meeting are not in this record …]\n"
+    return joined[:head_len] + marker + joined[-tail_len:], omitted
+
+
+def transcript_lines(
+    messages: Sequence[Mapping[str, Any]],
+    bot_name: str,
+    heard: Sequence[Mapping[str, Any]] | None = None,
+) -> list[str]:
+    """One line per turn: ``Name: text`` for the room, ``<bot> (you): text`` for the bot.
+
+    ``heard`` is the bot's full log of the meeting (every final transcription
+    and its own turns, in order); when present it is the record, since in
+    mentioned mode the model's context holds only the turns that named the bot.
+    """
+    lines: list[str] = []
+    if heard:
+        for entry in heard:
+            text = " ".join(str(entry.get("text") or "").split())
+            if not text:
+                continue
+            if entry.get("kind") == "bot":
+                prefix = f"{bot_name}: "
+                body = text[len(prefix) :] if text.startswith(prefix) else text
+                lines.append(f"{bot_name} (you): {body}")
+            elif _LABELLED_RE.match(text):
+                lines.append(text)
+            else:
+                lines.append(f"Participant: {text}")
+        return lines
     for message in messages:
         role = message.get("role")
         content = str(message.get("content") or "").strip()
@@ -54,10 +94,18 @@ def transcript_text(messages: Sequence[Mapping[str, Any]], bot_name: str) -> str
             lines.append(content)
         else:
             lines.append(f"Participant: {content}")
-    text = "\n".join(lines)
-    if len(text) > MAX_TRANSCRIPT_CHARS:
-        text = text[-MAX_TRANSCRIPT_CHARS:]
+    return lines
+
+
+def transcript_text(
+    messages: Sequence[Mapping[str, Any]],
+    bot_name: str,
+    heard: Sequence[Mapping[str, Any]] | None = None,
+) -> str:
+    """The bounded transcript text (see ``bounded_transcript``)."""
+    text, _omitted = bounded_transcript(transcript_lines(messages, bot_name, heard))
     return text
+
 
 
 def build_briefing_messages(
@@ -189,6 +237,7 @@ def generate_briefing(
     messages: Sequence[Mapping[str, Any]],
     escalations: Sequence[Mapping[str, Any]] = (),
     coverage: Mapping[str, Any] | None = None,
+    heard: Sequence[Mapping[str, Any]] | None = None,
     complete=_complete,
 ) -> dict[str, Any]:
     """Run the briefing call for one bot and return the structured result."""
@@ -198,12 +247,21 @@ def generate_briefing(
     provider = resolve_llm_provider(persona)
     model = resolve_llm_model(provider, persona)
     language = briefing_config.get("language") or DEFAULT_BRIEFING_LANGUAGE
+    transcript, omitted = bounded_transcript(transcript_lines(messages, bot_name, heard))
+    if omitted:
+        coverage = {
+            **(coverage or {}),
+            "transcript_truncated": (
+                f"{omitted} characters from the middle of the meeting are not in the record; "
+                "say so in coverage_notes and do not guess at that part"
+            ),
+        }
     system, user = build_briefing_messages(
         bot_name=bot_name,
         owner_name=authority.get("owner_name"),
         language=language,
         instructions=briefing_config.get("instructions"),
-        transcript=transcript_text(messages, bot_name),
+        transcript=transcript,
         escalations=escalations,
         coverage=coverage,
     )

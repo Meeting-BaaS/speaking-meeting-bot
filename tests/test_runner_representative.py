@@ -57,6 +57,24 @@ async def check():
         await labeler.process_frame(frame, m.FrameDirection.DOWNSTREAM)
     assert frame.text == "Alice: can we start", frame.text
 
+    # Mentioned mode: unaddressed speech is remembered and handed over when the bot is named.
+    mem = m.MeetingMemory()
+    cm = m.ConversationMemory(mem, ["atlas"], mentioned=True)
+    cm.push_frame = mock.AsyncMock()
+    f1 = TranscriptionFrame(text="Alice: we go with option B", user_id="u", timestamp="t")
+    await cm.process_frame(f1, m.FrameDirection.DOWNSTREAM)
+    assert f1.text == "Alice: we go with option B", f1.text
+    f2 = TranscriptionFrame(text="Amr: Atlas, what did we agree?", user_id="u", timestamp="t")
+    await cm.process_frame(f2, m.FrameDirection.DOWNSTREAM)
+    assert "Alice: we go with option B" in f2.text and f2.text.endswith("Amr: Atlas, what did we agree?"), f2.text
+    assert [r["text"] for r in mem.as_records()] == ["Alice: we go with option B", "Amr: Atlas, what did we agree?"]
+    # Always mode: frames are untouched, the log still fills.
+    cm2 = m.ConversationMemory(m.MeetingMemory(), ["atlas"], mentioned=False)
+    cm2.push_frame = mock.AsyncMock()
+    f3 = TranscriptionFrame(text="Amr: Atlas, hi", user_id="u", timestamp="t")
+    await cm2.process_frame(f3, m.FrameDirection.DOWNSTREAM)
+    assert f3.text == "Amr: Atlas, hi"
+
     assert m.max_nudges_for("always", 3, represents_owner=True) == 0
     assert m.max_nudges_for("always", 3) == 3
     print("verified")

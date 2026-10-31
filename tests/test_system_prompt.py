@@ -30,3 +30,12 @@ class SystemPromptTest(unittest.TestCase):
     def test_voice_guidance_only_answers_what_is_directed_at_the_bot(self):
         self.assertIn("directed at you", VOICE_STYLE_PROMPT)
         self.assertIn("talking to each other, do not reply", VOICE_STYLE_PROMPT)
+
+
+def test_mentioned_mode_adds_the_hearing_rules():
+    from utils.system_prompt import build_system_prompt
+
+    quiet = build_system_prompt({"prompt": "Be brief.", "respond_mode": "mentioned"}, "bot")
+    assert "Never invent what someone said" in quiet
+    loud = build_system_prompt({"prompt": "Be brief.", "respond_mode": "always"}, "bot")
+    assert "Never invent what someone said" not in loud
