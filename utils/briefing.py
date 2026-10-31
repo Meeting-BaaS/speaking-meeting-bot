@@ -40,9 +40,33 @@ BRIEFING_KEYS = (
 )
 
 
-def transcript_text(messages: Sequence[Mapping[str, Any]], bot_name: str) -> str:
-    """One line per turn: ``Name: text`` for the room, ``<bot>: text`` for the bot."""
+def transcript_text(
+    messages: Sequence[Mapping[str, Any]],
+    bot_name: str,
+    heard: Sequence[Mapping[str, Any]] | None = None,
+) -> str:
+    """One line per turn: ``Name: text`` for the room, ``<bot>: text`` for the bot.
+
+    ``heard`` is the bot's full log of the meeting (every final transcription
+    and its own turns, in order); when present it is the record, since in
+    mentioned mode the model's context holds only the turns that named the bot.
+    """
     lines = []
+    if heard:
+        for entry in heard:
+            text = " ".join(str(entry.get("text") or "").split())
+            if not text:
+                continue
+            if entry.get("kind") == "bot":
+                prefix = f"{bot_name}: "
+                body = text[len(prefix) :] if text.startswith(prefix) else text
+                lines.append(f"{bot_name} (you): {body}")
+            elif _LABELLED_RE.match(text):
+                lines.append(text)
+            else:
+                lines.append(f"Participant: {text}")
+        joined = "\n".join(lines)
+        return joined[-MAX_TRANSCRIPT_CHARS:] if len(joined) > MAX_TRANSCRIPT_CHARS else joined
     for message in messages:
         role = message.get("role")
         content = str(message.get("content") or "").strip()
@@ -189,6 +213,7 @@ def generate_briefing(
     messages: Sequence[Mapping[str, Any]],
     escalations: Sequence[Mapping[str, Any]] = (),
     coverage: Mapping[str, Any] | None = None,
+    heard: Sequence[Mapping[str, Any]] | None = None,
     complete=_complete,
 ) -> dict[str, Any]:
     """Run the briefing call for one bot and return the structured result."""
@@ -203,7 +228,7 @@ def generate_briefing(
         owner_name=authority.get("owner_name"),
         language=language,
         instructions=briefing_config.get("instructions"),
-        transcript=transcript_text(messages, bot_name),
+        transcript=transcript_text(messages, bot_name, heard),
         escalations=escalations,
         coverage=coverage,
     )
