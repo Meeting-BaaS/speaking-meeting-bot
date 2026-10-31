@@ -49,6 +49,23 @@ class BriefingPromptTest(unittest.TestCase):
         self.assertIn("Alice: hi", user)
 
 
+class HeardLogTest(unittest.TestCase):
+    def test_heard_log_is_the_record_when_present(self):
+        text = transcript_text(
+            [{"role": "user", "content": "Amr: Atlas, what did we agree?"}],
+            "Atlas",
+            heard=[
+                {"kind": "human", "text": "Alice: we go with option B"},
+                {"kind": "human", "text": "unlabelled remark"},
+                {"kind": "bot", "text": "Atlas: You agreed on option B."},
+            ],
+        )
+        self.assertEqual(
+            text.splitlines(),
+            ["Alice: we go with option B", "Participant: unlabelled remark", "Atlas (you): You agreed on option B."],
+        )
+
+
 class BriefingParseTest(unittest.TestCase):
     def test_parses_fenced_json_and_fills_missing_keys(self):
         parsed = parse_briefing('```json\n{"summary": "Short.", "decisions": ["Go B"]}\n```')

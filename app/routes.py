@@ -1392,11 +1392,12 @@ def _generate_briefing_sync(
         with open(transcript_file) as handle:
             transcript = json.load(handle)
         messages = transcript.get("messages", [])
+        heard = transcript.get("heard") or None
         escalations = read_escalations(get_state_dir(), internal_client_id)
         coverage = {
             "call_ended_by": reason,
             "bot_failed": failed,
-            "turns_captured": len(messages),
+            "turns_captured": len(heard) if heard else len(messages),
             "open_escalations": sum(1 for item in escalations if item.get("status") != "answered"),
         }
         briefing = generate_briefing(
@@ -1406,6 +1407,7 @@ def _generate_briefing_sync(
             messages=messages,
             escalations=escalations,
             coverage=coverage,
+            heard=heard,
         )
         briefing["bot_id"] = bot_id
         briefing["escalations_raised"] = escalations

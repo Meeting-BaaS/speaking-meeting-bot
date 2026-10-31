@@ -110,6 +110,7 @@ from utils.speech_activity import SpeechActivityTracker
 from utils.system_prompt import build_system_prompt
 from utils.turn_taking import resolve_turn_taking
 from utils.usage_meter import UsageLedger, UsageMeter, usage_dir
+from utils.meeting_memory import MeetingMemory
 from utils.wake_phrases import keyterms_for, matches_wake_phrase, wake_phrases_for
 
 # Import every LLM service the runtime can select at MODULE level, not lazily
@@ -650,8 +651,13 @@ async def setup_mcp_tools(llm, tool_schemas: list, mcp_config: dict | None):
     return manager
 
 
-def save_transcript(bot_id: str, persona_name: str, messages: list):
-    """Save the conversation transcript to a JSON file for webhook processing."""
+def save_transcript(bot_id: str, persona_name: str, messages: list, heard: list | None = None):
+    """Save the conversation transcript to a JSON file for webhook processing.
+
+    ``messages`` is the model's context (what it was told and what it said);
+    ``heard`` is everything said in the meeting in order, bot turns included,
+    which in mentioned mode is far more than the model's context.
+    """
     os.makedirs(TRANSCRIPT_DIR, exist_ok=True)
     transcript_file = os.path.join(TRANSCRIPT_DIR, f"{bot_id}.json")
 
@@ -668,7 +674,8 @@ def save_transcript(bot_id: str, persona_name: str, messages: list):
         "bot_id": bot_id,
         "persona_name": persona_name,
         "timestamp": datetime.now().isoformat(),
-        "messages": conversation
+        "messages": conversation,
+        "heard": heard or [],
     }
 
     # Atomic write: the webhook may read this file at any moment (call_ended
@@ -866,6 +873,38 @@ class SpeechInjectionProbe(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class ConversationMemory(FrameProcessor):
+    """Remembers every final transcription and briefs the model when it is addressed.
+
+    Sits after the speaker labeller and before the user aggregator. In
+    mentioned mode the wake-phrase strategy drops unaddressed speech, so this
+    is where the bot keeps the meeting: unaddressed turns go into the memory,
+    and a turn that names the bot is rewritten to carry what was said since
+    the bot last spoke. In always mode everything reaches the model anyway;
+    the memory still records the log for the transcript and briefing.
+    """
+
+    def __init__(self, memory: MeetingMemory, wake_phrases: list[str] | None, mentioned: bool, **kwargs):
+        super().__init__(**kwargs)
+        self._memory = memory
+        self._wake_phrases = list(wake_phrases or [])
+        self._mentioned = mentioned
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if type(frame).__name__ == "TranscriptionFrame" and getattr(frame, "text", None):
+            text = frame.text
+            if self._mentioned and matches_wake_phrase(text, self._wake_phrases):
+                frame.text = self._memory.wake_text(text)
+                self._memory.add(text, kind="human")
+                self._memory.mark_delivered()
+            else:
+                self._memory.add(text, kind="human")
+                if not self._mentioned:
+                    self._memory.mark_delivered()
+        await self.push_frame(frame, direction)
+
+
 class UtteranceTap(FrameProcessor):
     """Reports what the bot says, one event per reply, to the caller's callback.
 
@@ -878,16 +917,24 @@ class UtteranceTap(FrameProcessor):
 
     COALESCE_SECS = 1.0
 
-    def __init__(self, sink: CustomerEventSink, **kwargs):
+    def __init__(
+        self,
+        sink: CustomerEventSink,
+        memory: MeetingMemory | None = None,
+        bot_name: str = "Bot",
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self._sink = sink
+        self._memory = memory
+        self._bot_name = bot_name
         self._parts: list[str] = []
         self._started_at: float | None = None
         self._flush_task: asyncio.Task | None = None
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
-        if self._sink.enabled:
+        if self._sink.enabled or self._memory is not None:
             if isinstance(frame, TTSStartedFrame):
                 self._cancel_flush()
                 if self._started_at is None:
@@ -918,6 +965,9 @@ class UtteranceTap(FrameProcessor):
         self._started_at = None
         if not text:
             return
+        if self._memory is not None:
+            self._memory.add(f"{self._bot_name}: {text}", kind="bot", at=started_at)
+            self._memory.mark_delivered()
         await self._sink.emit(
             EVENT_UTTERANCE,
             {"text": text, "started_at": started_at, "ended_at": time.time()},
@@ -1498,12 +1548,17 @@ async def main(
         my_name=bot_display_name,
         wake_phrases=wake_phrases if respond_mode == "mentioned" else None,
     )
-    utterance_tap = UtteranceTap(sink)
+    memory = MeetingMemory()
+    conversation_memory = ConversationMemory(
+        memory, wake_phrases, mentioned=(respond_mode == "mentioned")
+    )
+    utterance_tap = UtteranceTap(sink, memory=memory, bot_name=bot_display_name)
     usage_meter = UsageMeter(ledger)
     pipeline = Pipeline([
         audio_input,         # transport input, guarded against early audio
         stt,
         speaker_labeler,     # "Name: text" so the LLM knows who is talking
+        conversation_memory, # keeps the whole meeting; briefs the LLM when addressed
         speech_activity,     # only received speech replenishes the idle budget
         user_aggregator,
         llm,
@@ -1532,7 +1587,7 @@ async def main(
         while True:
             await asyncio.sleep(10)  # Save every 10 seconds
             try:
-                save_transcript(bot_id, persona_name, context.messages)
+                save_transcript(bot_id, persona_name, context.messages, memory.as_records())
             except Exception as e:
                 log_and_flush(logging.ERROR, f"[TRANSCRIPT] Error saving transcript: {e}")
             try:
@@ -1713,7 +1768,7 @@ async def main(
         await asyncio.gather(transcript_task, owner_task, return_exceptions=True)
         # Save final transcript
         try:
-            save_transcript(bot_id, persona_name, context.messages)
+            save_transcript(bot_id, persona_name, context.messages, memory.as_records())
             log_and_flush(logging.INFO, "[TRANSCRIPT] Final transcript saved on shutdown")
         except Exception as e:
             log_and_flush(logging.ERROR, f"[TRANSCRIPT] Error saving final transcript: {e}")
