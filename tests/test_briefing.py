@@ -112,3 +112,28 @@ class GenerateBriefingTest(unittest.TestCase):
             save_briefing(state_dir, "mb-1", briefing)
             self.assertEqual(load_briefing(state_dir, "nope", "mb-1")["summary"], "Done.")
             self.assertIsNone(load_briefing(state_dir, "nope"))
+
+
+class LongMeetingTest(unittest.TestCase):
+    def test_long_logs_keep_the_opening_and_the_end_and_say_what_is_missing(self):
+        from utils.briefing import MAX_TRANSCRIPT_CHARS, bounded_transcript, transcript_lines
+
+        heard = [{"kind": "human", "text": f"Alice: opening decision {n} " + "x" * 200} for n in range(600)]
+        lines = transcript_lines([], "Atlas", heard)
+        text, omitted = bounded_transcript(lines)
+        self.assertGreater(omitted, 0)
+        self.assertTrue(text.startswith("Alice: opening decision 0 "))
+        self.assertTrue(text.rstrip().endswith("x" * 50))
+        self.assertIn(f"[… {omitted} characters from the middle of the meeting are not in this record …]", text)
+        self.assertLessEqual(len(text), MAX_TRANSCRIPT_CHARS + 200)
+
+    def test_truncation_is_reported_to_the_briefing_as_coverage(self):
+        captured = {}
+
+        def fake_complete(provider, model, api_key, system, user):
+            captured["user"] = user
+            return json.dumps({"summary": "s"})
+
+        heard = [{"kind": "human", "text": "Alice: " + "y" * 300} for _ in range(400)]
+        generate_briefing(persona={}, api_key="k", bot_name="Atlas", messages=[], heard=heard, complete=fake_complete)
+        self.assertIn("transcript_truncated", captured["user"])
