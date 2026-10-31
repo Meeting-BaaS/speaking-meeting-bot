@@ -17,7 +17,9 @@ from collections.abc import Iterable
 MAX_WAKE_PHRASES = 12
 
 _CAMEL_SPLIT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])")
-_NON_WORD = re.compile(r"[^0-9A-Za-z ]+")
+# Unicode-aware: pipecat matches wake phrases on \w, so a name like "Émile" must
+# keep its letters.
+_NON_WORD = re.compile(r"[^\w ]+")
 
 
 def _clean(value: str) -> str:
@@ -40,13 +42,32 @@ def name_variants(name: str) -> list[str]:
 
 
 def wake_phrases_for(display_name: str, aliases: Iterable[str] | None = None) -> list[str]:
-    """Deduplicated, lower-cased phrases that should wake the bot."""
+    """Deduplicated, lower-cased phrases that should wake the bot.
+
+    The name and every alias come first, as written, so a configured alias is
+    never pushed out by generated variants; the variants fill what is left of
+    the cap.
+    """
     phrases: list[str] = []
-    for candidate in [display_name, *(aliases or [])]:
-        for variant in name_variants(str(candidate or "")):
+    candidates = [str(c or "") for c in [display_name, *(aliases or [])]]
+    for candidate in candidates:
+        base = _clean(candidate)
+        if base and base not in phrases:
+            phrases.append(base)
+    for candidate in candidates:
+        for variant in name_variants(candidate):
             if variant and variant not in phrases:
                 phrases.append(variant)
     return phrases[:MAX_WAKE_PHRASES]
+
+
+def matches_wake_phrase(text: str, phrases: Iterable[str]) -> bool:
+    """True when any phrase appears in ``text`` as whole words (case-insensitive)."""
+    cleaned = _clean(text)
+    if not cleaned:
+        return False
+    padded = f" {cleaned} "
+    return any(phrase and f" {phrase} " in padded for phrase in phrases)
 
 
 def keyterms_for(display_name: str, aliases: Iterable[str] | None = None) -> list[str]:

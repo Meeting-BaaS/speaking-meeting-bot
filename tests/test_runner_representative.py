@@ -43,6 +43,20 @@ async def check():
     assert meter.ledger.tts_characters == 7
     assert meter.push_frame.await_count == 1
 
+    # A participant whose name contains a wake phrase is not labelled, so the
+    # label cannot wake the bot on its own.
+    from pipecat.frames.frames import TranscriptionFrame
+    labeler = m.SpeakerLabeler(meeting_url="https://meet.google.com/abc", my_name="Atlas", wake_phrases=["atlas"])
+    labeler.push_frame = mock.AsyncMock()
+    with mock.patch.object(m, "read_recent_speakers", return_value=["Atlas Jones"]):
+        frame = TranscriptionFrame(text="can we start", user_id="u", timestamp="t")
+        await labeler.process_frame(frame, m.FrameDirection.DOWNSTREAM)
+    assert frame.text == "can we start", frame.text
+    with mock.patch.object(m, "read_recent_speakers", return_value=["Alice"]):
+        frame = TranscriptionFrame(text="can we start", user_id="u", timestamp="t")
+        await labeler.process_frame(frame, m.FrameDirection.DOWNSTREAM)
+    assert frame.text == "Alice: can we start", frame.text
+
     assert m.max_nudges_for("always", 3, represents_owner=True) == 0
     assert m.max_nudges_for("always", 3) == 3
     print("verified")

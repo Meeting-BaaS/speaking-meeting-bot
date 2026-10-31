@@ -583,7 +583,8 @@ class BotRequest(BaseModel):
             "Other ways the bot's name may be heard, for respond_mode 'mentioned': "
             "spellings, nicknames, how the speech-to-text tends to write it. The "
             "name itself, split and joined variants of it, and these are all "
-            "accepted, and all are boosted in the recogniser."
+            "accepted, and all are boosted in the recogniser. Up to 10 phrases "
+            "of at most 40 characters each."
         ),
     )
     respond_mode: Literal["always", "mentioned"] = Field(
