@@ -126,7 +126,7 @@ curl -s -X POST "$BASE/bots/$BOT/escalations/$ESCALATION/response" -H "x-meeting
 curl -s "$BASE/bots/$BOT/usage" -H "x-meeting-baas-api-key: $KEY"
 ```
 
-After the call, `GET /bots/{bot_id}/briefing` returns the briefing (summary, decisions, actions, unresolved, what the representative said, escalations, coverage notes), written on the bot's own LLM key, and `GET /bots/{bot_id}/usage` the final usage report. Files land under the state dir in `usage/`, `briefings/`, `escalations/` and `owner_messages/`.
+After the call, `GET /bots/{bot_id}/briefing` returns the briefing (summary, decisions, actions, unresolved, what the representative said, escalations, coverage notes), written on the bot's own LLM key, and `GET /bots/{bot_id}/usage` the final usage report. The service also reports that final usage to the Meeting BaaS API, which bills the providers that ran on Meeting BaaS keys as `voice_pipeline` tokens on the bot (shown under `tokens` and `provider_usage` on `GET /v2/bots/{bot_id}`); providers on your own keys are not billed. Files land under the state dir in `usage/`, `briefings/`, `escalations/` and `owner_messages/`.
 
 ## Remove a bot — `DELETE /bots/{bot_id}`
 

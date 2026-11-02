@@ -45,6 +45,7 @@ from utils.llm_config import (
     missing_llm_provider_credential,
     resolve_llm_provider,
 )
+from utils.provider_usage_report import schedule_provider_usage_report
 from utils.usage_meter import key_sources, load_usage, save_usage, usage_dir
 from utils.mcp_client import split_mcp_runtime_headers
 from config.persona_utils import persona_manager
@@ -1121,6 +1122,11 @@ async def meetingbaas_webhook(request: Request):
                 logger.warning(f"No transcript file found for bot {bot_id}")
 
             usage = _finalize_usage(internal_client_id, bot_id, persona)
+            if usage is not None:
+                # The API bills the voice pipeline on our keys from this report
+                schedule_provider_usage_report(
+                    usage, usage_directory=usage_dir(get_state_dir()), log=logger.info
+                )
             await _send_call_ended(
                 persona,
                 credentials,
