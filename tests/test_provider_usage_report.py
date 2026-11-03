@@ -12,10 +12,13 @@ from utils import provider_usage_report as report_module
 from utils.provider_usage_report import (
     BOT_PROCESS_URL_ENV,
     build_report,
+    claim_path,
     claim_report,
     post_report,
     release_claim,
+    replay_unreported,
     schedule_provider_usage_report,
+    unreported_ledgers,
 )
 
 LEDGER = {
@@ -117,28 +120,28 @@ class PostReportTest(unittest.TestCase):
 
     def test_posts_the_report_and_retries_server_errors(self):
         api = _Api([503, 200])
-        delivered = self._serve(
+        outcome = self._serve(
             api, lambda url: post_report(url, build_report(LEDGER), self.logs.append)
         )
-        self.assertTrue(delivered)
+        self.assertEqual(outcome, "delivered")
         self.assertEqual(len(api.received), 2)
         self.assertEqual(api.received[0]["bot_id"], LEDGER["meetingbaas_bot_id"])
         self.assertTrue(any("billed" in line for line in self.logs))
 
-    def test_a_404_is_not_retried(self):
+    def test_a_404_is_refused_not_retried(self):
         api = _Api([404])
-        delivered = self._serve(
+        outcome = self._serve(
             api, lambda url: post_report(url, build_report(LEDGER), self.logs.append)
         )
-        self.assertFalse(delivered)
+        self.assertEqual(outcome, "refused")
         self.assertEqual(len(api.received), 1)
 
     def test_gives_up_after_the_retries(self):
         api = _Api([500, 500, 500, 500, 500])
-        delivered = self._serve(
+        outcome = self._serve(
             api, lambda url: post_report(url, build_report(LEDGER), self.logs.append)
         )
-        self.assertFalse(delivered)
+        self.assertEqual(outcome, "failed")
         self.assertEqual(len(api.received), 4)
 
     def test_an_unreachable_api_is_not_fatal(self):
@@ -147,7 +150,7 @@ class PostReportTest(unittest.TestCase):
                 "http://127.0.0.1:9", build_report(LEDGER), self.logs.append
             )
 
-        self.assertFalse(asyncio.run(run()))
+        self.assertEqual(asyncio.run(run()), "failed")
         self.assertTrue(any("could not reach" in line for line in self.logs))
 
 
@@ -174,7 +177,7 @@ class ScheduleTest(unittest.TestCase):
         bot_id = LEDGER["meetingbaas_bot_id"]
 
         async def run():
-            posted = mock.AsyncMock(side_effect=[False, True])
+            posted = mock.AsyncMock(side_effect=["failed", "delivered"])
             with (
                 mock.patch.dict(os.environ, {BOT_PROCESS_URL_ENV: "http://api.test/"}),
                 mock.patch.object(report_module, "post_report", posted),
@@ -200,3 +203,91 @@ class ScheduleTest(unittest.TestCase):
         self.assertFalse(claim_report(self.usage_dir, bot_id))
         release_claim(self.usage_dir, bot_id)
         self.assertTrue(claim_report(self.usage_dir, bot_id))
+
+    def test_a_refused_report_keeps_its_claim(self):
+        bot_id = LEDGER["meetingbaas_bot_id"]
+
+        async def run():
+            posted = mock.AsyncMock(return_value="refused")
+            with (
+                mock.patch.dict(os.environ, {BOT_PROCESS_URL_ENV: "http://api.test"}),
+                mock.patch.object(report_module, "post_report", posted),
+            ):
+                task = schedule_provider_usage_report(
+                    LEDGER, usage_directory=self.usage_dir, log=self.logs.append
+                )
+                self.assertFalse(await task)
+
+        asyncio.run(run())
+        # Nothing retries an answer the API will give again
+        self.assertTrue(os.path.exists(claim_path(self.usage_dir, bot_id)))
+
+
+class ReplayTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.usage_dir = os.path.join(self.tmp.name, "usage")
+        os.makedirs(self.usage_dir)
+        self.logs = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, name: str, usage: dict) -> None:
+        with open(os.path.join(self.usage_dir, f"{name}.json"), "w") as handle:
+            json.dump(usage, handle)
+
+    def test_finds_finalised_ledgers_without_a_claim(self):
+        bot_id = LEDGER["meetingbaas_bot_id"]
+        now = LEDGER["ended_at"] + 60
+        self._write(bot_id, LEDGER)  # finalised, never claimed
+        self._write(
+            "client-1", {**LEDGER, "meetingbaas_bot_id": None, "ended_at": None}
+        )
+        self._write(
+            "live-bot", {**LEDGER, "meetingbaas_bot_id": "live-bot", "ended_at": None}
+        )
+        self._write(
+            "old-bot",
+            {**LEDGER, "meetingbaas_bot_id": "old-bot", "ended_at": now - 10 * 86400},
+        )
+        self._write("claimed", {**LEDGER, "meetingbaas_bot_id": "claimed"})
+        claim_report(self.usage_dir, "claimed")
+        with open(os.path.join(self.usage_dir, "broken.json"), "w") as handle:
+            handle.write("{not json")
+
+        found = unreported_ledgers(self.usage_dir, now=now)
+        self.assertEqual([u["meetingbaas_bot_id"] for u in found], [bot_id])
+
+    def test_replays_each_unreported_ledger_once(self):
+        self._write(LEDGER["meetingbaas_bot_id"], LEDGER)
+        self._write("second", {**LEDGER, "meetingbaas_bot_id": "second"})
+
+        async def run():
+            posted = mock.AsyncMock(return_value="delivered")
+            with (
+                mock.patch.dict(os.environ, {BOT_PROCESS_URL_ENV: "http://api.test"}),
+                mock.patch.object(report_module, "post_report", posted),
+                mock.patch.object(
+                    report_module, "REPLAY_MAX_AGE_SECS", 10 * 365 * 86400.0
+                ),
+            ):
+                tasks = replay_unreported(self.usage_dir, log=self.logs.append)
+                self.assertEqual(len(tasks), 2)
+                await asyncio.gather(*tasks)
+                # Delivered ledgers keep their claim: a second pass sends nothing
+                self.assertEqual(
+                    replay_unreported(self.usage_dir, log=self.logs.append), []
+                )
+                return posted.await_count
+
+        self.assertEqual(asyncio.run(run()), 2)
+        self.assertTrue(any("replaying 2" in line for line in self.logs))
+
+    def test_replay_is_quiet_without_an_endpoint(self):
+        self._write(LEDGER["meetingbaas_bot_id"], LEDGER)
+        with mock.patch.dict(os.environ, {BOT_PROCESS_URL_ENV: ""}):
+            self.assertEqual(
+                replay_unreported(self.usage_dir, log=self.logs.append), []
+            )
+        self.assertEqual(self.logs, [])

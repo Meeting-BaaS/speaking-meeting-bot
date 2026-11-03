@@ -1,6 +1,7 @@
 """Main application module for the Speaking Meeting Bot API."""
 
 import argparse
+import asyncio
 import logging
 import os
 import sys
@@ -14,7 +15,9 @@ from fastapi.responses import JSONResponse
 from app.routes import router as app_router
 from app.websockets import websocket_router
 from meetingbaas_pipecat.utils.logger import configure_logger
-from utils.runtime import build_public_base_url, parse_cors_origins
+from utils.runtime import build_public_base_url, get_state_dir, parse_cors_origins
+from utils.provider_usage_report import replay_loop
+from utils.usage_meter import usage_dir
 from utils.ngrok import load_ngrok_urls
 from core.admin_server import start_admin_server_from_env
 from core.drain import is_draining
@@ -103,6 +106,16 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def _serve_rollout_admin() -> None:
         start_admin_server_from_env()
+
+    @app.on_event("startup")
+    async def _replay_unreported_usage() -> None:
+        # Usage ledgers the API could not take at call end are sent again
+        # from here, long after their bots are forgotten.
+        from meetingbaas_pipecat.utils.logger import logger
+
+        asyncio.get_running_loop().create_task(
+            replay_loop(usage_dir(get_state_dir()), log=logger.info)
+        )
 
     # Set the server URL for the OpenAPI schema
     app.openapi_schema = None  # Clear any existing schema
