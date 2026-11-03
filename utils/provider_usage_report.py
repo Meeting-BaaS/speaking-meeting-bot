@@ -7,6 +7,12 @@ bot, so it needs the final ledger: one POST to its in-cluster bot-process
 endpoint when the call is over. The endpoint is idempotent (a bot is billed
 once, later reports of a billed bot are ignored), so retrying is safe.
 
+Delivery is tried a few times when the call ends. A ledger the API did not
+take (it was down, or unreachable) stays on disk without its claim file, and
+the replay loop sends it again later, long after the bot itself is forgotten.
+A report the API refused (an unknown bot, a malformed body) keeps its claim:
+retrying cannot change that answer.
+
 The report only leaves when ``MEETING_BAAS_BOT_PROCESS_URL`` is set, which it
 is in the cluster deployments; a local run keeps its usage files and sends
 nothing.
@@ -16,9 +22,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
+import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import aiohttp
 
@@ -27,6 +35,12 @@ REPORT_PATH = "/provider-usage"
 RETRY_DELAYS_SECS = (1.0, 3.0, 9.0)
 REQUEST_TIMEOUT_SECS = 10.0
 CLAIM_SUFFIX = ".reported"
+# How often finalised ledgers the API never took are sent again, and how old
+# a ledger may be before it is left alone.
+REPLAY_INTERVAL_SECS = 300.0
+REPLAY_MAX_AGE_SECS = 7 * 24 * 3600.0
+
+Delivery = Literal["delivered", "refused", "failed"]
 
 # Ledger fields the API takes, name for name.
 _COUNT_FIELDS = (
@@ -90,11 +104,13 @@ def _timestamp(value: Any) -> float | None:
 
 async def post_report(
     url: str, report: dict[str, Any], log: Callable[[str], None]
-) -> bool:
-    """POST the report, retrying server errors; True once the API took it.
+) -> Delivery:
+    """POST the report, retrying server errors.
 
-    A 404 means the API does not know the bot (nothing to retry); any other
-    client error is a bug on one side and is logged, not retried.
+    Returns "delivered" once the API took it, "refused" when the API answered
+    with a client error (404: the API does not know the bot; anything else is
+    a bug on one side), which retrying cannot change, and "failed" when the
+    API was unreachable or kept answering 5xx: the replay loop tries again.
     """
     endpoint = f"{url}{REPORT_PATH}"
     bot_id = report["bot_id"]
@@ -111,14 +127,14 @@ async def post_report(
                         body = await _json_or_none(response)
                         billing = (body or {}).get("data", {}).get("billing")
                         log(f"[USAGE] reported bot {bot_id} to the API: {billing}")
-                        return True
+                        return "delivered"
                     if response.status < 500:
                         text = (await response.text())[:200]
                         log(
                             f"[USAGE] API refused the usage report for bot {bot_id} "
                             f"({response.status}): {text}"
                         )
-                        return False
+                        return "refused"
                     log(
                         f"[USAGE] API error {response.status} for bot {bot_id}'s "
                         f"usage report (attempt {attempt + 1}/{attempts})"
@@ -130,7 +146,7 @@ async def post_report(
             )
         if attempt < len(RETRY_DELAYS_SECS):
             await asyncio.sleep(RETRY_DELAYS_SECS[attempt])
-    return False
+    return "failed"
 
 
 async def _json_or_none(response: aiohttp.ClientResponse) -> dict[str, Any] | None:
@@ -142,6 +158,12 @@ async def _json_or_none(response: aiohttp.ClientResponse) -> dict[str, Any] | No
 
 
 def claim_path(usage_directory: str, bot_id: str) -> str:
+    """Path of the claim file that marks a bot's report as sent or in flight.
+
+    Args:
+        usage_directory: The ``usage/`` directory under the state dir.
+        bot_id: The MeetingBaas bot id the ledger is filed under.
+    """
     return os.path.join(usage_directory, f"{bot_id}{CLAIM_SUFFIX}")
 
 
@@ -150,7 +172,7 @@ def claim_report(usage_directory: str, bot_id: str) -> bool:
 
     Every end-of-call event (bot left, call ended, failed) finalises the
     ledger again; the first claim reports, the rest are no-ops. The claim is
-    released when the report fails so the next event tries again.
+    released when the API could not be reached so the ledger is sent again.
     """
     os.makedirs(usage_directory, exist_ok=True)
     try:
@@ -166,6 +188,12 @@ def claim_report(usage_directory: str, bot_id: str) -> bool:
 
 
 def release_claim(usage_directory: str, bot_id: str) -> None:
+    """Drop a bot's claim so the next end-of-call event or replay sends again.
+
+    Args:
+        usage_directory: The ``usage/`` directory under the state dir.
+        bot_id: The MeetingBaas bot id the ledger is filed under.
+    """
     with contextlib.suppress(OSError):
         os.remove(claim_path(usage_directory, bot_id))
 
@@ -194,12 +222,80 @@ def schedule_provider_usage_report(
 
     async def _run() -> bool:
         try:
-            delivered = await post_report(url, report, log)
+            outcome = await post_report(url, report, log)
         except Exception as error:  # a bookkeeping error must not go unlogged
             log(f"[USAGE] usage report for bot {bot_id} crashed: {error}")
-            delivered = False
-        if not delivered:
+            outcome = "failed"
+        if outcome == "failed":
             release_claim(usage_directory, bot_id)
-        return delivered
+        return outcome == "delivered"
 
     return asyncio.get_running_loop().create_task(_run())
+
+
+def unreported_ledgers(
+    usage_directory: str, *, now: float | None = None
+) -> list[dict[str, Any]]:
+    """Finalised ledgers in the directory that no delivery has claimed.
+
+    A finalised ledger is filed under its MeetingBaas bot id with ``ended_at``
+    set (see ``_finalize_usage`` in the routes). Ledgers older than
+    ``REPLAY_MAX_AGE_SECS`` are left alone.
+    """
+    now = time.time() if now is None else now
+    found: list[dict[str, Any]] = []
+    try:
+        names = sorted(os.listdir(usage_directory))
+    except OSError:
+        return found
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        bot_id = name[: -len(".json")]
+        if os.path.exists(claim_path(usage_directory, bot_id)):
+            continue
+        try:
+            with open(os.path.join(usage_directory, name)) as handle:
+                usage = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(usage, dict) or usage.get("meetingbaas_bot_id") != bot_id:
+            continue
+        ended_at = _timestamp(usage.get("ended_at"))
+        if ended_at is None or now - ended_at > REPLAY_MAX_AGE_SECS:
+            continue
+        found.append(usage)
+    return found
+
+
+def replay_unreported(
+    usage_directory: str, *, log: Callable[[str], None]
+) -> list[asyncio.Task[bool]]:
+    """Send every finalised ledger the API never took; the tasks started."""
+    if bot_process_url() is None:
+        return []
+    tasks = []
+    for usage in unreported_ledgers(usage_directory):
+        task = schedule_provider_usage_report(
+            usage, usage_directory=usage_directory, log=log
+        )
+        if task is not None:
+            tasks.append(task)
+    if tasks:
+        log(f"[USAGE] replaying {len(tasks)} unreported usage ledger(s)")
+    return tasks
+
+
+async def replay_loop(
+    usage_directory: str,
+    *,
+    log: Callable[[str], None],
+    interval_secs: float = REPLAY_INTERVAL_SECS,
+) -> None:
+    """Run ``replay_unreported`` every ``interval_secs`` until cancelled."""
+    while True:
+        await asyncio.sleep(interval_secs)
+        try:
+            replay_unreported(usage_directory, log=log)
+        except Exception as error:  # the loop must outlive one bad directory read
+            log(f"[USAGE] replay failed: {error}")
