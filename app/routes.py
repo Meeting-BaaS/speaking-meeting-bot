@@ -45,6 +45,7 @@ from utils.llm_config import (
     missing_llm_provider_credential,
     resolve_llm_provider,
 )
+from utils.provider_usage_report import schedule_provider_usage_report
 from utils.usage_meter import key_sources, load_usage, save_usage, usage_dir
 from utils.mcp_client import split_mcp_runtime_headers
 from config.persona_utils import persona_manager
@@ -761,11 +762,16 @@ async def leave_bot(
 
     # 2 + 3. Close the sockets, let the child exit (or make it), forget the bot.
     if client_id:
+        # Shutdown forgets the bot, persona included; the usage report needs it.
+        details = MEETING_DETAILS.get(client_id) or ()
+        persona = details[5] if len(details) > 5 and isinstance(details[5], dict) else {}
         try:
             await shutdown_bot(client_id, reason=ShutdownReason.REMOVED_BY_CALLER)
         except Exception as e:
             success = False
             logger.error(f"Error shutting down bot {client_id}: {e}")
+        # No webhook will do it: once forgotten, the bot fails the webhook gate.
+        _report_usage(client_id, meetingbaas_bot_id, persona)
 
     return {
         "message": "Bot removal request processed",
@@ -944,12 +950,19 @@ async def _poll_bot_admission(
                                     f"Bot {meetingbaas_bot_id} reached terminal status "
                                     f"'{bot_status}' before admission — shutting it down"
                                 )
+                                details = MEETING_DETAILS.get(client_id) or ()
+                                persona = (
+                                    details[5]
+                                    if len(details) > 5 and isinstance(details[5], dict)
+                                    else {}
+                                )
                                 await shutdown_bot(
                                     client_id,
                                     reason=ShutdownReason.with_detail(
                                         ShutdownReason.NEVER_ADMITTED, bot_status
                                     ),
                                 )
+                                _report_usage(client_id, meetingbaas_bot_id, persona)
                                 return
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                     logger.debug(f"Status poll error for {meetingbaas_bot_id}: {e}")
@@ -1120,7 +1133,7 @@ async def meetingbaas_webhook(request: Request):
             elif not transcript_file:
                 logger.warning(f"No transcript file found for bot {bot_id}")
 
-            usage = _finalize_usage(internal_client_id, bot_id, persona)
+            usage = _report_usage(internal_client_id, bot_id, persona)
             await _send_call_ended(
                 persona,
                 credentials,
@@ -1437,6 +1450,25 @@ def _finalize_usage(
             max(0.0, usage["ended_at"] - float(usage.get("started_at") or usage["ended_at"])), 3
         )
     save_usage(directory, bot_id, usage)
+    return usage
+
+
+def _report_usage(
+    internal_client_id: str, bot_id: str | None, persona: Dict[str, Any]
+) -> Dict[str, Any] | None:
+    """Finalise the bot's ledger and send it to the API; the last step of every shutdown.
+
+    Called after ``shutdown_bot`` from each path that ends a bot (the
+    end-of-call webhook, ``DELETE /bots/{id}``, a bot never admitted), so the
+    voice pipeline on our keys is billed whichever way the call ended.
+    """
+    if not bot_id:
+        return None
+    usage = _finalize_usage(internal_client_id, bot_id, persona)
+    if usage is not None:
+        schedule_provider_usage_report(
+            usage, usage_directory=usage_dir(get_state_dir()), log=logger.info
+        )
     return usage
 
 
