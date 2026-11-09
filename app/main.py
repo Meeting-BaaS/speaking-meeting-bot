@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
+from app.customer_webhooks import webhooks as customer_webhooks
 from app.routes import router as app_router
 from app.websockets import websocket_router
 from meetingbaas_pipecat.utils.logger import configure_logger
@@ -130,6 +131,7 @@ def create_app() -> FastAPI:
             version=app.version,
             description=app.description,
             routes=app.routes,
+            webhooks=app.webhooks.routes,
         )
 
         # Ensure we extend, not replace, existing components
@@ -236,6 +238,8 @@ def create_app() -> FastAPI:
     # Include the routers
     app.include_router(app_router)
     app.include_router(websocket_router)
+    # Declared only: the callback_url events, so they appear in the OpenAPI document
+    app.webhooks.include_router(customer_webhooks)
 
     # Add a health endpoint
     # Operational endpoints stay out of the public OpenAPI document (and the

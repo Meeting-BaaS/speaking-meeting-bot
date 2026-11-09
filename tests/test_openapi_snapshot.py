@@ -43,3 +43,29 @@ def test_openapi_snapshot_covers_representative_fields_and_endpoints():
         "/bots/{bot_id}/briefing",
     ):
         assert path in snapshot["paths"], path
+
+
+def test_openapi_snapshot_types_every_response_and_declares_callback_events():
+    snapshot = json.loads((ROOT / "speaking-bot-openapi.json").read_text())
+    schemas = snapshot["components"]["schemas"]
+
+    leave = snapshot["paths"]["/bots/{bot_id}"]["delete"]["responses"]["200"]
+    assert leave["content"]["application/json"]["schema"]["$ref"].endswith("/LeaveResponse")
+    escalations = snapshot["paths"]["/bots/{bot_id}/escalations"]["get"]["responses"]["200"]
+    assert escalations["content"]["application/json"]["schema"]["items"]["$ref"].endswith(
+        "/Escalation"
+    )
+
+    expected = {
+        "speaking_bot.utterance": "UtteranceEvent",
+        "speaking_bot.escalation": "EscalationEvent",
+        "speaking_bot.owner_message_delivered": "OwnerMessageDeliveredEvent",
+        "speaking_bot.ended": "EndedEvent",
+    }
+    assert set(snapshot["webhooks"]) == set(expected)
+    for event, model in expected.items():
+        operation = snapshot["webhooks"][event]["post"]
+        body = operation["requestBody"]["content"]["application/json"]["schema"]
+        assert body["$ref"].endswith(f"/{model}"), event
+        assert "x-speaking-bot-signature" in operation["description"], event
+        assert schemas[model]["properties"]["event"]["const"] == event
