@@ -89,9 +89,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Leave Bot Bots  Bot Id  Delete"
+                  "$ref": "#/components/schemas/LeaveResponse"
                 }
               }
             }
@@ -246,8 +244,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/Escalation"
                   },
                   "title": "Response List Escalations Bots  Bot Id  Escalations Get"
                 }
@@ -413,6 +410,168 @@
           },
           "404": {
             "description": "No briefing for that bot (yet)"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {
+    "speaking_bot.utterance": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Bot utterance",
+        "description": "The bot finished saying something.\n\nOne event per spoken turn, including the entry message and anything\nrelayed from the owner. `data.text` is what went to text-to-speech.\n\nDelivered as an HTTP POST to the bot's `callback_url`, with the event name in the `x-speaking-bot-event` header and, when the bot was created with a `callback_secret`, `x-speaking-bot-signature: sha256=<hex>`: the HMAC-SHA256 of the exact request body with that secret. Answer with any 2xx. Network errors and 5xx are retried three times (after 1, 3 and 9 seconds); a redirect counts as a failed delivery and is not followed.",
+        "operationId": "speaking_bot_utterance",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UtteranceEvent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Received. Any 2xx counts as delivered.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "speaking_bot.escalation": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Escalation raised",
+        "description": "A representative bot handed a decision back to its owner.\n\nFires the moment the bot calls its escalate tool, before anyone has\nanswered. Reply with `POST /bots/{bot_id}/escalations/{escalation_id}/response`\nand the bot relays the answer to the meeting.\n\nDelivered as an HTTP POST to the bot's `callback_url`, with the event name in the `x-speaking-bot-event` header and, when the bot was created with a `callback_secret`, `x-speaking-bot-signature: sha256=<hex>`: the HMAC-SHA256 of the exact request body with that secret. Answer with any 2xx. Network errors and 5xx are retried three times (after 1, 3 and 9 seconds); a redirect counts as a failed delivery and is not followed.",
+        "operationId": "speaking_bot_escalation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EscalationEvent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Received. Any 2xx counts as delivered.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "speaking_bot.owner_message_delivered": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Owner message delivered",
+        "description": "The bot relayed an owner message or an escalation answer to the meeting.\n\n`data.message_id` matches the `message_id` returned when it was queued.\n\nDelivered as an HTTP POST to the bot's `callback_url`, with the event name in the `x-speaking-bot-event` header and, when the bot was created with a `callback_secret`, `x-speaking-bot-signature: sha256=<hex>`: the HMAC-SHA256 of the exact request body with that secret. Answer with any 2xx. Network errors and 5xx are retried three times (after 1, 3 and 9 seconds); a redirect counts as a failed delivery and is not followed.",
+        "operationId": "speaking_bot_owner_message_delivered",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerMessageDeliveredEvent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Received. Any 2xx counts as delivered.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "speaking_bot.ended": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Bot ended",
+        "description": "The bot has left the meeting; nothing follows this event.\n\nCarries the final usage report, the briefing when one was requested and\nevery escalation of the call with its answer. Unlike the others this one\nis awaited before the bot's process exits, so it is delivered even when\nthe call ends abruptly.\n\nDelivered as an HTTP POST to the bot's `callback_url`, with the event name in the `x-speaking-bot-event` header and, when the bot was created with a `callback_secret`, `x-speaking-bot-signature: sha256=<hex>`: the HMAC-SHA256 of the exact request body with that secret. Answer with any 2xx. Network errors and 5xx are retried three times (after 1, 3 and 9 seconds); a redirect counts as a failed delivery and is not followed.",
+        "operationId": "speaking_bot_ended",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EndedEvent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Received. Any 2xx counts as delivered.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -1196,6 +1355,268 @@
         "title": "BriefingReport",
         "description": "The post-meeting briefing for the bot's owner."
       },
+      "EndedEvent": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "title": "Event Id",
+            "description": "Unique per delivery; use it to drop duplicates"
+          },
+          "bot_id": {
+            "type": "string",
+            "title": "Bot Id",
+            "description": "The MeetingBaas bot ID returned by POST /bots"
+          },
+          "client_id": {
+            "type": "string",
+            "title": "Client Id",
+            "description": "The server's internal ID for the bot"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "When the event was produced, ISO 8601 with offset"
+          },
+          "event": {
+            "type": "string",
+            "const": "speaking_bot.ended",
+            "title": "Event"
+          },
+          "data": {
+            "$ref": "#/components/schemas/EndedEventData"
+          }
+        },
+        "type": "object",
+        "required": [
+          "event_id",
+          "bot_id",
+          "client_id",
+          "created_at",
+          "event",
+          "data"
+        ],
+        "title": "EndedEvent",
+        "description": "``speaking_bot.ended``: the bot has left; the last event for this bot."
+      },
+      "EndedEventData": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Why the bot stopped: 'call ended (...)', 'removed by caller', 'bot failed (...)' or 'never admitted'"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The final usage report, when one was recorded"
+          },
+          "briefing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BriefingReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The briefing, when the bot was asked for one"
+          },
+          "escalations": {
+            "items": {
+              "$ref": "#/components/schemas/Escalation"
+            },
+            "type": "array",
+            "title": "Escalations",
+            "description": "Every escalation of the call, with answers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "reason"
+        ],
+        "title": "EndedEventData"
+      },
+      "Escalation": {
+        "properties": {
+          "escalation_id": {
+            "type": "string",
+            "title": "Escalation Id"
+          },
+          "question": {
+            "type": "string",
+            "title": "Question",
+            "description": "The exact decision asked for, with amounts, names and dates"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "spending",
+              "commitment",
+              "approval",
+              "scheduling",
+              "information",
+              "other"
+            ],
+            "title": "Category"
+          },
+          "context": {
+            "type": "string",
+            "title": "Context",
+            "description": "What led to the question and who asked, in one or two sentences",
+            "default": ""
+          },
+          "asked_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asked By",
+            "description": "The participant who asked, when known"
+          },
+          "number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Number",
+            "description": "1-based position among this bot's escalations"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At",
+            "description": "Unix timestamp of when the bot raised it"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "answered"
+            ],
+            "title": "Status",
+            "default": "pending"
+          },
+          "response": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response",
+            "description": "The owner's answer, once posted"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "approved",
+                  "declined",
+                  "deferred",
+                  "info"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision",
+            "description": "How the owner decided, when it was a yes/no question"
+          },
+          "answered_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answered At",
+            "description": "Unix timestamp of the owner's answer"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "escalation_id",
+          "question",
+          "category",
+          "created_at"
+        ],
+        "title": "Escalation",
+        "description": "A decision the bot handed back to its owner, with the answer once one came.\n\nReturned by ``GET /bots/{bot_id}/escalations``, carried by the\n``speaking_bot.escalation`` event when raised, and listed again in\n``speaking_bot.ended``."
+      },
+      "EscalationEvent": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "title": "Event Id",
+            "description": "Unique per delivery; use it to drop duplicates"
+          },
+          "bot_id": {
+            "type": "string",
+            "title": "Bot Id",
+            "description": "The MeetingBaas bot ID returned by POST /bots"
+          },
+          "client_id": {
+            "type": "string",
+            "title": "Client Id",
+            "description": "The server's internal ID for the bot"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "When the event was produced, ISO 8601 with offset"
+          },
+          "event": {
+            "type": "string",
+            "const": "speaking_bot.escalation",
+            "title": "Event"
+          },
+          "data": {
+            "$ref": "#/components/schemas/Escalation"
+          }
+        },
+        "type": "object",
+        "required": [
+          "event_id",
+          "bot_id",
+          "client_id",
+          "created_at",
+          "event",
+          "data"
+        ],
+        "title": "EscalationEvent",
+        "description": "``speaking_bot.escalation``: a representative bot handed a decision to its owner."
+      },
       "EscalationResponseRequest": {
         "properties": {
           "response": {
@@ -1278,6 +1699,43 @@
         "type": "object",
         "title": "LeaveBotRequest",
         "description": "Request model for making a bot leave a meeting"
+      },
+      "LeaveResponse": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "What was done"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "success",
+              "partial"
+            ],
+            "title": "Status",
+            "description": "'partial' when MeetingBaas refused the leave but the local pipeline was still shut down"
+          },
+          "bot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bot Id",
+            "description": "The MeetingBaas bot ID that was removed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message",
+          "status"
+        ],
+        "title": "LeaveResponse",
+        "description": "What ``DELETE /bots/{bot_id}`` answers once the removal was processed."
       },
       "MCPConfig": {
         "properties": {
@@ -1434,6 +1892,85 @@
         ],
         "title": "MCPServerConfig",
         "description": "MCP server metadata and optional live connection details."
+      },
+      "OwnerMessageDeliveredEvent": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "title": "Event Id",
+            "description": "Unique per delivery; use it to drop duplicates"
+          },
+          "bot_id": {
+            "type": "string",
+            "title": "Bot Id",
+            "description": "The MeetingBaas bot ID returned by POST /bots"
+          },
+          "client_id": {
+            "type": "string",
+            "title": "Client Id",
+            "description": "The server's internal ID for the bot"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "When the event was produced, ISO 8601 with offset"
+          },
+          "event": {
+            "type": "string",
+            "const": "speaking_bot.owner_message_delivered",
+            "title": "Event"
+          },
+          "data": {
+            "$ref": "#/components/schemas/OwnerMessageDeliveredEventData"
+          }
+        },
+        "type": "object",
+        "required": [
+          "event_id",
+          "bot_id",
+          "client_id",
+          "created_at",
+          "event",
+          "data"
+        ],
+        "title": "OwnerMessageDeliveredEvent",
+        "description": "``speaking_bot.owner_message_delivered``: the bot relayed an owner message or escalation answer."
+      },
+      "OwnerMessageDeliveredEventData": {
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "title": "Message Id",
+            "description": "The message_id returned when it was queued"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "owner_message",
+              "escalation_response"
+            ],
+            "title": "Type"
+          },
+          "escalation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Escalation Id",
+            "description": "The escalation this answered, for escalation_response"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message_id",
+          "type"
+        ],
+        "title": "OwnerMessageDeliveredEventData"
       },
       "OwnerMessageRequest": {
         "properties": {
@@ -1802,6 +2339,76 @@
         ],
         "title": "UsageReport",
         "description": "What one bot consumed on each provider, from Pipecat's usage metrics."
+      },
+      "UtteranceEvent": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "title": "Event Id",
+            "description": "Unique per delivery; use it to drop duplicates"
+          },
+          "bot_id": {
+            "type": "string",
+            "title": "Bot Id",
+            "description": "The MeetingBaas bot ID returned by POST /bots"
+          },
+          "client_id": {
+            "type": "string",
+            "title": "Client Id",
+            "description": "The server's internal ID for the bot"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "When the event was produced, ISO 8601 with offset"
+          },
+          "event": {
+            "type": "string",
+            "const": "speaking_bot.utterance",
+            "title": "Event"
+          },
+          "data": {
+            "$ref": "#/components/schemas/UtteranceEventData"
+          }
+        },
+        "type": "object",
+        "required": [
+          "event_id",
+          "bot_id",
+          "client_id",
+          "created_at",
+          "event",
+          "data"
+        ],
+        "title": "UtteranceEvent",
+        "description": "``speaking_bot.utterance``: the bot finished saying something."
+      },
+      "UtteranceEventData": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "Text",
+            "description": "What the bot said, as sent to text-to-speech"
+          },
+          "started_at": {
+            "type": "number",
+            "title": "Started At",
+            "description": "Unix timestamp when the bot started speaking"
+          },
+          "ended_at": {
+            "type": "number",
+            "title": "Ended At",
+            "description": "Unix timestamp when it finished"
+          }
+        },
+        "type": "object",
+        "required": [
+          "text",
+          "started_at",
+          "ended_at"
+        ],
+        "title": "UtteranceEventData"
       },
       "ValidationError": {
         "properties": {

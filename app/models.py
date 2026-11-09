@@ -706,9 +706,14 @@ class JoinResponse(BaseModel):
 
 
 class LeaveResponse(BaseModel):
-    """Response model for a bot leaving a meeting"""
+    """What ``DELETE /bots/{bot_id}`` answers once the removal was processed."""
 
-    ok: bool
+    message: str = Field(..., description="What was done")
+    status: Literal["success", "partial"] = Field(
+        ...,
+        description="'partial' when MeetingBaas refused the leave but the local pipeline was still shut down",
+    )
+    bot_id: str | None = Field(None, description="The MeetingBaas bot ID that was removed")
 
 
 class OwnerMessageRequest(BaseModel):
@@ -738,6 +743,35 @@ class AcceptedResponse(BaseModel):
 
     ok: bool = True
     message_id: str
+
+
+# Mirrors utils.authority.ESCALATION_CATEGORIES, the enum the escalate tool offers the model.
+EscalationCategory = Literal[
+    "spending", "commitment", "approval", "scheduling", "information", "other"
+]
+
+
+class Escalation(BaseModel):
+    """A decision the bot handed back to its owner, with the answer once one came.
+
+    Returned by ``GET /bots/{bot_id}/escalations``, carried by the
+    ``speaking_bot.escalation`` event when raised, and listed again in
+    ``speaking_bot.ended``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    escalation_id: str
+    question: str = Field(..., description="The exact decision asked for, with amounts, names and dates")
+    category: EscalationCategory
+    context: str = Field("", description="What led to the question and who asked, in one or two sentences")
+    asked_by: str | None = Field(None, description="The participant who asked, when known")
+    number: int | None = Field(None, description="1-based position among this bot's escalations")
+    created_at: float = Field(..., description="Unix timestamp of when the bot raised it")
+    status: Literal["pending", "answered"] = "pending"
+    response: str | None = Field(None, description="The owner's answer, once posted")
+    decision: EscalationDecision | None = Field(None, description="How the owner decided, when it was a yes/no question")
+    answered_at: float | None = Field(None, description="Unix timestamp of the owner's answer")
 
 
 class UsageReport(BaseModel):
@@ -800,6 +834,73 @@ class BriefingReport(BaseModel):
     generated_at: float | None = None
     llm_provider: str | None = None
     llm_model: str | None = None
+
+
+class CustomerEventEnvelope(BaseModel):
+    """The envelope around every event POSTed to a bot's ``callback_url``.
+
+    Each delivery carries the event name in the ``x-speaking-bot-event``
+    header and, when the bot was created with a ``callback_secret``, an
+    ``x-speaking-bot-signature`` header holding ``sha256=<hex>``: the HMAC of
+    the exact request body with that secret. Deliveries retry on network
+    errors and 5xx; a 3xx is treated as a failed delivery, never followed.
+    """
+
+    event_id: str = Field(..., description="Unique per delivery; use it to drop duplicates")
+    bot_id: str = Field(..., description="The MeetingBaas bot ID returned by POST /bots")
+    client_id: str = Field(..., description="The server's internal ID for the bot")
+    created_at: datetime = Field(..., description="When the event was produced, ISO 8601 with offset")
+
+
+class UtteranceEventData(BaseModel):
+    text: str = Field(..., description="What the bot said, as sent to text-to-speech")
+    started_at: float = Field(..., description="Unix timestamp when the bot started speaking")
+    ended_at: float = Field(..., description="Unix timestamp when it finished")
+
+
+class UtteranceEvent(CustomerEventEnvelope):
+    """``speaking_bot.utterance``: the bot finished saying something."""
+
+    event: Literal["speaking_bot.utterance"]
+    data: UtteranceEventData
+
+
+class EscalationEvent(CustomerEventEnvelope):
+    """``speaking_bot.escalation``: a representative bot handed a decision to its owner."""
+
+    event: Literal["speaking_bot.escalation"]
+    data: Escalation
+
+
+class OwnerMessageDeliveredEventData(BaseModel):
+    message_id: str = Field(..., description="The message_id returned when it was queued")
+    type: Literal["owner_message", "escalation_response"]
+    escalation_id: str | None = Field(None, description="The escalation this answered, for escalation_response")
+
+
+class OwnerMessageDeliveredEvent(CustomerEventEnvelope):
+    """``speaking_bot.owner_message_delivered``: the bot relayed an owner message or escalation answer."""
+
+    event: Literal["speaking_bot.owner_message_delivered"]
+    data: OwnerMessageDeliveredEventData
+
+
+class EndedEventData(BaseModel):
+    status: Literal["completed", "failed"]
+    reason: str = Field(
+        ...,
+        description="Why the bot stopped: 'call ended (...)', 'removed by caller', 'bot failed (...)' or 'never admitted'",
+    )
+    usage: UsageReport | None = Field(None, description="The final usage report, when one was recorded")
+    briefing: BriefingReport | None = Field(None, description="The briefing, when the bot was asked for one")
+    escalations: list[Escalation] = Field(default_factory=list, description="Every escalation of the call, with answers")
+
+
+class EndedEvent(CustomerEventEnvelope):
+    """``speaking_bot.ended``: the bot has left; the last event for this bot."""
+
+    event: Literal["speaking_bot.ended"]
+    data: EndedEventData
 
 
 class LeaveBotRequest(BaseModel):
