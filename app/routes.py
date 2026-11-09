@@ -18,9 +18,11 @@ from app.models import (
     AcceptedResponse,
     BotRequest,
     BriefingReport,
+    Escalation,
     EscalationResponseRequest,
     JoinResponse,
     LeaveBotRequest,
+    LeaveResponse,
     OwnerMessageRequest,
     PersonaImageRequest,
     PersonaImageResponse,
@@ -681,7 +683,7 @@ async def join_meeting(request: BotRequest, client_request: Request):
 @router.delete(
     "/bots/{bot_id}",
     tags=["bots"],
-    response_model=Dict[str, Any],
+    response_model=LeaveResponse,
     responses={
         200: {"description": "Bot successfully removed from meeting"},
         400: {"description": "Bad request - Missing required fields or identifiers"},
@@ -1230,7 +1232,7 @@ async def send_owner_message(bot_id: str, request: OwnerMessageRequest, client_r
 @router.get(
     "/bots/{bot_id}/escalations",
     tags=["bots"],
-    response_model=list[dict[str, Any]],
+    response_model=list[Escalation],
     responses={404: {"description": "No live bot with that ID"}},
 )
 async def list_escalations(bot_id: str, client_request: Request):
